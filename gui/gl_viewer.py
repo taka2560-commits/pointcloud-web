@@ -807,8 +807,9 @@ class PointCloudViewer(QOpenGLWidget):
         elif self.selection_mode and self.selection_shape == self.SELECT_POLYGON:
             self.update()
         elif self.is_rotating:
-            self.yaw += dx * 0.5
-            self.pitch = max(-89.9, min(89.9, self.pitch - dy * 0.5))
+            # 左クリック視点回転操作の逆転 (インバート)
+            self.yaw -= dx * 0.5
+            self.pitch = max(-89.9, min(89.9, self.pitch + dy * 0.5))
             self.update()
         elif self.is_panning:
             # 見ている画面に対するパン平行移動
