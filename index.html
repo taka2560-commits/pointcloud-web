@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D点群エディタ & ノイズ除去ツール (Web版)</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Three.js & OrbitControls (CDN ES Modules) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <!-- 3Dレンダリング用コンテナ -->
+  <div id="canvas-container"></div>
+
+  <!-- 矩形選択用のラバーバンド枠線 -->
+  <div id="selection-box"></div>
+
+  <!-- 画面上部 ナビゲーションバー -->
+  <header class="top-nav">
+    <div class="nav-title">
+      <span>🌐</span> 3D点群エディタ
+    </div>
+    <div class="badge" id="point-count-badge">点数: 0 点</div>
+    <div class="badge" id="status-badge" style="background: rgba(34, 197, 94, 0.15); color: #4ade80;">待機中</div>
+  </header>
+
+  <!-- 左側 操作サイドバー -->
+  <aside class="sidebar">
+    <!-- 1. ファイル入力 & サンプル -->
+    <section class="panel-section">
+      <div class="panel-title">点群データ読み込み</div>
+      <div class="drop-zone" id="drop-zone">
+        <strong>📂 ファイルを選択 / ドロップ</strong>
+        <p>PLY, XYZ, PTS, CSV 対応</p>
+        <input type="file" id="file-input" accept=".ply,.xyz,.pts,.csv,.txt" style="display: none;">
+      </div>
+      <button class="btn btn-primary" id="btn-load-sample">✨ サンプル点群を生成して表示</button>
+    </section>
+
+    <!-- 2. カメラ・視点操作 -->
+    <section class="panel-section">
+      <div class="panel-title">カメラ・視点操作</div>
+      <button class="btn btn-primary" id="btn-fit-view" style="width: 100%;">🎯 全体表示 (Fit to View)</button>
+      <div class="btn-group">
+        <button class="btn" id="btn-view-iso" title="等角視点">等角</button>
+        <button class="btn" id="btn-view-top" title="真上から">上面</button>
+        <button class="btn" id="btn-view-front" title="正面から">正面</button>
+        <button class="btn" id="btn-view-side" title="右側面から">側面</button>
+      </div>
+    </section>
+
+    <!-- 3. 表示設定 -->
+    <section class="panel-section">
+      <div class="panel-title">表示・配色設定</div>
+      <div class="control-row">
+        <label class="control-label">配色モード</label>
+        <select id="select-color-mode">
+          <option value="height">高さ (Z座標) グラデーション</option>
+          <option value="rgb">元のRGBカラー</option>
+          <option value="solid">単色 (シアン)</option>
+        </select>
+      </div>
+      <div class="control-row">
+        <div class="control-label">
+          <span>点サイズ</span>
+          <span id="label-point-size">3.0 px</span>
+        </div>
+        <input type="range" id="slider-point-size" min="1" max="15" step="0.5" value="3.0">
+      </div>
+    </section>
+
+    <!-- 4. 手動ノイズ除去 -->
+    <section class="panel-section">
+      <div class="panel-title">手動ノイズ除去</div>
+      <button class="btn" id="btn-toggle-select" style="width: 100%;">
+        🔲 矩形選択モード: OFF
+      </button>
+      <div class="btn-group-2">
+        <button class="btn btn-danger" id="btn-delete-selected">🗑️ 選択点を削除</button>
+        <button class="btn" id="btn-clear-selection">解除</button>
+      </div>
+      <div class="btn-group-2">
+        <button class="btn" id="btn-undo" disabled>↩️ 元に戻す (Ctrl+Z)</button>
+        <button class="btn" id="btn-redo" disabled>↪️ やり直し (Ctrl+Y)</button>
+      </div>
+      <p style="font-size: 11px; color: #64748b; line-height: 1.4;">
+        ※選択モードをONにして画面上をドラッグすると、四角く囲んだ点が赤くハイライトされ、Deleteキーで消去できます。
+      </p>
+    </section>
+
+    <!-- 5. 自動ノイズ除去 (SOR) -->
+    <section class="panel-section">
+      <div class="panel-title">自動ノイズ除去 (SOR)</div>
+      <div class="control-row">
+        <div class="control-label">
+          <span>近傍探索点数 (k)</span>
+          <span id="label-sor-k">20</span>
+        </div>
+        <input type="range" id="slider-sor-k" min="5" max="50" value="20">
+      </div>
+      <div class="control-row">
+        <div class="control-label">
+          <span>標準偏差倍率</span>
+          <span id="label-sor-std">2.0</span>
+        </div>
+        <input type="range" id="slider-sor-std" min="0.5" max="4.0" step="0.1" value="2.0">
+      </div>
+      <button class="btn btn-success" id="btn-run-sor" style="width: 100%;">⚡ 自動ノイズ除去を実行</button>
+    </section>
+
+    <!-- 6. 保存・エクスポート -->
+    <section class="panel-section" style="border-bottom: none;">
+      <div class="panel-title">エクスポート</div>
+      <button class="btn btn-primary" id="btn-export-ply" style="width: 100%;">💾 編集後データをダウンロード (PLY)</button>
+    </section>
+  </aside>
+
+  <!-- 画面下部 シークバー & ガイド -->
+  <footer class="bottom-bar">
+    <div class="seek-container">
+      <span style="font-size: 12px; font-weight: 600; white-space: nowrap;">📐 高さ (Z) シーク断面:</span>
+      <input type="range" id="slider-seek-min-z" style="flex: 1;" title="下限Z">
+      <input type="range" id="slider-seek-max-z" style="flex: 1;" title="上限Z">
+      <button class="btn" id="btn-reset-seek" style="padding: 4px 10px; font-size: 11px;">全域表示</button>
+    </div>
+    <div class="help-text">
+      操作方法: [左ドラッグ] 360度回転 | [右/中ドラッグ] 平行移動(パン) | [ホイール] ズーム | [Delete] 選択削除
+    </div>
+  </footer>
+
+  <!-- ローディングオーバーレイ -->
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text" style="font-size: 14px; font-weight: 600; color: #38bdf8;">点群データを処理中...</div>
+  </div>
+
+  <!-- アプリケーション メインスクリプト -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>
