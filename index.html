@@ -42,7 +42,20 @@
         <p>PLY, XYZ, PTS, CSV 対応</p>
         <input type="file" id="file-input" accept=".ply,.xyz,.pts,.csv,.txt" style="display: none;">
       </div>
-      <button class="btn btn-primary" id="btn-load-sample">✨ サンプル点群を生成して表示</button>
+      <div class="control-row" style="margin-top: 4px;">
+        <div class="control-label">
+          <span>大容量対応: 最大描画点数</span>
+          <span id="label-point-budget">100万点 (推奨)</span>
+        </div>
+        <select id="select-point-budget">
+          <option value="500000">50万点 (超高速・省メモリ)</option>
+          <option value="1000000" selected>100万点 (標準・推奨)</option>
+          <option value="2000000">200万点 (高精細)</option>
+          <option value="5000000">500万点 (ハイスペックPC向)</option>
+          <option value="0">無制限 (全点・小容量データ向)</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="btn-load-sample" style="margin-top: 6px;">✨ サンプル点群を生成して表示</button>
     </section>
 
     <!-- 2. カメラ・視点操作 -->
@@ -259,10 +272,14 @@
     </div>
   </div>
 
-  <!-- ローディングオーバーレイ -->
+  <!-- ローディングオーバーレイ (大容量プログレスバー対応) -->
   <div id="loading-overlay">
     <div class="spinner"></div>
-    <div id="loading-text" style="font-size: 14px; font-weight: 600; color: #38bdf8;">点群データを処理中...</div>
+    <div id="loading-text" style="font-size: 14px; font-weight: 700; color: #38bdf8;">点群データを処理中...</div>
+    <div style="width: 280px; background: #334155; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 8px;">
+      <div id="loading-bar-fill" style="width: 0%; height: 100%; background: linear-gradient(90deg, #38bdf8, #0ea5e9); transition: width 0.15s ease;"></div>
+    </div>
+    <div id="loading-subtext" style="font-size: 12px; color: #94a3b8;">大容量ストリーミング解析中...</div>
   </div>
 
   <!-- アプリケーション メインスクリプト -->

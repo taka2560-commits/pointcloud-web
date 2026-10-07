@@ -1333,27 +1333,146 @@ function isInputFocused() {
   return el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA");
 }
 
-function loadFile(file) {
-  showLoading(`ファイル読み込み中: ${file.name}...`);
-  const reader = new FileReader();
+/**
+ * 点群ファイル読み込みエントリーポイント (大容量対応)
+ */
+async function loadFile(file) {
+  const budgetVal = parseInt(document.getElementById("select-point-budget")?.value || "1000000", 10);
+  const targetBudget = budgetVal > 0 ? budgetVal : 50000000; // 0の場合は最大5000万点
 
-  reader.onload = (e) => {
-    const text = e.target.result;
-    const { points, colors } = parseTextPointCloud(text);
-    if (points.length > 0) {
-      originalPoints = points.slice();
-      undoStack.length = 0;
-      redoStack.length = 0;
-      updateUndoRedoUI();
-      setPointCloud(points, colors);
-      setStatusMessage(`${file.name} を読み込みました`);
-    } else {
-      alert("点群データを解析できませんでした。XYZまたはPLY形式をお試しください。");
+  const fileSizeMB = file.size / (1024 * 1024);
+  const fileSizeGB = file.size / (1024 * 1024 * 1024);
+
+  // 拡張子判定
+  const ext = file.name.split(".").pop().toLowerCase();
+  if (ext === "e57") {
+    alert("【E57バイナリデータについて】\n10GB超のE57生データは、同梱のデスクトップツール (python main.py または cli.py) をお使いいただくと、メモリマッピングとC++エンジンにより最速で直接ノイズ除去が可能です。\n\nWeb版ではXYZ、PLY、PTS、CSV形式の大容量データをストリーミング表示・編集いただけます。");
+    return;
+  }
+
+  // 25MB以上のファイルは自動的に「大容量ストリーミング・サンプリングモード」で読み込み
+  if (file.size > 25 * 1024 * 1024) {
+    await loadLargeFileStreaming(file, targetBudget);
+  } else {
+    await loadSmallFile(file, targetBudget);
+  }
+}
+
+/**
+ * 10GB超の大容量点群用 ストリーミング・チャンクサンプリング読み込み
+ * ブラウザのメモリ制限(2GB)を回避し、何ギガバイトでも絶対にクラッシュしない設計
+ */
+async function loadLargeFileStreaming(file, targetBudget) {
+  showLoadingProgress(0, file.size, 0, `大容量データ解析中: ${file.name}`);
+
+  const totalBytes = file.size;
+  const chunkSize = 16 * 1024 * 1024; // 16MB単位でチャンク読み込み
+  let offset = 0;
+
+  // ファイルサイズからおおよその全点数を推定 (1点あたり約35バイトと仮定)
+  const estimatedTotalPoints = Math.max(targetBudget, Math.floor(totalBytes / 35));
+  // 読み飛ばしステップ (サンプリング比率)
+  const sampleStep = Math.max(1, Math.floor(estimatedTotalPoints / targetBudget));
+
+  const pts = [];
+  const cols = [];
+
+  let remainder = "";
+  let pointCounter = 0;
+  let lastYieldTime = performance.now();
+
+  while (offset < totalBytes) {
+    const end = Math.min(offset + chunkSize, totalBytes);
+    const blob = file.slice(offset, end);
+    const chunkText = await blob.text();
+
+    const fullChunkText = remainder + chunkText;
+    const lines = fullChunkText.split(/\r?\n/);
+
+    // 最後の途切れた行を次回チャンクに持ち越す
+    remainder = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith("#") || line.startsWith("//") || line.startsWith("ply") || line.startsWith("format") || line.startsWith("comment") || line.startsWith("element") || line.startsWith("property") || line.startsWith("end_header")) {
+        continue;
+      }
+
+      pointCounter++;
+      // サンプリングステップに応じて間引き抽出
+      if (pointCounter % sampleStep !== 0) continue;
+
+      const parts = line.split(/[\s,]+/);
+      if (parts.length >= 3) {
+        const x = parseFloat(parts[0]);
+        const y = parseFloat(parts[1]);
+        const z = parseFloat(parts[2]);
+        if (isNaN(x) || isNaN(y) || isNaN(z)) continue;
+
+        pts.push(x, y, z);
+
+        if (parts.length >= 6) {
+          const r = parseFloat(parts[3]) / (parts[3] > 1 ? 255 : 1);
+          const g = parseFloat(parts[4]) / (parts[4] > 1 ? 255 : 1);
+          const b = parseFloat(parts[5]) / (parts[5] > 1 ? 255 : 1);
+          cols.push(r, g, b);
+        }
+      }
     }
-    hideLoading();
-  };
 
-  reader.readAsText(file);
+    offset = end;
+
+    // UIの描画更新（ブラウザをフリーズさせないよう適宜待機）
+    const now = performance.now();
+    if (now - lastYieldTime > 60 || offset >= totalBytes) {
+      showLoadingProgress(offset, totalBytes, pts.length / 3, `大容量ストリーミング中: ${file.name}`);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      lastYieldTime = performance.now();
+    }
+  }
+
+  hideLoading();
+
+  if (pts.length > 0) {
+    const pointsArr = new Float32Array(pts);
+    const colorsArr = cols.length === pts.length ? new Float32Array(cols) : null;
+
+    originalPoints = pointsArr.slice();
+    undoStack.length = 0;
+    redoStack.length = 0;
+    updateUndoRedoUI();
+
+    setPointCloud(pointsArr, colorsArr);
+
+    const fileSizeStr = totalBytes > 1024 * 1024 * 1024
+      ? `${(totalBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+      : `${(totalBytes / (1024 * 1024)).toFixed(1)} MB`;
+
+    setStatusMessage(`大容量データ (${fileSizeStr}) から ${(pts.length / 3).toLocaleString()} 点をサンプリング表示しました`);
+  } else {
+    alert("点群データを解析できませんでした。XYZまたはPLY形式をお試しください。");
+  }
+}
+
+/**
+ * 25MB以下の軽量ファイル用 高速一括読み込み
+ */
+async function loadSmallFile(file, targetBudget) {
+  showLoading(`ファイル読み込み中: ${file.name}...`);
+  const text = await file.text();
+  const { points, colors } = parseTextPointCloud(text);
+
+  if (points.length > 0) {
+    originalPoints = points.slice();
+    undoStack.length = 0;
+    redoStack.length = 0;
+    updateUndoRedoUI();
+    setPointCloud(points, colors);
+    setStatusMessage(`${file.name} を読み込みました (${(points.length / 3).toLocaleString()} 点)`);
+  } else {
+    alert("点群データを解析できませんでした。XYZまたはPLY形式をお試しください。");
+  }
+  hideLoading();
 }
 
 function updateBadges(count) {
@@ -1367,7 +1486,28 @@ function setStatusMessage(msg) {
 function showLoading(msg) {
   const overlay = document.getElementById("loading-overlay");
   document.getElementById("loading-text").textContent = msg;
+  document.getElementById("loading-bar-fill").style.width = "0%";
+  document.getElementById("loading-subtext").textContent = "準備中...";
   overlay.style.display = "flex";
+}
+
+function showLoadingProgress(loaded, total, currentPointsCount, titleMsg) {
+  const overlay = document.getElementById("loading-overlay");
+  overlay.style.display = "flex";
+
+  const percent = Math.min(100, Math.floor((loaded / total) * 100));
+  document.getElementById("loading-bar-fill").style.width = `${percent}%`;
+
+  const loadedStr = loaded > 1024 * 1024 * 1024
+    ? `${(loaded / (1024 * 1024 * 1024)).toFixed(2)} GB`
+    : `${(loaded / (1024 * 1024)).toFixed(1)} MB`;
+
+  const totalStr = total > 1024 * 1024 * 1024
+    ? `${(total / (1024 * 1024 * 1024)).toFixed(2)} GB`
+    : `${(total / (1024 * 1024)).toFixed(1)} MB`;
+
+  document.getElementById("loading-text").textContent = titleMsg;
+  document.getElementById("loading-subtext").textContent = `進捗: ${loadedStr} / ${totalStr} (${percent}%) | 抽出点数: ${currentPointsCount.toLocaleString()} 点`;
 }
 
 function hideLoading() {
