@@ -69,11 +69,19 @@
         </select>
       </div>
       <div class="control-row">
+        <label class="control-label">点の形状 (タイプ)</label>
+        <select id="select-point-shape">
+          <option value="circle">丸 (円形・滑らか)</option>
+          <option value="square">四角 (スクエア)</option>
+          <option value="pixel">極小点 (ピクセルドット)</option>
+        </select>
+      </div>
+      <div class="control-row">
         <div class="control-label">
           <span>点サイズ</span>
-          <span id="label-point-size">3.0 px</span>
+          <span id="label-point-size">1.2 px</span>
         </div>
-        <input type="range" id="slider-point-size" min="1" max="15" step="0.5" value="3.0">
+        <input type="range" id="slider-point-size" min="0.2" max="10.0" step="0.1" value="1.2">
       </div>
     </section>
 

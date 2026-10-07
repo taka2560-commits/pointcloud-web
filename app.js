@@ -13,6 +13,24 @@ let pointCloud = null;          // 現在のThree.js Pointsオブジェクト
 let gridHelper, axesHelper;
 let raycaster, mouse;
 let focusMarker = null;         // クリック位置の視覚マーカー
+let circleTexture = null;       // 円形点描画用のテクスチャ
+
+/**
+ * 鮮明な円形点群を描画するための丸テクスチャを動的生成
+ */
+function getOrCreateCircleTexture() {
+  if (circleTexture) return circleTexture;
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.beginPath();
+  ctx.arc(32, 32, 28, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  circleTexture = new THREE.CanvasTexture(canvas);
+  return circleTexture;
+}
 
 // アプリケーション設定 (localStorage永続化)
 const defaultSettings = {
@@ -254,6 +272,38 @@ function onWindowResize() {
 }
 
 /**
+ * 点群マテリアルに形状（丸・四角・極小点）とサイズを適用
+ */
+function applyPointMaterialProperties(material, shape, size) {
+  if (!material) return;
+
+  if (shape === "circle") {
+    // 丸（円形）: Canvasテクスチャと透過アルファテスト
+    material.map = getOrCreateCircleTexture();
+    material.alphaTest = 0.5;
+    material.transparent = true;
+    material.sizeAttenuation = true;
+    material.size = size;
+  } else if (shape === "square") {
+    // 四角（正方形）: 標準GL_POINTS
+    material.map = null;
+    material.alphaTest = 0.0;
+    material.transparent = false;
+    material.sizeAttenuation = true;
+    material.size = size;
+  } else if (shape === "pixel") {
+    // 極小点（ピクセルドット）: 距離減衰なしのシャープな極小ドット
+    material.map = null;
+    material.alphaTest = 0.0;
+    material.transparent = false;
+    material.sizeAttenuation = false;
+    material.size = Math.max(1.0, Math.min(size * 1.5, 4.0));
+  }
+
+  material.needsUpdate = true;
+}
+
+/**
  * 点群データをThree.jsシーンに設定
  */
 function setPointCloud(points, colors = null, fit = true) {
@@ -292,12 +342,13 @@ function setPointCloud(points, colors = null, fit = true) {
   geometry.setAttribute("color", new THREE.BufferAttribute(currentColors.slice(), 3));
   geometry.computeBoundingBox();
 
-  const pointSize = parseFloat(document.getElementById("slider-point-size").value) || 3.0;
+  const pointSize = parseFloat(document.getElementById("slider-point-size").value) || 1.2;
+  const pointShape = document.getElementById("select-point-shape")?.value || "circle";
+
   const material = new THREE.PointsMaterial({
-    size: pointSize,
     vertexColors: true,
-    sizeAttenuation: true,
   });
+  applyPointMaterialProperties(material, pointShape, pointSize);
 
   pointCloud = new THREE.Points(geometry, material);
   scene.add(pointCloud);
@@ -923,11 +974,25 @@ function initEventListeners() {
 
   document.getElementById("btn-load-sample").addEventListener("click", loadSamplePointCloud);
 
+  // 点サイズスライダー
   const sizeSlider = document.getElementById("slider-point-size");
   sizeSlider.addEventListener("input", (e) => {
     const val = parseFloat(e.target.value);
     document.getElementById("label-point-size").textContent = `${val.toFixed(1)} px`;
-    if (pointCloud) pointCloud.material.size = val;
+    if (pointCloud) {
+      const shape = document.getElementById("select-point-shape").value;
+      applyPointMaterialProperties(pointCloud.material, shape, val);
+    }
+  });
+
+  // 点の形状（丸・四角・極小点）セレクトボックス
+  const shapeSelect = document.getElementById("select-point-shape");
+  shapeSelect.addEventListener("change", (e) => {
+    if (pointCloud) {
+      const size = parseFloat(sizeSlider.value) || 1.2;
+      applyPointMaterialProperties(pointCloud.material, e.target.value, size);
+      setStatusMessage(`点の形状を「${shapeSelect.options[shapeSelect.selectedIndex].text}」に変更しました`);
+    }
   });
 
   document.getElementById("select-color-mode").addEventListener("change", (e) => {
