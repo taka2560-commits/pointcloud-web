@@ -1,19 +1,27 @@
 /**
  * Web版 3D点群エディタ & ノイズ除去ツール メインロジック
  * Three.js + OrbitControls による高速点群描画・操作・編集
- * 設定機能: 移動速度、回転感度、FOV、背景色、グリッド、選択色等のカスタマイズと保存
+ * 新機能: 正射影(オルソ)⇄透視(パース)切り替え、2点間寸法計測ツール
  */
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
 // --- グローバル状態 ---
-let scene, camera, renderer, controls;
+let scene, renderer, controls;
+let perspectiveCamera, orthographicCamera, activeCamera;
+let isOrthographic = false;     // 現在正射影(オルソ)かどうか
+
 let pointCloud = null;          // 現在のThree.js Pointsオブジェクト
 let gridHelper, axesHelper;
 let raycaster, mouse;
 let focusMarker = null;         // クリック位置の視覚マーカー
 let circleTexture = null;       // 円形点描画用のテクスチャ
+
+// 距離計測ツール関連
+let isMeasureMode = false;
+let measurePoints = [];         // 計測用点 [Vector3, Vector3]
+let measureGroup = null;        // 計測用の線・マーカーグループ
 
 /**
  * 鮮明な円形点群を描画するための丸テクスチャを動的生成
@@ -87,14 +95,29 @@ function initThreeJS() {
   const container = document.getElementById("canvas-container");
   const width = window.innerWidth;
   const height = window.innerHeight;
+  const aspect = width / height;
 
   // 1. シーン
   scene = new THREE.Scene();
   scene.background = new THREE.Color(appSettings.bgColor);
 
-  // 2. カメラ
-  camera = new THREE.PerspectiveCamera(appSettings.fov, width / height, 0.1, 1000);
-  camera.position.set(20, 20, 20);
+  // 2. カメラ (透視投影 & 正射影の両方を初期化)
+  perspectiveCamera = new THREE.PerspectiveCamera(appSettings.fov, aspect, 0.1, 2000);
+  perspectiveCamera.position.set(20, 20, 20);
+
+  const frustumSize = 30;
+  orthographicCamera = new THREE.OrthographicCamera(
+    (-frustumSize * aspect) / 2,
+    (frustumSize * aspect) / 2,
+    frustumSize / 2,
+    -frustumSize / 2,
+    0.1,
+    2000
+  );
+  orthographicCamera.position.set(20, 20, 20);
+
+  activeCamera = perspectiveCamera; // 初期は透視投影
+  isOrthographic = false;
 
   // 3. レンダラー
   renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -102,29 +125,33 @@ function initThreeJS() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   container.appendChild(renderer.domElement);
 
-  // 4. OrbitControls (カメラ自由操作)
-  controls = new OrbitControls(camera, renderer.domElement);
+  // 4. OrbitControls
+  controls = new OrbitControls(activeCamera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
   controls.screenSpacePanning = true;
   controls.rotateSpeed = appSettings.rotateSpeed;
   controls.zoomSpeed = appSettings.zoomSpeed;
-  controls.maxDistance = 500;
+  controls.maxDistance = 1000;
   controls.minDistance = 0.2;
 
-  // 5. レイキャスター（クリック判定用）
+  // 5. レイキャスター
   raycaster = new THREE.Raycaster();
   raycaster.params.Points.threshold = 0.8;
   mouse = new THREE.Vector2();
 
-  // 6. クリック位置のリングマーカー
+  // 6. クリック位置マーカー
   const ringGeo = new THREE.RingGeometry(0.3, 0.45, 32);
   const ringMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide, transparent: true, opacity: 0 });
   focusMarker = new THREE.Mesh(ringGeo, ringMat);
   focusMarker.visible = false;
   scene.add(focusMarker);
 
-  // 7. ガイドグリッド & 座標軸
+  // 7. 計測用オブジェクトグループ
+  measureGroup = new THREE.Group();
+  scene.add(measureGroup);
+
+  // 8. ガイドグリッド & 座標軸
   gridHelper = new THREE.GridHelper(30, 30, 0x38bdf8, 0x334155);
   gridHelper.visible = appSettings.showGrid;
   scene.add(gridHelper);
@@ -133,38 +160,82 @@ function initThreeJS() {
   axesHelper.visible = appSettings.showAxes;
   scene.add(axesHelper);
 
-  // ウィンドウリサイズ監視
   window.addEventListener("resize", onWindowResize);
-
-  // アニメーションループ
   animate();
 }
 
 /**
- * メインアニメーションループ (WASD移動とスムーズ移動を含む)
+ * 投影方式の切り替え (透視投影 ⇄ 正射影/オルソ)
+ */
+function toggleProjectionMode(forceMode = null) {
+  const targetMode = forceMode !== null ? forceMode : !isOrthographic;
+  if (targetMode === isOrthographic) return;
+
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const aspect = width / height;
+  const dist = activeCamera.position.distanceTo(controls.target);
+
+  if (targetMode) {
+    // 透視投影 → 正射影 (オルソ)
+    isOrthographic = true;
+    const fovRad = (perspectiveCamera.fov * Math.PI) / 360;
+    const frustumHeight = 2 * dist * Math.tan(fovRad);
+    const frustumWidth = frustumHeight * aspect;
+
+    orthographicCamera.left = -frustumWidth / 2;
+    orthographicCamera.right = frustumWidth / 2;
+    orthographicCamera.top = frustumHeight / 2;
+    orthographicCamera.bottom = -frustumHeight / 2;
+    orthographicCamera.position.copy(perspectiveCamera.position);
+    orthographicCamera.quaternion.copy(perspectiveCamera.quaternion);
+    orthographicCamera.updateProjectionMatrix();
+
+    activeCamera = orthographicCamera;
+    controls.object = orthographicCamera;
+
+    document.getElementById("btn-toggle-projection").textContent = "📐 投影: 平行投影 (正射影)";
+    document.getElementById("btn-toggle-projection").classList.add("btn-active");
+    setStatusMessage("正射影（平行投影・オルソ）に切り替えました。歪みのない寸法確認が可能です。");
+  } else {
+    // 正射影 (オルソ) → 透視投影
+    isOrthographic = false;
+    perspectiveCamera.position.copy(orthographicCamera.position);
+    perspectiveCamera.quaternion.copy(orthographicCamera.quaternion);
+    perspectiveCamera.updateProjectionMatrix();
+
+    activeCamera = perspectiveCamera;
+    controls.object = perspectiveCamera;
+
+    document.getElementById("btn-toggle-projection").textContent = "📐 投影: 透視投影 (パース)";
+    document.getElementById("btn-toggle-projection").classList.remove("btn-active");
+    setStatusMessage("透視投影（パースペクティブ）に切り替えました。自然な遠近感表示です。");
+  }
+
+  controls.update();
+}
+
+/**
+ * メインアニメーションループ
  */
 function animate() {
   requestAnimationFrame(animate);
 
-  // 1. WASDキーボード移動の更新
   updateKeyboardNavigation();
-
-  // 2. クリック中心移動のスムーズ補間
   updateTargetAnimation();
 
-  // 3. OrbitControlsの更新
   if (controls && controls.enabled) {
     controls.update();
   }
 
-  renderer.render(scene, camera);
+  renderer.render(scene, activeCamera);
 }
 
 /**
- * WASDキーによる画面・カメラの前後左右平行移動
+ * WASDキーによる移動
  */
 function updateKeyboardNavigation() {
-  if (!controls || isSelectMode) return;
+  if (!controls || isSelectMode || isMeasureMode) return;
 
   const activeEl = document.activeElement;
   if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "SELECT" || activeEl.tagName === "TEXTAREA")) {
@@ -175,22 +246,22 @@ function updateKeyboardNavigation() {
   const isS = keysPressed["KeyS"] || keysPressed["ArrowDown"];
   const isA = keysPressed["KeyA"] || keysPressed["ArrowLeft"];
   const isD = keysPressed["KeyD"] || keysPressed["ArrowRight"];
-  const isE = keysPressed["KeyE"]; // 上昇
-  const isQ = keysPressed["KeyQ"]; // 下降
+  const isE = keysPressed["KeyE"];
+  const isQ = keysPressed["KeyQ"];
 
   if (!isW && !isS && !isA && !isD && !isE && !isQ) return;
 
-  const dist = camera.position.distanceTo(controls.target);
+  const dist = activeCamera.position.distanceTo(controls.target);
   const baseSpeed = Math.max(0.1, dist * 0.025);
-  const speed = baseSpeed * appSettings.wasdSpeed; // 設定倍率を適用
+  const speed = baseSpeed * appSettings.wasdSpeed;
 
   const forward = new THREE.Vector3();
-  camera.getWorldDirection(forward);
+  activeCamera.getWorldDirection(forward);
 
   const right = new THREE.Vector3();
-  right.crossVectors(forward, camera.up).normalize();
+  right.crossVectors(forward, activeCamera.up).normalize();
 
-  const up = camera.up.clone().normalize();
+  const up = activeCamera.up.clone().normalize();
   const moveDelta = new THREE.Vector3();
 
   if (isW) moveDelta.addScaledVector(forward, speed);
@@ -200,12 +271,12 @@ function updateKeyboardNavigation() {
   if (isE) moveDelta.addScaledVector(up, speed);
   if (isQ) moveDelta.addScaledVector(up, -speed);
 
-  camera.position.add(moveDelta);
+  activeCamera.position.add(moveDelta);
   controls.target.add(moveDelta);
 }
 
 /**
- * クリックした位置を中心に滑らかにカメラターゲットを移動
+ * クリック位置へのスムーズ移動
  */
 function updateTargetAnimation() {
   if (!targetAnimation) return;
@@ -215,10 +286,10 @@ function updateTargetAnimation() {
   const ease = 1 - Math.pow(1 - progress, 3);
 
   controls.target.lerpVectors(targetAnimation.startTarget, targetAnimation.endTarget, ease);
-  camera.position.lerpVectors(targetAnimation.startCam, targetAnimation.endCam, ease);
+  activeCamera.position.lerpVectors(targetAnimation.startCam, targetAnimation.endCam, ease);
 
   if (focusMarker.visible) {
-    focusMarker.quaternion.copy(camera.quaternion);
+    focusMarker.quaternion.copy(activeCamera.quaternion);
     focusMarker.material.opacity = (1.0 - ease) * 0.9;
   }
 
@@ -229,24 +300,24 @@ function updateTargetAnimation() {
 }
 
 /**
- * 画面上のクリック・ダブルクリックで、その点を中心に移動
+ * クリックした点を中心にフォーカス
  */
 function focusOnPoint(clientX, clientY) {
-  if (!pointCloud || isSelectMode || !appSettings.enableDblClickFocus) return;
+  if (!pointCloud || isSelectMode || isMeasureMode || !appSettings.enableDblClickFocus) return;
 
   mouse.x = (clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(clientY / window.innerHeight) * 2 + 1;
 
-  raycaster.setFromCamera(mouse, camera);
+  raycaster.setFromCamera(mouse, activeCamera);
   const intersects = raycaster.intersectObject(pointCloud);
 
   if (intersects.length > 0) {
     const hitPoint = intersects[0].point;
-    const offset = camera.position.clone().sub(controls.target);
+    const offset = activeCamera.position.clone().sub(controls.target);
     const endCamPos = hitPoint.clone().add(offset);
 
     focusMarker.position.copy(hitPoint);
-    focusMarker.quaternion.copy(camera.quaternion);
+    focusMarker.quaternion.copy(activeCamera.quaternion);
     focusMarker.material.opacity = 0.9;
     focusMarker.visible = true;
 
@@ -255,7 +326,7 @@ function focusOnPoint(clientX, clientY) {
       duration: 350,
       startTarget: controls.target.clone(),
       endTarget: hitPoint.clone(),
-      startCam: camera.position.clone(),
+      startCam: activeCamera.position.clone(),
       endCam: endCamPos,
     };
 
@@ -263,11 +334,91 @@ function focusOnPoint(clientX, clientY) {
   }
 }
 
+/**
+ * 2点間距離計測処理
+ */
+function handleMeasureClick(clientX, clientY) {
+  if (!pointCloud || !isMeasureMode) return;
+
+  mouse.x = (clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, activeCamera);
+  const intersects = raycaster.intersectObject(pointCloud);
+
+  if (intersects.length === 0) return;
+
+  const hitPoint = intersects[0].point.clone();
+
+  if (measurePoints.length >= 2) {
+    clearMeasure();
+  }
+
+  measurePoints.push(hitPoint);
+
+  // マーカー球の作成
+  const sphereGeo = new THREE.SphereGeometry(0.18, 16, 16);
+  const sphereMat = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
+  const marker = new THREE.Mesh(sphereGeo, sphereMat);
+  marker.position.copy(hitPoint);
+  measureGroup.add(marker);
+
+  if (measurePoints.length === 1) {
+    setStatusMessage("【計測中】2点目をクリックしてください");
+  } else if (measurePoints.length === 2) {
+    // 2点間の直線を描画
+    const p1 = measurePoints[0];
+    const p2 = measurePoints[1];
+
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xfacc15, linewidth: 3 });
+    const line = new THREE.Line(lineGeo, lineMat);
+    measureGroup.add(line);
+
+    // 距離計算
+    const dist3d = p1.distanceTo(p2);
+    const distXY = Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+    const distZ = Math.abs(p1.z - p2.z);
+
+    document.getElementById("measure-dist-3d").textContent = `${dist3d.toFixed(3)} m`;
+    document.getElementById("measure-dist-xy").textContent = `${distXY.toFixed(3)} m`;
+    document.getElementById("measure-dist-z").textContent = `${distZ.toFixed(3)} m`;
+    document.getElementById("measure-result").style.display = "block";
+
+    setStatusMessage(`計測完了: 直線距離 ${dist3d.toFixed(3)} m (水平: ${distXY.toFixed(3)}m, 高低差: ${distZ.toFixed(3)}m)`);
+  }
+}
+
+function clearMeasure() {
+  measurePoints = [];
+  while (measureGroup.children.length > 0) {
+    const obj = measureGroup.children[0];
+    measureGroup.remove(obj);
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) obj.material.dispose();
+  }
+  document.getElementById("measure-result").style.display = "none";
+}
+
 function onWindowResize() {
   const width = window.innerWidth;
   const height = window.innerHeight;
-  camera.aspect = width / height;
-  camera.updateProjectionMatrix();
+  const aspect = width / height;
+
+  perspectiveCamera.aspect = aspect;
+  perspectiveCamera.updateProjectionMatrix();
+
+  const dist = activeCamera.position.distanceTo(controls.target);
+  const fovRad = (perspectiveCamera.fov * Math.PI) / 360;
+  const frustumHeight = 2 * dist * Math.tan(fovRad);
+  const frustumWidth = frustumHeight * aspect;
+
+  orthographicCamera.left = -frustumWidth / 2;
+  orthographicCamera.right = frustumWidth / 2;
+  orthographicCamera.top = frustumHeight / 2;
+  orthographicCamera.bottom = -frustumHeight / 2;
+  orthographicCamera.updateProjectionMatrix();
+
   renderer.setSize(width, height);
 }
 
@@ -278,21 +429,18 @@ function applyPointMaterialProperties(material, shape, size) {
   if (!material) return;
 
   if (shape === "circle") {
-    // 丸（円形）: Canvasテクスチャと透過アルファテスト
     material.map = getOrCreateCircleTexture();
     material.alphaTest = 0.5;
     material.transparent = true;
     material.sizeAttenuation = true;
     material.size = size;
   } else if (shape === "square") {
-    // 四角（正方形）: 標準GL_POINTS
     material.map = null;
     material.alphaTest = 0.0;
     material.transparent = false;
     material.sizeAttenuation = true;
     material.size = size;
   } else if (shape === "pixel") {
-    // 極小点（ピクセルドット）: 距離減衰なしのシャープな極小ドット
     material.map = null;
     material.alphaTest = 0.0;
     material.transparent = false;
@@ -360,6 +508,7 @@ function setPointCloud(points, colors = null, fit = true) {
   }
 
   selectedIndices.clear();
+  clearMeasure();
   updateBadges(n);
 
   if (fit) {
@@ -373,9 +522,9 @@ function generateHeightColors(points, minZ, maxZ) {
 
   for (let i = 0; i < points.length; i += 3) {
     const t = Math.min(1.0, Math.max(0.0, (points[i + 2] - minZ) / range));
-    colors[i] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 3.0)));     // R
-    colors[i + 1] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 2.0))); // G
-    colors[i + 2] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 1.0))); // B
+    colors[i] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 3.0)));
+    colors[i + 1] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 2.0)));
+    colors[i + 2] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 1.0)));
   }
   return colors;
 }
@@ -395,14 +544,24 @@ function fitView() {
   box.getSize(size);
 
   const maxDim = Math.max(size.x, size.y, size.z, 2.0);
-  const fov = camera.fov * (Math.PI / 180);
+  const fov = perspectiveCamera.fov * (Math.PI / 180);
   const cameraDist = (maxDim / 2) / Math.tan(fov / 2) * 1.5;
 
   controls.target.copy(center);
-  camera.position.set(center.x + cameraDist * 0.7, center.y + cameraDist * 0.7, center.z + cameraDist * 0.7);
-  camera.lookAt(center);
-  controls.update();
+  activeCamera.position.set(center.x + cameraDist * 0.7, center.y + cameraDist * 0.7, center.z + cameraDist * 0.7);
+  activeCamera.lookAt(center);
 
+  if (isOrthographic) {
+    const aspect = window.innerWidth / window.innerHeight;
+    const frustumHeight = maxDim * 1.5;
+    orthographicCamera.left = (-frustumHeight * aspect) / 2;
+    orthographicCamera.right = (frustumHeight * aspect) / 2;
+    orthographicCamera.top = frustumHeight / 2;
+    orthographicCamera.bottom = -frustumHeight / 2;
+    orthographicCamera.updateProjectionMatrix();
+  }
+
+  controls.update();
   gridHelper.position.y = box.min.y;
   setStatusMessage("点群全体を中央にフィット表示しました");
 }
@@ -410,23 +569,23 @@ function fitView() {
 function setViewPreset(type) {
   if (!controls) return;
   const target = controls.target;
-  const dist = camera.position.distanceTo(target) || 20;
+  const dist = activeCamera.position.distanceTo(target) || 20;
 
   switch (type) {
     case "iso":
-      camera.position.set(target.x + dist * 0.6, target.y + dist * 0.6, target.z + dist * 0.6);
+      activeCamera.position.set(target.x + dist * 0.6, target.y + dist * 0.6, target.z + dist * 0.6);
       break;
     case "top":
-      camera.position.set(target.x, target.y + dist, target.z + 0.001);
+      activeCamera.position.set(target.x, target.y + dist, target.z + 0.001);
       break;
     case "front":
-      camera.position.set(target.x, target.y, target.z + dist);
+      activeCamera.position.set(target.x, target.y, target.z + dist);
       break;
     case "side":
-      camera.position.set(target.x + dist, target.y, target.z);
+      activeCamera.position.set(target.x + dist, target.y, target.z);
       break;
   }
-  camera.lookAt(target);
+  activeCamera.lookAt(target);
   controls.update();
 }
 
@@ -548,15 +707,13 @@ function processSelectionBox(rect) {
   const posAttr = pointCloud.geometry.attributes.position;
   const colAttr = pointCloud.geometry.attributes.color;
   const p = new THREE.Vector3();
-
-  // ハイライト色 (設定値から取得)
   const selColor = new THREE.Color(appSettings.selectionColor);
 
   selectedIndices.clear();
 
   for (let i = 0; i < total; i++) {
     p.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
-    p.project(camera);
+    p.project(activeCamera);
 
     if (p.z > 1.0) continue;
 
@@ -802,14 +959,14 @@ function applySettingsToThree() {
   if (axesHelper) {
     axesHelper.visible = appSettings.showAxes;
   }
-  if (camera) {
-    camera.fov = appSettings.fov;
-    camera.updateProjectionMatrix();
+  if (perspectiveCamera) {
+    perspectiveCamera.fov = appSettings.fov;
+    perspectiveCamera.updateProjectionMatrix();
   }
 }
 
 /**
- * 設定画面UIのイベントリスナー初期化
+ * 設定画面UIの初期化
  */
 function initSettingsUI() {
   const modal = document.getElementById("settings-modal");
@@ -818,13 +975,11 @@ function initSettingsUI() {
   const saveCloseBtn = document.getElementById("btn-save-close-settings");
   const resetBtn = document.getElementById("btn-reset-settings");
 
-  // 開く
   openBtn.addEventListener("click", () => {
     syncSettingsToForm();
     modal.classList.add("open");
   });
 
-  // 閉じる
   const closeModal = () => {
     modal.classList.remove("open");
     saveSettings();
@@ -832,12 +987,10 @@ function initSettingsUI() {
   closeBtn.addEventListener("click", closeModal);
   saveCloseBtn.addEventListener("click", closeModal);
 
-  // モーダル枠外クリックで閉じる
   modal.addEventListener("click", (e) => {
     if (e.target === modal) closeModal();
   });
 
-  // モーダルタブ切替
   const tabBtns = document.querySelectorAll(".modal-tab-btn");
   tabBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -849,78 +1002,63 @@ function initSettingsUI() {
     });
   });
 
-  // 設定入力イベント (リアルタイム反映)
-  const wasdInput = document.getElementById("set-wasd-speed");
-  wasdInput.addEventListener("input", (e) => {
+  document.getElementById("set-wasd-speed").addEventListener("input", (e) => {
     appSettings.wasdSpeed = parseFloat(e.target.value);
     document.getElementById("label-set-wasd-speed").textContent = `${appSettings.wasdSpeed.toFixed(1)}x`;
   });
 
-  const rotateInput = document.getElementById("set-rotate-speed");
-  rotateInput.addEventListener("input", (e) => {
+  document.getElementById("set-rotate-speed").addEventListener("input", (e) => {
     appSettings.rotateSpeed = parseFloat(e.target.value);
     document.getElementById("label-set-rotate-speed").textContent = `${appSettings.rotateSpeed.toFixed(1)}x`;
     if (controls) controls.rotateSpeed = appSettings.rotateSpeed;
   });
 
-  const zoomInput = document.getElementById("set-zoom-speed");
-  zoomInput.addEventListener("input", (e) => {
+  document.getElementById("set-zoom-speed").addEventListener("input", (e) => {
     appSettings.zoomSpeed = parseFloat(e.target.value);
     document.getElementById("label-set-zoom-speed").textContent = `${appSettings.zoomSpeed.toFixed(1)}x`;
     if (controls) controls.zoomSpeed = appSettings.zoomSpeed;
   });
 
-  const dblClickInput = document.getElementById("set-enable-dblclick-focus");
-  dblClickInput.addEventListener("change", (e) => {
+  document.getElementById("set-enable-dblclick-focus").addEventListener("change", (e) => {
     appSettings.enableDblClickFocus = e.target.checked;
   });
 
-  // 背景色パレット
-  const bgBtns = document.querySelectorAll(".bg-color-btn");
-  bgBtns.forEach((btn) => {
+  document.querySelectorAll(".bg-color-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      bgBtns.forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".bg-color-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       appSettings.bgColor = btn.dataset.color;
       if (scene) scene.background = new THREE.Color(appSettings.bgColor);
     });
   });
 
-  // グリッド / 座標軸トグル
-  const gridInput = document.getElementById("set-show-grid");
-  gridInput.addEventListener("change", (e) => {
+  document.getElementById("set-show-grid").addEventListener("change", (e) => {
     appSettings.showGrid = e.target.checked;
     if (gridHelper) gridHelper.visible = appSettings.showGrid;
   });
 
-  const axesInput = document.getElementById("set-show-axes");
-  axesInput.addEventListener("change", (e) => {
+  document.getElementById("set-show-axes").addEventListener("change", (e) => {
     appSettings.showAxes = e.target.checked;
     if (axesHelper) axesHelper.visible = appSettings.showAxes;
   });
 
-  // FOV
-  const fovInput = document.getElementById("set-fov");
-  fovInput.addEventListener("input", (e) => {
+  document.getElementById("set-fov").addEventListener("input", (e) => {
     appSettings.fov = parseInt(e.target.value);
     document.getElementById("label-set-fov").textContent = `${appSettings.fov}°`;
-    if (camera) {
-      camera.fov = appSettings.fov;
-      camera.updateProjectionMatrix();
+    if (perspectiveCamera) {
+      perspectiveCamera.fov = appSettings.fov;
+      perspectiveCamera.updateProjectionMatrix();
     }
   });
 
-  // 選択色パレット
-  const selBtns = document.querySelectorAll(".sel-color-btn");
-  selBtns.forEach((btn) => {
+  document.querySelectorAll(".sel-color-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      selBtns.forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".sel-color-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       appSettings.selectionColor = btn.dataset.color;
     });
   });
 
-  // 初期化ボタン
   resetBtn.addEventListener("click", () => {
     if (confirm("すべての設定を初期値に戻しますか？")) {
       appSettings = { ...defaultSettings };
@@ -944,7 +1082,6 @@ function syncSettingsToForm() {
 
   document.getElementById("set-enable-dblclick-focus").checked = appSettings.enableDblClickFocus;
 
-  // 背景色パレットのアクティブ状態
   document.querySelectorAll(".bg-color-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.color.toLowerCase() === appSettings.bgColor.toLowerCase());
   });
@@ -955,7 +1092,6 @@ function syncSettingsToForm() {
   document.getElementById("set-fov").value = appSettings.fov;
   document.getElementById("label-set-fov").textContent = `${appSettings.fov}°`;
 
-  // 選択色パレットのアクティブ状態
   document.querySelectorAll(".sel-color-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.color.toLowerCase() === appSettings.selectionColor.toLowerCase());
   });
@@ -965,13 +1101,39 @@ function syncSettingsToForm() {
  * UIイベントリスナー登録
  */
 function initEventListeners() {
+  // 全体表示
   document.getElementById("btn-fit-view").addEventListener("click", fitView);
 
+  // 投影切替ボタン
+  document.getElementById("btn-toggle-projection").addEventListener("click", () => toggleProjectionMode());
+
+  // 視点プリセット
   document.getElementById("btn-view-iso").addEventListener("click", () => setViewPreset("iso"));
   document.getElementById("btn-view-top").addEventListener("click", () => setViewPreset("top"));
   document.getElementById("btn-view-front").addEventListener("click", () => setViewPreset("front"));
   document.getElementById("btn-view-side").addEventListener("click", () => setViewPreset("side"));
 
+  // 距離計測ツール
+  const measureToggleBtn = document.getElementById("btn-toggle-measure");
+  measureToggleBtn.addEventListener("click", () => {
+    isMeasureMode = !isMeasureMode;
+    if (isMeasureMode) {
+      if (isSelectMode) document.getElementById("btn-toggle-select").click(); // 選択モードは排他
+      measureToggleBtn.textContent = "📏 距離計測: ON";
+      measureToggleBtn.classList.add("btn-active");
+      clearMeasure();
+      setStatusMessage("【計測モード】点群上の1点目をクリックしてください");
+    } else {
+      measureToggleBtn.textContent = "📏 距離計測: OFF";
+      measureToggleBtn.classList.remove("btn-active");
+      clearMeasure();
+      setStatusMessage("計測モードを終了しました");
+    }
+  });
+
+  document.getElementById("btn-clear-measure").addEventListener("click", clearMeasure);
+
+  // サンプル生成
   document.getElementById("btn-load-sample").addEventListener("click", loadSamplePointCloud);
 
   // 点サイズスライダー
@@ -985,7 +1147,7 @@ function initEventListeners() {
     }
   });
 
-  // 点の形状（丸・四角・極小点）セレクトボックス
+  // 点の形状セレクトボックス
   const shapeSelect = document.getElementById("select-point-shape");
   shapeSelect.addEventListener("change", (e) => {
     if (pointCloud) {
@@ -995,6 +1157,7 @@ function initEventListeners() {
     }
   });
 
+  // 配色モード
   document.getElementById("select-color-mode").addEventListener("change", (e) => {
     if (!pointCloud || !currentPoints) return;
     const mode = e.target.value;
@@ -1015,11 +1178,13 @@ function initEventListeners() {
     colAttr.needsUpdate = true;
   });
 
+  // 矩形選択モード切替
   const selectToggleBtn = document.getElementById("btn-toggle-select");
   selectToggleBtn.addEventListener("click", () => {
     isSelectMode = !isSelectMode;
     controls.enabled = !isSelectMode;
     if (isSelectMode) {
+      if (isMeasureMode) measureToggleBtn.click(); // 計測モードと排他
       selectToggleBtn.textContent = "🔲 矩形選択モード: ON";
       selectToggleBtn.classList.add("btn-active");
       setStatusMessage("画面上を左ドラッグしてノイズ点を囲んでください");
@@ -1030,20 +1195,29 @@ function initEventListeners() {
     }
   });
 
+  // マウスクリック判定 (距離計測 / 矩形選択)
   const boxElem = document.getElementById("selection-box");
 
   window.addEventListener("mousedown", (e) => {
-    if (!isSelectMode || e.button !== 0) return;
     if (e.target.closest(".sidebar") || e.target.closest(".top-nav") || e.target.closest(".bottom-bar") || e.target.closest(".modal-card")) return;
 
-    isSelecting = true;
-    selectStart.x = e.clientX;
-    selectStart.y = e.clientY;
-    boxElem.style.left = `${selectStart.x}px`;
-    boxElem.style.top = `${selectStart.y}px`;
-    boxElem.style.width = "0px";
-    boxElem.style.height = "0px";
-    boxElem.style.display = "block";
+    // 距離計測モード時のクリック
+    if (isMeasureMode && e.button === 0) {
+      handleMeasureClick(e.clientX, e.clientY);
+      return;
+    }
+
+    // 矩形選択モード時のドラッグ開始
+    if (isSelectMode && e.button === 0) {
+      isSelecting = true;
+      selectStart.x = e.clientX;
+      selectStart.y = e.clientY;
+      boxElem.style.left = `${selectStart.x}px`;
+      boxElem.style.top = `${selectStart.y}px`;
+      boxElem.style.width = "0px";
+      boxElem.style.height = "0px";
+      boxElem.style.display = "block";
+    }
   });
 
   window.addEventListener("mousemove", (e) => {
@@ -1077,6 +1251,7 @@ function initEventListeners() {
     }
   });
 
+  // ダブルクリックで中心移動
   window.addEventListener("dblclick", (e) => {
     if (e.target.closest(".sidebar") || e.target.closest(".top-nav") || e.target.closest(".bottom-bar") || e.target.closest(".modal-card")) return;
     focusOnPoint(e.clientX, e.clientY);
@@ -1088,19 +1263,23 @@ function initEventListeners() {
   document.getElementById("btn-undo").addEventListener("click", undo);
   document.getElementById("btn-redo").addEventListener("click", redo);
 
+  // ショートカットキー (P: 投影切替, F: フィット, M: 計測, Delete, Ctrl+Z, Ctrl+Y)
   window.addEventListener("keydown", (e) => {
     keysPressed[e.code] = true;
 
-    if ((e.key === "f" || e.key === "F") && !isInputFocused()) {
+    if (isInputFocused()) return;
+
+    if (e.key === "p" || e.key === "P" || e.code === "Numpad5") {
+      toggleProjectionMode();
+    } else if (e.key === "f" || e.key === "F") {
       fitView();
-    }
-    else if ((e.key === "Delete" || e.key === "Backspace") && !isInputFocused()) {
+    } else if (e.key === "m" || e.key === "M") {
+      document.getElementById("btn-toggle-measure").click();
+    } else if (e.key === "Delete" || e.key === "Backspace") {
       deleteSelectedPoints();
-    }
-    else if (e.ctrlKey && e.key === "z") {
+    } else if (e.ctrlKey && e.key === "z") {
       undo();
-    }
-    else if (e.ctrlKey && e.key === "y") {
+    } else if (e.ctrlKey && e.key === "y") {
       redo();
     }
   });

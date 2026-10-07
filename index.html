@@ -48,12 +48,29 @@
     <!-- 2. カメラ・視点操作 -->
     <section class="panel-section">
       <div class="panel-title">カメラ・視点操作</div>
-      <button class="btn btn-primary" id="btn-fit-view" style="width: 100%;">🎯 全体表示 (Fit to View)</button>
+      <button class="btn btn-primary" id="btn-fit-view" style="width: 100%;">🎯 全体表示 (Fit to View / Fキー)</button>
       <div class="btn-group">
         <button class="btn" id="btn-view-iso" title="等角視点">等角</button>
         <button class="btn" id="btn-view-top" title="真上から">上面</button>
         <button class="btn" id="btn-view-front" title="正面から">正面</button>
         <button class="btn" id="btn-view-side" title="右側面から">側面</button>
+      </div>
+      <!-- 投影方式切替ボタン -->
+      <button class="btn" id="btn-toggle-projection" style="width: 100%; margin-top: 4px;" title="透視投影と平行投影を切り替えます (Pキー)">
+        📐 投影: 透視投影 (パース)
+      </button>
+    </section>
+
+    <!-- 2.5 計測・寸法ツール -->
+    <section class="panel-section">
+      <div class="panel-title">寸法計測ツール</div>
+      <div class="btn-group-2">
+        <button class="btn" id="btn-toggle-measure" title="2点クリックで距離を計測 (Mキー)">📏 距離計測: OFF</button>
+        <button class="btn" id="btn-clear-measure" title="計測結果をクリア">クリア</button>
+      </div>
+      <div id="measure-result" style="font-size: 11px; color: #38bdf8; line-height: 1.4; display: none; background: rgba(56, 189, 248, 0.1); padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2);">
+        直線距離: <strong id="measure-dist-3d">0.00 m</strong><br>
+        水平 (XY): <span id="measure-dist-xy">0.00 m</span> | 高低差 (Z): <span id="measure-dist-z">0.00 m</span>
       </div>
     </section>
 
@@ -140,7 +157,7 @@
       <button class="btn" id="btn-reset-seek" style="padding: 4px 10px; font-size: 11px;">全域表示</button>
     </div>
     <div class="help-text">
-      操作方法: [WASD] 移動 | [F] 全体フィット | [ダブルクリック] クリック箇所を中心に移動 | [左ドラッグ] 回転 | [右ドラッグ] パン | [ホイール] ズーム
+      操作方法: [P] 投影切替(透視/平行) | [F] 全体フィット | [WASD] 移動 | [M] 距離計測 | [ダブルクリック] 中心移動 | [左ドラッグ] 回転
     </div>
   </footer>
 
