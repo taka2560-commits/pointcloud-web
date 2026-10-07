@@ -39,7 +39,8 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, 
 
 from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
-from gui.worker_thread import ProcessWorker, FileLoadWorker
+from gui.worker_thread import ProcessWorker, FileLoadWorker, PreloadedData
+from gui.progress_dialog import ModernProgressDialog
 from gui.gl_viewer import PointCloudViewer
 from gui.styles import DARK_THEME_QSS
 
@@ -60,6 +61,7 @@ class MainWindow(QMainWindow):
         self.undo_stack: List[List[E57ScanData]] = []
         self.worker: Optional[ProcessWorker] = None
         self.load_worker: Optional[FileLoadWorker] = None
+        self.progress_dialog: Optional[ModernProgressDialog] = None
 
         # 点群のワールド範囲キャッシュ
         self.world_min = np.array([-10.0, -10.0, -5.0])
@@ -665,7 +667,7 @@ class MainWindow(QMainWindow):
                 self.input_edit.setText(path)
 
     def _load_file_to_viewer(self, file_path: str):
-        """E57ファイルをバックグラウンドスレッドで読み込み、進捗バーをリアルタイム更新する"""
+        """E57ファイルをバックグラウンドスレッドで前処理まで完全非同期読み込みし、画面中央に進捗モーダルを表示"""
         fname = os.path.basename(file_path)
         self.status_label.setText(f"点群読み込み中: {fname} (0%)")
         self.progress_bar.setValue(0)
@@ -676,26 +678,45 @@ class MainWindow(QMainWindow):
             self.load_worker.terminate()
             self.load_worker.wait()
 
-        self.load_worker = FileLoadWorker(file_path)
+        # 画面中央の進捗モーダルダイアログを表示
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        self.progress_dialog = ModernProgressDialog("点群データ読み込み中", self)
+        self.progress_dialog.set_progress(0, f"読み込み準備中...", f"ファイル: {fname}")
+        self.progress_dialog.show()
 
-        def on_progress(percent: int, msg: str):
+        budget = self.budget_combo.currentData() if hasattr(self, "budget_combo") else 2000000
+        self.load_worker = FileLoadWorker(file_path, point_budget=budget)
+
+        def on_progress(percent: int, msg: str, sub_msg: str):
+            if self.progress_dialog:
+                self.progress_dialog.set_progress(percent, msg, sub_msg)
             self.progress_bar.setValue(percent)
             self.status_label.setText(f"{msg} ({percent}%)")
 
-        def on_success(scans):
-            self.current_scans = scans
+        def on_success(preloaded: PreloadedData):
+            if self.progress_dialog:
+                self.progress_dialog.set_progress(100, "完了！", f"{len(preloaded.points_raw):,} 点")
+                self.progress_dialog.close()
+                self.progress_dialog = None
+
+            self.current_scans = preloaded.scans
             self.undo_stack.clear()
             self.undo_btn.setEnabled(False)
 
-            self.status_label.setText("3Dビューアへ点群転送中...")
-            self._update_viewer_from_scans()
+            # 0ミリ秒で高速バインド (UIフリーズなし)
+            self.viewer.set_preloaded_data(preloaded, reset_camera=True)
 
-            total_pts = sum(s.point_count for s in self.current_scans)
+            total_pts = len(preloaded.points_raw)
+            self.point_count_label.setText(f"点数: {total_pts:,} 点")
             self.progress_bar.setValue(100)
             self.status_label.setText(f"読み込み完了: {total_pts:,} 点")
-            self.log_text.append(f"読み込み成功: スキャン数 {len(scans)}, 総点数 {total_pts:,} 点")
+            self.log_text.append(f"読み込み成功: スキャン数 {len(preloaded.scans)}, 総点数 {total_pts:,} 点")
 
         def on_error(err_msg: str):
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
             self.progress_bar.setValue(0)
             self.status_label.setText("読み込みエラー")
             self.log_text.append(f"エラー: {err_msg}")

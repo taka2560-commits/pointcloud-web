@@ -551,6 +551,33 @@ class PointCloudViewer(QOpenGLWidget):
         self.update()
         self.status_changed.emit(f"点群読み込み完了: {len(points):,} 点")
 
+    def set_preloaded_data(self, preloaded, reset_camera: bool = True):
+        """バックグラウンドで前処理済みのデータを0ミリ秒で超高速バインド (UIフリーズ皆無)"""
+        if preloaded is None or preloaded.points_raw is None or len(preloaded.points_raw) == 0:
+            self.set_point_cloud(None)
+            return
+
+        self.points_raw = preloaded.points_raw
+        self.points_centered = preloaded.points_centered
+        self.center_offset = preloaded.center_offset
+        self.colors_raw = preloaded.colors_raw
+        self.intensities_raw = preloaded.intensities_raw
+        self.active_colors = preloaded.active_colors
+        self.world_bounds_min = preloaded.world_bounds_min
+        self.world_bounds_max = preloaded.world_bounds_max
+        self.bounds_min = preloaded.bounds_min
+        self.bounds_max = preloaded.bounds_max
+        self.display_points = preloaded.display_points
+        self.display_colors = preloaded.display_colors
+        self.display_orig_indices = preloaded.display_orig_indices
+
+        if reset_camera:
+            self.fit_to_screen()
+
+        self.bounds_ready.emit(self.world_bounds_min, self.world_bounds_max)
+        self.update()
+        self.status_changed.emit(f"点群読み込み完了: {len(self.points_raw):,} 点")
+
     def _update_active_colors(self):
         """原本全体のカラー配列を生成"""
         if self.points_centered is None:
