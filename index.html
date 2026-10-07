@@ -29,6 +29,7 @@
     </div>
     <div class="badge" id="point-count-badge">点数: 0 点</div>
     <div class="badge" id="status-badge" style="background: rgba(34, 197, 94, 0.15); color: #4ade80;">待機中</div>
+    <button class="btn" id="btn-open-settings" style="padding: 4px 10px; font-size: 12px; margin-left: 6px;">⚙️ 設定</button>
   </header>
 
   <!-- 左側 操作サイドバー -->
@@ -134,6 +135,104 @@
       操作方法: [WASD] 移動 | [F] 全体フィット | [ダブルクリック] クリック箇所を中心に移動 | [左ドラッグ] 回転 | [右ドラッグ] パン | [ホイール] ズーム
     </div>
   </footer>
+
+  <!-- 設定モーダルダイアログ -->
+  <div id="settings-modal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">⚙️ アプリケーション設定</div>
+        <button class="btn-close" id="btn-close-settings">&times;</button>
+      </div>
+
+      <!-- モーダルタブ切替 -->
+      <div class="modal-tabs">
+        <button class="modal-tab-btn active" data-tab="tab-control">カメラ・操作</button>
+        <button class="modal-tab-btn" data-tab="tab-render">描画・背景</button>
+        <button class="modal-tab-btn" data-tab="tab-select">選択・ハイライト</button>
+      </div>
+
+      <!-- タブ1: カメラ・操作設定 -->
+      <div class="tab-pane active" id="tab-control">
+        <div class="setting-item">
+          <div class="setting-label-row">
+            <span>WASD移動速度</span>
+            <span id="label-set-wasd-speed">1.0x</span>
+          </div>
+          <input type="range" id="set-wasd-speed" min="0.2" max="3.0" step="0.1" value="1.0">
+        </div>
+        <div class="setting-item">
+          <div class="setting-label-row">
+            <span>マウス回転感度</span>
+            <span id="label-set-rotate-speed">1.0x</span>
+          </div>
+          <input type="range" id="set-rotate-speed" min="0.2" max="2.5" step="0.1" value="1.0">
+        </div>
+        <div class="setting-item">
+          <div class="setting-label-row">
+            <span>ズーム感度</span>
+            <span id="label-set-zoom-speed">1.0x</span>
+          </div>
+          <input type="range" id="set-zoom-speed" min="0.3" max="2.5" step="0.1" value="1.0">
+        </div>
+        <div class="setting-item-toggle">
+          <span>ダブルクリックでクリック位置を中心に移動</span>
+          <input type="checkbox" id="set-enable-dblclick-focus" checked>
+        </div>
+      </div>
+
+      <!-- タブ2: 描画・背景設定 -->
+      <div class="tab-pane" id="tab-render">
+        <div class="setting-item">
+          <label>3Dビューア背景色</label>
+          <div class="bg-palette">
+            <button class="bg-color-btn active" data-color="#0f1117" style="background: #0f1117;" title="ダークネイビー"></button>
+            <button class="bg-color-btn" data-color="#000000" style="background: #000000;" title="漆黒ブラック"></button>
+            <button class="bg-color-btn" data-color="#1e293b" style="background: #1e293b;" title="スレートグレー"></button>
+            <button class="bg-color-btn" data-color="#f8fafc" style="background: #f8fafc; border: 1px solid #cbd5e1;" title="ライトホワイト"></button>
+          </div>
+        </div>
+        <div class="setting-item-toggle">
+          <span>床面グリッドガイドを表示</span>
+          <input type="checkbox" id="set-show-grid" checked>
+        </div>
+        <div class="setting-item-toggle">
+          <span>XYZ座標軸ギズモを表示</span>
+          <input type="checkbox" id="set-show-axes" checked>
+        </div>
+        <div class="setting-item">
+          <div class="setting-label-row">
+            <span>カメラ視野角 (FOV)</span>
+            <span id="label-set-fov">45°</span>
+          </div>
+          <input type="range" id="set-fov" min="30" max="85" step="1" value="45">
+        </div>
+      </div>
+
+      <!-- タブ3: 選択・ハイライト設定 -->
+      <div class="tab-pane" id="tab-select">
+        <div class="setting-item">
+          <label>選択時のハイライト色</label>
+          <div class="bg-palette">
+            <button class="sel-color-btn active" data-color="#ef4444" style="background: #ef4444;" title="レッド"></button>
+            <button class="sel-color-btn" data-color="#eab308" style="background: #eab308;" title="イエロー"></button>
+            <button class="sel-color-btn" data-color="#ec4899" style="background: #ec4899;" title="ピンク"></button>
+            <button class="sel-color-btn" data-color="#06b6d4" style="background: #06b6d4;" title="シアン"></button>
+          </div>
+        </div>
+        <div class="setting-item">
+          <p style="font-size: 12px; color: #94a3b8; line-height: 1.5; margin-top: 10px;">
+            ※設定内容はブラウザ（localStorage）に自動保存され、次回アクセス時にも維持されます。
+          </p>
+        </div>
+      </div>
+
+      <!-- モーダルフッター -->
+      <div class="modal-footer">
+        <button class="btn" id="btn-reset-settings" style="font-size: 12px;">初期設定に戻す</button>
+        <button class="btn btn-primary" id="btn-save-close-settings">設定を完了して閉じる</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ローディングオーバーレイ -->
   <div id="loading-overlay">
