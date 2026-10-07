@@ -38,6 +38,7 @@ class PointCloudViewer(QOpenGLWidget):
     measure_updated = Signal(str)       # 計測結果メッセージ
     projection_changed = Signal(bool)   # 投影モード変更通知 (True: 正射影, False: 透視投影)
     bounds_ready = Signal(object, object)  # 点群のワールド範囲 (min_xyz, max_xyz)
+    layers_updated = Signal(int, int)      # レイヤー点数更新 (通常点数, ノイズ点数)
 
     COLOR_MODE_RGB = "RGB"
     COLOR_MODE_HEIGHT = "高さ (Z)"
@@ -86,6 +87,11 @@ class PointCloudViewer(QOpenGLWidget):
         self.bounds_max = np.array([10, 10, 5], dtype=np.float32)
         self.world_bounds_min = np.zeros(3, dtype=np.float64)
         self.world_bounds_max = np.zeros(3, dtype=np.float64)
+
+        # レイヤー管理 (通常レイヤー vs ノイズレイヤー)
+        self.layer_mask = None         # (N,) bool (True: 通常, False: ノイズ)
+        self.show_normal_layer = True  # 通常レイヤー表示
+        self.show_noise_layer = False  # ノイズレイヤー表示 (初期値: OFF)
 
         # XYZ断面シークスライサー設定
         self.clip_x_enabled = False
@@ -547,6 +553,9 @@ class PointCloudViewer(QOpenGLWidget):
         if reset_camera:
             self.fit_to_screen()
 
+        self.layer_mask = np.ones(len(self.points_raw), dtype=bool)
+        self.layers_updated.emit(len(self.points_raw), 0)
+
         self.bounds_ready.emit(self.world_bounds_min, self.world_bounds_max)
         self.update()
         self.status_changed.emit(f"点群読み込み完了: {len(points):,} 点")
@@ -574,6 +583,9 @@ class PointCloudViewer(QOpenGLWidget):
         if reset_camera:
             self.fit_to_screen()
 
+        self.layer_mask = np.ones(len(self.points_raw), dtype=bool)
+        self.layers_updated.emit(len(self.points_raw), 0)
+
         self.bounds_ready.emit(self.world_bounds_min, self.world_bounds_max)
         self.update()
         self.status_changed.emit(f"点群読み込み完了: {len(self.points_raw):,} 点")
@@ -600,9 +612,17 @@ class PointCloudViewer(QOpenGLWidget):
         else:
             self.active_colors = np.tile([0.3, 0.8, 0.95], (n, 1)).astype(np.float32)
 
+        # ノイズレイヤーの点を赤色でハイライト
+        if self.layer_mask is not None:
+            noise_idx = np.where(~self.layer_mask)[0]
+            if len(noise_idx) > 0:
+                valid_noise = noise_idx[noise_idx < n]
+                self.active_colors[valid_noise] = [0.95, 0.25, 0.25]
+
+        # 選択中の点を黄色でハイライト
         if len(self.selected_indices) > 0:
             valid = self.selected_indices[self.selected_indices < n]
-            self.active_colors[valid] = [1.0, 0.1, 0.1]
+            self.active_colors[valid] = [1.0, 0.9, 0.1]
 
         self.active_colors = np.ascontiguousarray(self.active_colors, dtype=np.float32)
 
@@ -614,14 +634,26 @@ class PointCloudViewer(QOpenGLWidget):
             self.display_orig_indices = None
             return
 
-        mask = np.ones(len(self.points_raw), dtype=bool)
+        # 断面マスク
+        in_sec = np.ones(len(self.points_raw), dtype=bool)
         if self.clip_x_enabled:
-            mask &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
+            in_sec &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
         if self.clip_y_enabled:
-            mask &= (self.points_raw[:, 1] >= self.clip_y_range[0]) & (self.points_raw[:, 1] <= self.clip_y_range[1])
+            in_sec &= (self.points_raw[:, 1] >= self.clip_y_range[0]) & (self.points_raw[:, 1] <= self.clip_y_range[1])
         if self.clip_z_enabled:
-            mask &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
+            in_sec &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
 
+        # レイヤー可視性マスク (通常レイヤーON/OFF, ノイズレイヤーON/OFF)
+        layer_vis = np.zeros(len(self.points_raw), dtype=bool)
+        if self.layer_mask is not None:
+            if self.show_normal_layer:
+                layer_vis |= self.layer_mask
+            if self.show_noise_layer:
+                layer_vis |= (~self.layer_mask)
+        else:
+            layer_vis[:] = True
+
+        mask = in_sec & layer_vis
         surviving_indices = np.where(mask)[0]
         n_surv = len(surviving_indices)
 
@@ -641,6 +673,44 @@ class PointCloudViewer(QOpenGLWidget):
         self.display_orig_indices = sampled_idx
         self.display_points = np.ascontiguousarray(self.points_centered[sampled_idx])
         self.display_colors = np.ascontiguousarray(self.active_colors[sampled_idx])
+
+    # --- レイヤー管理メソッド ---
+    def set_layer_visibility(self, show_normal: bool, show_noise: bool):
+        """通常レイヤーおよびノイズレイヤーの表示/非表示を切り替え"""
+        self.show_normal_layer = show_normal
+        self.show_noise_layer = show_noise
+        self._update_display_arrays()
+        self.update()
+
+    def move_indices_to_noise(self, indices: np.ndarray):
+        """指定されたインデックスの点をノイズレイヤーへ移動 (手動削除 / 自動検出)"""
+        if self.layer_mask is None or len(indices) == 0:
+            return
+        self.layer_mask[indices] = False
+        n_norm = int(np.sum(self.layer_mask))
+        n_noise = int(len(self.layer_mask) - n_norm)
+        self._update_active_colors()
+        self._update_display_arrays()
+        self.update()
+        self.layers_updated.emit(n_norm, n_noise)
+
+    def restore_indices_to_normal(self, indices: np.ndarray):
+        """指定されたインデックスの点を通常レイヤーへ復元"""
+        if self.layer_mask is None or len(indices) == 0:
+            return
+        self.layer_mask[indices] = True
+        n_norm = int(np.sum(self.layer_mask))
+        n_noise = int(len(self.layer_mask) - n_norm)
+        self._update_active_colors()
+        self._update_display_arrays()
+        self.update()
+        self.layers_updated.emit(n_norm, n_noise)
+
+    def get_normal_indices(self) -> np.ndarray:
+        """現在通常レイヤーに属する点の原本インデックスを取得"""
+        if self.layer_mask is None:
+            return np.arange(len(self.points_raw)) if self.points_raw is not None else np.empty(0, dtype=np.int64)
+        return np.where(self.layer_mask)[0]
 
     # --- 断面スライサー制御 ---
     def set_section_x(self, enabled: bool, min_val: float, max_val: float):

@@ -39,7 +39,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, 
 
 from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
-from gui.worker_thread import ProcessWorker, FileLoadWorker, PreloadedData
+from gui.worker_thread import ProcessWorker, FileLoadWorker, PreloadedData, MemoryFilterWorker
 from gui.progress_dialog import ModernProgressDialog
 from gui.gl_viewer import PointCloudViewer
 from gui.styles import DARK_THEME_QSS
@@ -59,8 +59,10 @@ class MainWindow(QMainWindow):
 
         self.current_scans: List[E57ScanData] = []
         self.undo_stack: List[List[E57ScanData]] = []
+        self.layer_undo_stack: List[np.ndarray] = []
         self.worker: Optional[ProcessWorker] = None
         self.load_worker: Optional[FileLoadWorker] = None
+        self.memory_filter_worker: Optional[MemoryFilterWorker] = None
         self.progress_dialog: Optional[ModernProgressDialog] = None
 
         # 点群のワールド範囲キャッシュ
@@ -316,7 +318,47 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addWidget(section_group)
 
-        # 4. 手動選択・編集・計測ツール
+        # 4. レイヤー管理 (通常点群 vs ノイズ点群)
+        layer_group = QGroupBox("📑 レイヤー管理 (表示切替 / 対象制御)")
+        layer_layout = QVBoxLayout(layer_group)
+
+        layer_row1 = QHBoxLayout()
+        self.chk_layer_normal = QCheckBox("通常点群レイヤー")
+        self.chk_layer_normal.setChecked(True)
+        self.chk_layer_normal.toggled.connect(self._on_layer_visibility_changed)
+        self.lbl_layer_normal_count = QLabel("0 点")
+        self.lbl_layer_normal_count.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        layer_row1.addWidget(self.chk_layer_normal)
+        layer_row1.addStretch()
+        layer_row1.addWidget(self.lbl_layer_normal_count)
+        layer_layout.addLayout(layer_row1)
+
+        layer_row2 = QHBoxLayout()
+        self.chk_layer_noise = QCheckBox("ノイズレイヤー (赤色)")
+        self.chk_layer_noise.setChecked(False)
+        self.chk_layer_noise.toggled.connect(self._on_layer_visibility_changed)
+        self.lbl_layer_noise_count = QLabel("0 点")
+        self.lbl_layer_noise_count.setStyleSheet("color: #f87171; font-weight: bold;")
+        layer_row2.addWidget(self.chk_layer_noise)
+        layer_row2.addStretch()
+        layer_row2.addWidget(self.lbl_layer_noise_count)
+        layer_layout.addLayout(layer_row2)
+
+        layer_btn_layout = QHBoxLayout()
+        self.btn_restore_noise = QPushButton("ノイズを通常にすべて復元")
+        self.btn_restore_noise.setStyleSheet("font-size: 11px;")
+        self.btn_restore_noise.clicked.connect(self._restore_all_noise)
+        layer_btn_layout.addWidget(self.btn_restore_noise)
+        layer_layout.addLayout(layer_btn_layout)
+
+        layer_info = QLabel("※手動削除および自動フィルタ検出点はノイズレイヤーに移動します。自動処理は現在ONの通常点群のみを対象に実行されます。")
+        layer_info.setWordWrap(True)
+        layer_info.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        layer_layout.addWidget(layer_info)
+
+        sidebar_layout.addWidget(layer_group)
+
+        # 5. 手動選択・編集・計測ツール
         tools_group = QGroupBox("編集・選択ツール (矩形 / 円 / 多角形)")
         tools_layout = QVBoxLayout(tools_group)
 
@@ -513,6 +555,7 @@ class MainWindow(QMainWindow):
         self.viewer.point_selected.connect(self._on_points_selected)
         self.viewer.projection_changed.connect(self._on_projection_changed)
         self.viewer.bounds_ready.connect(self._on_bounds_ready)
+        self.viewer.layers_updated.connect(self._on_layers_updated)
         self.viewer.measure_updated.connect(lambda msg: self.status_label.setText(msg))
         right_layout.addWidget(self.viewer, 1)
 
@@ -528,6 +571,32 @@ class MainWindow(QMainWindow):
 
         undo_shortcut = QShortcut(QKeySequence.Undo, self)
         undo_shortcut.activated.connect(self._undo_action)
+
+    def _on_layers_updated(self, normal_count: int, noise_count: int):
+        """レイヤー点数更新通知を受信"""
+        self.lbl_layer_normal_count.setText(f"{normal_count:,} 点")
+        self.lbl_layer_noise_count.setText(f"{noise_count:,} 点")
+        self.point_count_label.setText(f"通常: {normal_count:,} 点 | ノイズ: {noise_count:,} 点")
+
+    def _on_layer_visibility_changed(self):
+        """通常/ノイズレイヤーの表示切り替え"""
+        show_normal = self.chk_layer_normal.isChecked()
+        show_noise = self.chk_layer_noise.isChecked()
+        self.viewer.set_layer_visibility(show_normal, show_noise)
+
+    def _restore_all_noise(self):
+        """ノイズレイヤーの点をすべて通常レイヤーに復元"""
+        if self.viewer.layer_mask is None:
+            return
+        noise_idx = np.where(~self.viewer.layer_mask)[0]
+        if len(noise_idx) == 0:
+            QMessageBox.information(self, "情報", "ノイズレイヤーに点はありません。")
+            return
+        self.layer_undo_stack.append(self.viewer.layer_mask.copy())
+        self.undo_btn.setEnabled(True)
+        self.viewer.restore_indices_to_normal(noise_idx)
+        self.log_text.append(f"ノイズ復元: {len(noise_idx):,} 点を通常レイヤーへ復元しました")
+        self.status_label.setText(f"{len(noise_idx):,} 点を通常レイヤーに復元しました")
 
     def _toggle_sidebar(self):
         is_visible = self.sidebar_scroll.isVisible()
@@ -702,7 +771,12 @@ class MainWindow(QMainWindow):
 
             self.current_scans = preloaded.scans
             self.undo_stack.clear()
+            self.layer_undo_stack.clear()
             self.undo_btn.setEnabled(False)
+
+            # チェックボックス表示をリセット
+            self.chk_layer_normal.setChecked(True)
+            self.chk_layer_noise.setChecked(False)
 
             # 0ミリ秒で高速バインド (UIフリーズなし)
             self.viewer.set_preloaded_data(preloaded, reset_camera=True)
@@ -782,62 +856,46 @@ class MainWindow(QMainWindow):
         self.manual_status_label.setText(f"選択中: {len(indices):,} 点 (赤色ハイライト) | [Delete]で削除")
 
     def _delete_selected_points(self):
-        """選択されているノイズ点を削除する"""
+        """選択されている点をノイズレイヤーへ移動する (手動削除)"""
         selected_idx = self.viewer.selected_indices
-        if len(selected_idx) == 0:
+        if len(selected_idx) == 0 or self.viewer.layer_mask is None:
             return
 
-        saved_scans = [
-            E57ScanData(
-                scan_index=s.scan_index,
-                points=s.points.copy(),
-                raw_fields={k: v.copy() if hasattr(v, "copy") else v for k, v in s.raw_fields.items()},
-                header=s.header,
-                rotation=s.rotation,
-                translation=s.translation,
-            )
-            for s in self.current_scans
-        ]
-        self.undo_stack.append(saved_scans)
+        # Undoスタックに直前のレイヤーマスクを退避
+        self.layer_undo_stack.append(self.viewer.layer_mask.copy())
         self.undo_btn.setEnabled(True)
 
-        if len(self.current_scans) == 1:
-            scan = self.current_scans[0]
-            keep_mask = np.ones(len(scan.points), dtype=bool)
-            keep_mask[selected_idx] = False
-            keep_indices = np.where(keep_mask)[0]
-            self.current_scans[0] = scan.filter_by_indices(keep_indices)
-        else:
-            current_offset = 0
-            for i, scan in enumerate(self.current_scans):
-                n_s = len(scan.points)
-                s_sel = selected_idx[(selected_idx >= current_offset) & (selected_idx < current_offset + n_s)] - current_offset
-                if len(s_sel) > 0:
-                    keep_mask = np.ones(n_s, dtype=bool)
-                    keep_mask[s_sel] = False
-                    keep_indices = np.where(keep_mask)[0]
-                    self.current_scans[i] = scan.filter_by_indices(keep_indices)
-                current_offset += n_s
-
         del_count = len(selected_idx)
+        # ノイズレイヤーへ移動
+        self.viewer.move_indices_to_noise(selected_idx)
         self._clear_selection()
-        self._update_viewer_from_scans()
-        self.log_text.append(f"手動削除: {del_count:,} 点を除去しました (Undo可能)")
-        self.status_label.setText(f"{del_count:,} 点を削除しました")
+
+        self.log_text.append(f"手動削除: {del_count:,} 点をノイズレイヤーへ移動しました (Undo可能)")
+        self.status_label.setText(f"{del_count:,} 点をノイズレイヤーへ移動しました")
 
     def _undo_action(self):
-        if not self.undo_stack:
+        """直前のレイヤー状態または編集を元に戻す"""
+        if not self.layer_undo_stack:
             return
 
-        self.current_scans = self.undo_stack.pop()
-        self.undo_btn.setEnabled(len(self.undo_stack) > 0)
+        prev_mask = self.layer_undo_stack.pop()
+        self.undo_btn.setEnabled(len(self.layer_undo_stack) > 0)
         self._clear_selection()
-        self._update_viewer_from_scans()
+
+        self.viewer.layer_mask = prev_mask
+        n_norm = int(np.sum(prev_mask))
+        n_noise = int(len(prev_mask) - n_norm)
+        self.viewer._update_active_colors()
+        self.viewer._update_display_arrays()
+        self.viewer.update()
+        self.viewer.layers_updated.emit(n_norm, n_noise)
+
         self.log_text.append("元に戻す (Undo) を実行しました")
         self.status_label.setText("操作を取り消しました")
 
     def _save_current_scans(self):
-        if not self.current_scans:
+        """通常点群レイヤーに属する点のみをE57ファイルとして保存 (ノイズ除外)"""
+        if not self.current_scans or self.viewer.layer_mask is None:
             QMessageBox.warning(self, "警告", "保存する点群データがありません。")
             return
 
@@ -849,29 +907,50 @@ class MainWindow(QMainWindow):
                 return
 
         try:
-            self.status_label.setText("E57書き出し中...")
-            write_e57_scans(out_path, self.current_scans)
-            total_pts = sum(s.point_count for s in self.current_scans)
+            self.status_label.setText("E57書き出し中 (通常点群のみ抽出)...")
+            layer_mask = self.viewer.layer_mask
+
+            # 通常点群のみを抽出したスキャンデータを生成
+            filtered_scans = []
+            if len(self.current_scans) == 1:
+                scan = self.current_scans[0]
+                keep_idx = np.where(layer_mask)[0]
+                filtered_scans.append(scan.filter_by_indices(keep_idx))
+            else:
+                current_offset = 0
+                for scan in self.current_scans:
+                    n_s = len(scan.points)
+                    s_mask = layer_mask[current_offset : current_offset + n_s]
+                    keep_idx = np.where(s_mask)[0]
+                    filtered_scans.append(scan.filter_by_indices(keep_idx))
+                    current_offset += n_s
+
+            write_e57_scans(out_path, filtered_scans)
+            total_clean_pts = sum(s.point_count for s in filtered_scans)
+            total_noise_pts = len(layer_mask) - total_clean_pts
             QMessageBox.information(
                 self,
                 "保存完了",
-                f"手動編集後の点群を保存しました！\n\n・総点数: {total_pts:,} 点\n・保存先: {out_path}",
+                f"通常点群レイヤーの点群をE57ファイルに保存しました！\n\n"
+                f"・保存点数 (通常点群): {total_clean_pts:,} 点\n"
+                f"・除外点数 (ノイズ): {total_noise_pts:,} 点\n"
+                f"・保存先: {out_path}",
             )
-            self.log_text.append(f"保存完了: {out_path} ({total_pts:,} 点)")
+            self.log_text.append(f"保存完了: {out_path} (通常点群: {total_clean_pts:,} 点, ノイズ除外: {total_noise_pts:,} 点)")
             self.status_label.setText("保存完了")
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", f"保存中にエラーが発生しました:\n{e}")
             self.status_label.setText("保存失敗")
 
     def _run_auto_processing(self):
-        in_path = self.input_edit.text().strip()
-        out_path = self.output_edit.text().strip()
-
-        if not in_path or not os.path.exists(in_path):
-            QMessageBox.warning(self, "エラー", "有効な入力E57ファイルを指定してください。")
+        """現在表示・有効な通常点群レイヤーのみを対象に自動ノイズ処理を実行 (手動削除点は保持・復活なし)"""
+        if self.viewer.points_raw is None or len(self.viewer.points_raw) == 0:
+            QMessageBox.warning(self, "エラー", "処理対象の点群が読み込まれていません。\n先にE57ファイルを開いてください。")
             return
-        if not out_path:
-            QMessageBox.warning(self, "エラー", "出力先E57ファイルを指定してください。")
+
+        normal_indices = self.viewer.get_normal_indices()
+        if len(normal_indices) == 0:
+            QMessageBox.warning(self, "エラー", "現在通常点群レイヤーに点がありません。")
             return
 
         config = FilterConfig(
@@ -885,38 +964,77 @@ class MainWindow(QMainWindow):
             voxel_size=self.voxel_spin.value(),
         )
 
+        if not (config.use_sor or config.use_ror or config.use_voxel_downsample):
+            QMessageBox.warning(self, "警告", "少なくとも1つのフィルタを有効にしてください。")
+            return
+
         self.auto_exec_btn.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.log_text.append("--- 自動ノイズ処理開始 ---")
+        self.log_text.append(f"--- 自動ノイズ処理開始: 通常レイヤー {len(normal_indices):,} 点対象 ---")
 
-        self.worker = ProcessWorker(in_path, out_path, config)
-        self.worker.progress_changed.connect(lambda p, m: (self.progress_bar.setValue(p), self.status_label.setText(m)))
-        self.worker.log_message.connect(self.log_text.append)
-        self.worker.finished_success.connect(self._on_auto_finished)
-        self.worker.finished_error.connect(self._on_auto_error)
-        self.worker.start()
+        # 進捗モーダルを表示
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        self.progress_dialog = ModernProgressDialog("自動ノイズフィルタ処理中", self)
+        self.progress_dialog.set_progress(0, "フィルタ解析準備中...", f"対象: {len(normal_indices):,} 点")
+        self.progress_dialog.show()
 
-    def _on_auto_finished(self, summary: ProcessSummary):
-        self.auto_exec_btn.setEnabled(True)
-        self.progress_bar.setValue(100)
-        self.status_label.setText("自動ノイズ処理が完了しました")
+        target_points = self.viewer.points_raw[normal_indices]
+        self.memory_filter_worker = MemoryFilterWorker(target_points, config)
 
-        self._load_file_to_viewer(summary.output_file)
+        def on_progress(percent: int, msg: str, sub_msg: str):
+            if self.progress_dialog:
+                self.progress_dialog.set_progress(percent, msg, sub_msg)
+            self.progress_bar.setValue(percent)
+            self.status_label.setText(f"{msg} ({percent}%)")
 
-        res_msg = (
-            f"自動ノイズ処理が完了しました！\n\n"
-            f"・元点数: {summary.total_initial_points:,} 点\n"
-            f"・保持点数: {summary.total_final_points:,} 点\n"
-            f"・除去点数: {summary.total_removed_points:,} 点 ({summary.total_removal_ratio:.2f}% 削減)\n"
-            f"・所要時間: {summary.total_time_taken_sec:.2f} 秒\n\n"
-            f"処理後の点群を3D画面にロードしました。"
-        )
-        QMessageBox.information(self, "完了", res_msg)
+        def on_success(keep_idx, remove_idx):
+            if self.progress_dialog:
+                self.progress_dialog.set_progress(100, "処理完了！", f"{len(remove_idx):,} 点のノイズを分離")
+                self.progress_dialog.close()
+                self.progress_dialog = None
 
-    def _on_auto_error(self, err_msg: str):
-        self.auto_exec_btn.setEnabled(True)
-        self.status_label.setText("エラーが発生しました")
-        QMessageBox.critical(self, "処理エラー", f"エラー:\n{err_msg}")
+            self.auto_exec_btn.setEnabled(True)
+            self.progress_bar.setValue(100)
+
+            # Undoスタックに退避
+            self.layer_undo_stack.append(self.viewer.layer_mask.copy())
+            self.undo_btn.setEnabled(True)
+
+            # 検出ノイズのインデックスを原本全体のインデックスに変換
+            orig_remove_idx = normal_indices[remove_idx]
+            self.viewer.move_indices_to_noise(orig_remove_idx)
+
+            n_removed = len(orig_remove_idx)
+            n_remain = len(normal_indices) - n_removed
+            ratio = (n_removed / len(normal_indices) * 100.0) if len(normal_indices) > 0 else 0.0
+
+            res_msg = (
+                f"自動ノイズ処理が完了しました！\n\n"
+                f"・処理対象 (通常レイヤー): {len(normal_indices):,} 点\n"
+                f"・残存通常点: {n_remain:,} 点\n"
+                f"・検出ノイズ: {n_removed:,} 点 ({ratio:.2f}% 検出)\n\n"
+                f"※検出されたノイズはノイズレイヤーに移動しました（手動削除点もそのまま維持されます）。"
+            )
+            self.log_text.append(f"自動ノイズ処理完了: 検出ノイズ {n_removed:,} 点をノイズレイヤーへ移動 (残存通常: {n_remain:,} 点)")
+            self.status_label.setText(f"自動処理完了: ノイズ {n_removed:,} 点検出")
+            QMessageBox.information(self, "完了", res_msg)
+
+        def on_error(err_msg: str):
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+            self.auto_exec_btn.setEnabled(True)
+            self.progress_bar.setValue(0)
+            self.status_label.setText("エラーが発生しました")
+            self.log_text.append(f"エラー: {err_msg}")
+            QMessageBox.critical(self, "処理エラー", f"自動ノイズ処理中にエラーが発生しました:\n{err_msg}")
+
+        self.memory_filter_worker.progress_changed.connect(on_progress)
+        self.memory_filter_worker.log_message.connect(self.log_text.append)
+        self.memory_filter_worker.finished_success.connect(on_success)
+        self.memory_filter_worker.finished_error.connect(on_error)
+        self.memory_filter_worker.start()
 
     def _on_viewer_status(self, msg: str):
         self.status_label.setText(msg)

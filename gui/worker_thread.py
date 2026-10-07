@@ -200,3 +200,37 @@ class FileLoadWorker(QThread):
             self.finished_success.emit(preloaded)
         except Exception as e:
             self.finished_error.emit(str(e))
+
+
+class MemoryFilterWorker(QThread):
+    """メモリ上の通常レイヤー点群に対して直接ノイズ除去を実行するバックグラウンドスレッド"""
+
+    progress_changed = Signal(int, str, str)
+    log_message = Signal(str)
+    finished_success = Signal(object, object)  # (keep_indices, removed_indices)
+    finished_error = Signal(str)
+
+    def __init__(self, points: np.ndarray, config: FilterConfig, parent=None):
+        super().__init__(parent)
+        self.points = points
+        self.config = config
+
+    def run(self):
+        try:
+            total = len(self.points)
+            self.progress_changed.emit(10, "自動ノイズ解析開始...", f"対象: {total:,} 点 (通常レイヤー)")
+            self.log_message.emit(f"通常レイヤー点群の自動ノイズ処理を開始: {total:,} 点")
+
+            processor = PointCloudProcessor(config=self.config)
+
+            def log_cb(msg: str):
+                self.log_message.emit(msg)
+                self.progress_changed.emit(60, "フィルタ適用中...", msg)
+
+            keep_idx, remove_idx = processor.apply_filters_to_points(self.points, log_callback=log_cb)
+
+            self.progress_changed.emit(100, "ノイズ検出完了！", f"除去: {len(remove_idx):,} 点をノイズレイヤーへ移動")
+            self.finished_success.emit(keep_idx, remove_idx)
+        except Exception as e:
+            self.finished_error.emit(str(e))
+

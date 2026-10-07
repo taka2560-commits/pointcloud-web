@@ -170,6 +170,81 @@ class PointCloudProcessor:
         filtered_scan = scan.filter_by_indices(keep_indices)
         return filtered_scan, keep_indices, removed_indices
 
+    def apply_filters_to_points(
+        self,
+        points: np.ndarray,
+        log_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        メモリ上の3D点群座標に対して各種フィルタを直接適用し、(keep_indices, removed_indices) を返す。
+        手動削除後の通常レイヤー点群に対して実行でき、手動削除点が復活する問題を根本解決します。
+        """
+        total = len(points)
+        keep_mask = np.ones(total, dtype=bool)
+
+        def log(msg: str):
+            if log_callback:
+                log_callback(msg)
+
+        # 1. 距離フィルタ
+        if self.config.use_distance_filter:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                d_idx = filter_distance(
+                    points[current],
+                    min_distance=self.config.min_distance,
+                    max_distance=self.config.max_distance,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[d_idx]] = True
+                keep_mask &= m
+                log(f"距離フィルタ適用: 残り {np.sum(keep_mask):,} 点")
+
+        # 2. ボクセル間引き
+        if self.config.use_voxel_downsample and self.config.voxel_size > 0:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                v_idx = voxel_downsample_indices(
+                    points[current],
+                    voxel_size=self.config.voxel_size,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[v_idx]] = True
+                keep_mask &= m
+                log(f"ボクセル間引き適用: 残り {np.sum(keep_mask):,} 点")
+
+        # 3. SORフィルタ
+        if self.config.use_sor:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                s_idx = filter_statistical_outlier(
+                    points[current],
+                    nb_neighbors=self.config.sor_neighbors,
+                    std_ratio=self.config.sor_std_ratio,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[s_idx]] = True
+                keep_mask &= m
+                log(f"SORノイズ除去適用: 残り {np.sum(keep_mask):,} 点")
+
+        # 4. RORフィルタ
+        if self.config.use_ror:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                r_idx = filter_radius_outlier(
+                    points[current],
+                    nb_points=self.config.ror_min_points,
+                    radius=self.config.ror_radius,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[r_idx]] = True
+                keep_mask &= m
+                log(f"RORノイズ除去適用: 残り {np.sum(keep_mask):,} 点")
+
+        keep_indices = np.where(keep_mask)[0]
+        removed_indices = np.where(~keep_mask)[0]
+        return keep_indices, removed_indices
+
     def process_file(
         self,
         input_path: str,
