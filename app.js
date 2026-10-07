@@ -1,6 +1,7 @@
 /**
  * Web版 3D点群エディタ & ノイズ除去ツール メインロジック
  * Three.js + OrbitControls による高速点群描画・操作・編集
+ * 新機能: クリック中心移動、全体フィット(Fキー)、WASD自由移動
  */
 
 import * as THREE from "three";
@@ -10,6 +11,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 let scene, camera, renderer, controls;
 let pointCloud = null;          // 現在のThree.js Pointsオブジェクト
 let gridHelper, axesHelper;
+let raycaster, mouse;
+let focusMarker = null;         // クリック位置の視覚マーカー
 
 // 点群生データ (Float32Array)
 let currentPoints = null;       // [x, y, z, x, y, z, ...]
@@ -29,6 +32,10 @@ const selectEnd = { x: 0, y: 0 };
 
 // シーク（高さ範囲）状態
 let boundsZ = { min: 0, max: 0 };
+
+// キーボードWASD操作状態
+const keysPressed = {};
+let targetAnimation = null; // スムーズターゲット移動のアニメーション
 
 // --- 初期化 ---
 window.addEventListener("DOMContentLoaded", () => {
@@ -66,9 +73,21 @@ function initThreeJS() {
   controls.dampingFactor = 0.05;
   controls.screenSpacePanning = true; // 右ドラッグで上下左右にパン
   controls.maxDistance = 500;
-  controls.minDistance = 0.5;
+  controls.minDistance = 0.2;
 
-  // 5. ガイドグリッド & 座標軸
+  // 5. レイキャスター（クリック判定用）
+  raycaster = new THREE.Raycaster();
+  raycaster.params.Points.threshold = 0.8; // クリック判定の感度
+  mouse = new THREE.Vector2();
+
+  // 6. クリック位置のリングマーカー
+  const ringGeo = new THREE.RingGeometry(0.3, 0.45, 32);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide, transparent: true, opacity: 0 });
+  focusMarker = new THREE.Mesh(ringGeo, ringMat);
+  focusMarker.visible = false;
+  scene.add(focusMarker);
+
+  // 7. ガイドグリッド & 座標軸
   gridHelper = new THREE.GridHelper(30, 30, 0x38bdf8, 0x334155);
   scene.add(gridHelper);
 
@@ -82,12 +101,138 @@ function initThreeJS() {
   animate();
 }
 
+/**
+ * メインアニメーションループ (WASD移動とスムーズ移動を含む)
+ */
 function animate() {
   requestAnimationFrame(animate);
+
+  // 1. WASDキーボード移動の更新
+  updateKeyboardNavigation();
+
+  // 2. クリック中心移動のスムーズ補間
+  updateTargetAnimation();
+
+  // 3. OrbitControlsの更新
   if (controls && controls.enabled) {
     controls.update();
   }
+
   renderer.render(scene, camera);
+}
+
+/**
+ * WASDキーによる画面・カメラの前後左右平行移動
+ */
+function updateKeyboardNavigation() {
+  if (!controls || isSelectMode) return;
+
+  // テキスト入力中はWASD移動を無効化
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "SELECT" || activeEl.tagName === "TEXTAREA")) {
+    return;
+  }
+
+  const isW = keysPressed["KeyW"] || keysPressed["ArrowUp"];
+  const isS = keysPressed["KeyS"] || keysPressed["ArrowDown"];
+  const isA = keysPressed["KeyA"] || keysPressed["ArrowLeft"];
+  const isD = keysPressed["KeyD"] || keysPressed["ArrowRight"];
+  const isE = keysPressed["KeyE"]; // 上昇
+  const isQ = keysPressed["KeyQ"]; // 下降
+
+  if (!isW && !isS && !isA && !isD && !isE && !isQ) return;
+
+  // カメラの現在距離に応じた移動速度（拡大時は細かく、引いた時はダイナミックに）
+  const dist = camera.position.distanceTo(controls.target);
+  const speed = Math.max(0.1, dist * 0.025);
+
+  // 前後ベクトル (カメラ視線方向)
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+
+  // 左右ベクトル (カメラ視線の直交方向)
+  const right = new THREE.Vector3();
+  right.crossVectors(forward, camera.up).normalize();
+
+  // 上下ベクトル
+  const up = camera.up.clone().normalize();
+
+  const moveDelta = new THREE.Vector3();
+
+  if (isW) moveDelta.addScaledVector(forward, speed);
+  if (isS) moveDelta.addScaledVector(forward, -speed);
+  if (isD) moveDelta.addScaledVector(right, speed);
+  if (isA) moveDelta.addScaledVector(right, -speed);
+  if (isE) moveDelta.addScaledVector(up, speed);
+  if (isQ) moveDelta.addScaledVector(up, -speed);
+
+  // カメラ位置と注視点（Target）を同時に動かすことで視界を維持したまま移動
+  camera.position.add(moveDelta);
+  controls.target.add(moveDelta);
+}
+
+/**
+ * クリックした位置を中心に滑らかにカメラターゲットを移動
+ */
+function updateTargetAnimation() {
+  if (!targetAnimation) return;
+
+  const now = performance.now();
+  const progress = Math.min(1.0, (now - targetAnimation.startTime) / targetAnimation.duration);
+  // スムーズなイージング (Ease-out cubic)
+  const ease = 1 - Math.pow(1 - progress, 3);
+
+  controls.target.lerpVectors(targetAnimation.startTarget, targetAnimation.endTarget, ease);
+  camera.position.lerpVectors(targetAnimation.startCam, targetAnimation.endCam, ease);
+
+  // マーカーのアニメーション
+  if (focusMarker.visible) {
+    focusMarker.quaternion.copy(camera.quaternion);
+    focusMarker.material.opacity = (1.0 - ease) * 0.9;
+  }
+
+  if (progress >= 1.0) {
+    targetAnimation = null;
+    focusMarker.visible = false;
+  }
+}
+
+/**
+ * 画面上のクリック・ダブルクリックで、その点を中心に移動
+ */
+function focusOnPoint(clientX, clientY) {
+  if (!pointCloud || isSelectMode) return;
+
+  mouse.x = (clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObject(pointCloud);
+
+  if (intersects.length > 0) {
+    const hitPoint = intersects[0].point;
+
+    // カメラとターゲットの相対オフセットを維持して並進移動
+    const offset = camera.position.clone().sub(controls.target);
+    const endCamPos = hitPoint.clone().add(offset);
+
+    // マーカー表示
+    focusMarker.position.copy(hitPoint);
+    focusMarker.quaternion.copy(camera.quaternion);
+    focusMarker.material.opacity = 0.9;
+    focusMarker.visible = true;
+
+    targetAnimation = {
+      startTime: performance.now(),
+      duration: 350, // 350ミリ秒のスムーズアニメーション
+      startTarget: controls.target.clone(),
+      endTarget: hitPoint.clone(),
+      startCam: camera.position.clone(),
+      endCam: endCamPos,
+    };
+
+    setStatusMessage(`点 (${hitPoint.x.toFixed(2)}, ${hitPoint.y.toFixed(2)}, ${hitPoint.z.toFixed(2)}) を中心にフォーカス`);
+  }
 }
 
 function onWindowResize() {
@@ -151,6 +296,13 @@ function setPointCloud(points, colors = null, fit = true) {
   pointCloud = new THREE.Points(geometry, material);
   scene.add(pointCloud);
 
+  // レイキャスターの閾値を点群サイズに合わせて自動調整
+  const box = geometry.boundingBox;
+  if (box) {
+    const diag = box.min.distanceTo(box.max);
+    raycaster.params.Points.threshold = Math.max(0.2, diag * 0.02);
+  }
+
   selectedIndices.clear();
   updateBadges(n);
 
@@ -168,7 +320,6 @@ function generateHeightColors(points, minZ, maxZ) {
 
   for (let i = 0; i < points.length; i += 3) {
     const t = Math.min(1.0, Math.max(0.0, (points[i + 2] - minZ) / range));
-    // ターボ／レインボー風グラデーション
     colors[i] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 3.0)));     // R
     colors[i + 1] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 2.0))); // G
     colors[i + 2] = Math.min(1.0, Math.max(0.0, 1.5 - Math.abs(t * 4.0 - 1.0))); // B
@@ -200,6 +351,7 @@ function fitView() {
   controls.update();
 
   gridHelper.position.y = box.min.y;
+  setStatusMessage("点群全体を中央にフィット表示しました");
 }
 
 /**
@@ -354,9 +506,8 @@ function processSelectionBox(rect) {
 
   for (let i = 0; i < total; i++) {
     p.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
-    p.project(camera); // NDC座標 (-1〜1)
+    p.project(camera);
 
-    // 画面奥にある点は除外
     if (p.z > 1.0) continue;
 
     const screenX = ((p.x + 1) * 0.5) * width;
@@ -369,10 +520,8 @@ function processSelectionBox(rect) {
       screenY <= rect.bottom
     ) {
       selectedIndices.add(i);
-      // 選択点を鮮やかな赤色にハイライト
       colAttr.setXYZ(i, 1.0, 0.15, 0.15);
     } else {
-      // 非選択点は元の色に戻す
       colAttr.setXYZ(i, currentColors[i * 3], currentColors[i * 3 + 1], currentColors[i * 3 + 2]);
     }
   }
@@ -422,10 +571,8 @@ function applyHeightSeek() {
   for (let i = 0; i < n; i++) {
     const z = posAttr.getZ(i);
     if (z >= minZ && z <= maxZ) {
-      // 範囲内の点は通常表示
       colAttr.setXYZ(i, currentColors[i * 3], currentColors[i * 3 + 1], currentColors[i * 3 + 2]);
     } else {
-      // 範囲外の点は暗く非表示に（フェード）
       colAttr.setXYZ(i, 0.05, 0.05, 0.08);
     }
   }
@@ -433,7 +580,7 @@ function applyHeightSeek() {
 }
 
 /**
- * 統計的外れ値除去 (SOR) の簡易高速実行
+ * 統計的外れ値除去 (SOR)
  */
 function runSOR() {
   if (!currentPoints) return;
@@ -444,7 +591,6 @@ function runSOR() {
     const stdRatio = parseFloat(document.getElementById("slider-sor-std").value) || 2.0;
     const total = currentPoints.length / 3;
 
-    // グリッド近傍サンプリングによる外れ値検出
     const meanDists = new Float32Array(total);
     let sumMean = 0;
 
@@ -453,7 +599,6 @@ function runSOR() {
       const yi = currentPoints[i * 3 + 1];
       const zi = currentPoints[i * 3 + 2];
 
-      // 近傍探索（サンプルステップ計算）
       let dSum = 0;
       let count = 0;
       const step = Math.max(1, Math.floor(total / 300));
@@ -497,7 +642,7 @@ function runSOR() {
 }
 
 /**
- * PLY形式でのエクスポート
+ * PLY形式エクスポート
  */
 function exportPLY() {
   if (!currentPoints || currentPoints.length === 0) {
@@ -538,7 +683,7 @@ function exportPLY() {
 }
 
 /**
- * ファイルパース (XYZ, PTS, CSV)
+ * テキスト点群パース
  */
 function parseTextPointCloud(text) {
   const lines = text.trim().split(/\r?\n/);
@@ -620,7 +765,7 @@ function initEventListeners() {
   const selectToggleBtn = document.getElementById("btn-toggle-select");
   selectToggleBtn.addEventListener("click", () => {
     isSelectMode = !isSelectMode;
-    controls.enabled = !isSelectMode; // 選択中はカメラ操作を一時オフ
+    controls.enabled = !isSelectMode;
     if (isSelectMode) {
       selectToggleBtn.textContent = "🔲 矩形選択モード: ON";
       selectToggleBtn.classList.add("btn-active");
@@ -638,7 +783,6 @@ function initEventListeners() {
 
   window.addEventListener("mousedown", (e) => {
     if (!isSelectMode || e.button !== 0) return;
-    // UIパネル上のクリックは無視
     if (e.target.closest(".sidebar") || e.target.closest(".top-nav") || e.target.closest(".bottom-bar")) return;
 
     isSelecting = true;
@@ -682,6 +826,12 @@ function initEventListeners() {
     }
   });
 
+  // ダブルクリックでクリック箇所を中心に移動
+  window.addEventListener("dblclick", (e) => {
+    if (e.target.closest(".sidebar") || e.target.closest(".top-nav") || e.target.closest(".bottom-bar")) return;
+    focusOnPoint(e.clientX, e.clientY);
+  });
+
   // 選択点削除 & 解除
   document.getElementById("btn-delete-selected").addEventListener("click", deleteSelectedPoints);
   document.getElementById("btn-clear-selection").addEventListener("click", clearSelection);
@@ -690,15 +840,30 @@ function initEventListeners() {
   document.getElementById("btn-undo").addEventListener("click", undo);
   document.getElementById("btn-redo").addEventListener("click", redo);
 
-  // ショートカットキー
+  // キーボードイベント (WASD移動, Fキー全体フィット, Deleteキー, Undo)
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Delete" || e.key === "Backspace") {
+    keysPressed[e.code] = true;
+
+    // Fキーで全体フィット
+    if ((e.key === "f" || e.key === "F") && !isInputFocused()) {
+      fitView();
+    }
+    // Deleteキーで選択点削除
+    else if ((e.key === "Delete" || e.key === "Backspace") && !isInputFocused()) {
       deleteSelectedPoints();
-    } else if (e.ctrlKey && e.key === "z") {
+    }
+    // Ctrl+ZでUndo
+    else if (e.ctrlKey && e.key === "z") {
       undo();
-    } else if (e.ctrlKey && e.key === "y") {
+    }
+    // Ctrl+YでRedo
+    else if (e.ctrlKey && e.key === "y") {
       redo();
     }
+  });
+
+  window.addEventListener("keyup", (e) => {
+    keysPressed[e.code] = false;
   });
 
   // SORパラメータ
@@ -721,7 +886,7 @@ function initEventListeners() {
     applyHeightSeek();
   });
 
-  // ファイル読み込み (ドロップゾーン & ファイルピッカー)
+  // ファイル読み込み
   const dropZone = document.getElementById("drop-zone");
   const fileInput = document.getElementById("file-input");
 
@@ -743,6 +908,11 @@ function initEventListeners() {
       loadFile(e.target.files[0]);
     }
   });
+}
+
+function isInputFocused() {
+  const el = document.activeElement;
+  return el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA");
 }
 
 function loadFile(file) {
