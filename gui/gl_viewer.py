@@ -1,7 +1,10 @@
 """
 PySide6 / OpenGLによる3D点群ビューアウィジェット
-高DPI対応、正射影/透視投影切替、WASD移動、全体フィット、
-ダブルクリック中心移動、2点間寸法計測、表示点数バジェット(間引き表示)を完備。
+- 数学座標系（Z-up）に準拠した表示およびXYZ軸ラベルギズモ
+- 見ている画面に対するWASDフライスルー移動 (Forward/Right/Upベクトル)
+- XYZ別シーク断面スライサー (X/Y/Z独立クリッピング & 断面ボックス可視化)
+- 手動選択ツール: 矩形選択、円形選択、多角形(ポリゴン)選択
+- 2点間寸法計測ツール、全体フィット、正射影/透視投影切替、表示バジェット
 """
 
 import math
@@ -30,27 +33,34 @@ class PointCloudViewer(QOpenGLWidget):
 
     point_selected = Signal(list)       # 選択された点インデックスリスト
     status_changed = Signal(str)        # ステータスメッセージ
-    measure_updated = Signal(str)       # 計測結果メッセージ (直線・水平・高低差)
+    measure_updated = Signal(str)       # 計測結果メッセージ
     projection_changed = Signal(bool)   # 投影モード変更通知 (True: 正射影, False: 透視投影)
+    bounds_ready = Signal(object, object)  # 点群のワールド範囲 (min_xyz, max_xyz)
 
     COLOR_MODE_RGB = "RGB"
     COLOR_MODE_HEIGHT = "高さ (Z)"
     COLOR_MODE_INTENSITY = "反射強度"
     COLOR_MODE_SOLID = "単色"
 
+    # 選択形状
+    SELECT_RECT = "rect"
+    SELECT_CIRCLE = "circle"
+    SELECT_POLYGON = "polygon"
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFocusPolicy(Qt.StrongFocus)  # キーボードイベントを確実に受領
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMouseTracking(True)
 
-        # カメラパラメータ
-        self.camera_target = QVector3D(0.0, 0.0, 0.0)  # 注視点（点群中心）
-        self.camera_distance = 15.0                     # カメラ距離
-        self.yaw = 45.0                                # 水平角（度）
-        self.pitch = 30.0                              # 仰角（度）
-        self.fov = 45.0                                # 視野角（度）
-        self.is_orthographic = False                   # 正射影フラグ (False=透視投影, True=正射影)
+        # カメラパラメータ (数学座標系: Z-up)
+        self.camera_target = QVector3D(0.0, 0.0, 0.0)  # 注視点
+        self.camera_distance = 15.0                     # 距離
+        self.yaw = 45.0                                # 水平角 (度)
+        self.pitch = 30.0                              # 仰角 (度)
+        self.fov = 45.0                                # 視野角 (度)
+        self.is_orthographic = False                   # 正射影フラグ
 
-        # 点群データ (NumPy配列)
+        # 点群原本データ
         self.points_raw = None        # (N, 3) float64 原本
         self.points_centered = None   # (N, 3) float32 中心オフセット済み原本
         self.center_offset = np.zeros(3, dtype=np.float64)
@@ -58,36 +68,49 @@ class PointCloudViewer(QOpenGLWidget):
         self.intensities_raw = None   # (N,) float32
         self.active_colors = None     # (N, 3) float32 描画用カラー原本
 
-        # 表示用間引き配列 (Point Budget対応)
+        # 表示用バジェット配列 (Point Budget対応)
         self.display_points = None    # 描画対象 (M, 3) float32
         self.display_colors = None    # 描画対象カラー (M, 3) float32
-        self.display_indices = None   # 原本インデックスとのマッピング
-        self.point_budget = 2000000   # 最大描画点数 (初期値: 200万点、0で全点無制限)
+        self.display_orig_indices = None  # 原本インデックスとのマッピング
+        self.point_budget = 2000000   # 初期値: 200万点 (0で無制限)
 
         # 表示設定
         self.point_size = 2.0
-        self.point_shape = "circle"   # "circle" または "square"
+        self.point_shape = "circle"
         self.color_mode = self.COLOR_MODE_RGB
         self.bg_color = QColor(20, 20, 26)
         self.show_grid = True
         self.bounds_min = np.array([-10, -10, -5], dtype=np.float32)
         self.bounds_max = np.array([10, 10, 5], dtype=np.float32)
+        self.world_bounds_min = np.zeros(3, dtype=np.float64)
+        self.world_bounds_max = np.zeros(3, dtype=np.float64)
+
+        # XYZ断面シークスライサー設定
+        self.clip_x_enabled = False
+        self.clip_x_range = [-1e6, 1e6]
+        self.clip_y_enabled = False
+        self.clip_y_range = [-1e6, 1e6]
+        self.clip_z_enabled = False
+        self.clip_z_range = [-1e6, 1e6]
 
         # マウス操作用
         self.last_mouse_pos = QPoint()
+        self.current_mouse_pos = QPoint()
         self.is_rotating = False
         self.is_panning = False
 
-        # 手動矩形選択モード
+        # 手動選択モード
         self.selection_mode = False
+        self.selection_shape = self.SELECT_RECT  # "rect", "circle", "polygon"
         self.selection_start = QPoint()
         self.selection_end = QPoint()
         self.is_selecting = False
+        self.polygon_points: List[QPoint] = []   # 多角形の頂点リスト
         self.selected_indices = np.array([], dtype=np.int64)
 
         # 2点間寸法計測ツール
         self.measure_mode = False
-        self.measure_points: List[Tuple[np.ndarray, np.ndarray]] = []  # [(centered_pos, world_pos)]
+        self.measure_points: List[Tuple[np.ndarray, np.ndarray]] = []
         self.measure_result_text = ""
 
     def initializeGL(self):
@@ -104,8 +127,7 @@ class PointCloudViewer(QOpenGLWidget):
         gl.glViewport(0, 0, int(width * dpr), int(height * dpr))
 
     def paintGL(self):
-        """OpenGL描画ループ（高DPI・正射影・計測線・グリッド対応）"""
-        # 高DPIスケーリングに合わせた正確なビューポート設定
+        """OpenGL描画ループ（高DPI・断面・ギズモ・数学座標系）"""
         dpr = self.devicePixelRatio()
         vp_w = int(self.width() * dpr)
         vp_h = int(self.height() * dpr)
@@ -143,7 +165,7 @@ class PointCloudViewer(QOpenGLWidget):
         view = self._get_view_matrix()
         gl.glLoadMatrixf(view.data())
 
-        # 3. 地面グリッドの描画
+        # 3. 地面グリッド描画
         if self.show_grid:
             self._draw_grid()
 
@@ -156,7 +178,6 @@ class PointCloudViewer(QOpenGLWidget):
             else:
                 gl.glDisable(gl.GL_POINT_SMOOTH)
 
-            # 頂点配列とカラー配列を直接バインドして高速描画
             gl.glEnableClientState(gl.GL_VERTEX_ARRAY)
             gl.glEnableClientState(gl.GL_COLOR_ARRAY)
 
@@ -168,18 +189,21 @@ class PointCloudViewer(QOpenGLWidget):
             gl.glDisableClientState(gl.GL_COLOR_ARRAY)
             gl.glDisableClientState(gl.GL_VERTEX_ARRAY)
 
-        # 5. 計測ラインの描画 (OpenGL)
+        # 5. 断面スライスボックス（断面有効時の外枠ライン）描画
+        self._draw_section_box()
+
+        # 6. 計測ラインの描画
         if len(self.measure_points) > 0:
             self._draw_measure_lines()
 
-        # 6. 座標軸ギズモの描画 (画面左下)
+        # 7. XYZ座標軸ギズモ描画 (画面左下)
         self._draw_axes()
 
-        # 7. 2Dオーバーレイ描画 (矩形選択枠 / 計測情報)
+        # 8. 2Dオーバーレイ描画 (選択枠・ラベル・計測テキスト)
         self._draw_2d_overlays()
 
     def _get_view_matrix(self) -> QMatrix4x4:
-        """カメラのビュー行列を計算する"""
+        """カメラのビュー行列を計算する (数学座標系: Z-up)"""
         view = QMatrix4x4()
         view.translate(0.0, 0.0, -self.camera_distance)
         view.rotate(self.pitch, 1.0, 0.0, 0.0)
@@ -187,18 +211,45 @@ class PointCloudViewer(QOpenGLWidget):
         view.translate(-self.camera_target)
         return view
 
+    def _get_camera_vectors(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        見ている画面に対する基準ベクトル (Forward, Right, Up) を算出
+        - Forward: 画面の視線方向（奥）
+        - Right: 画面の右方向
+        - Up: 画面の上方向
+        """
+        rad_yaw = math.radians(self.yaw)
+        rad_pitch = math.radians(self.pitch)
+
+        # 右方向ベクトル (Right): 水平面上で画面の右
+        rx = math.cos(rad_yaw)
+        ry = math.sin(rad_yaw)
+        rz = 0.0
+        right = np.array([rx, ry, rz], dtype=np.float32)
+
+        # 視線方向ベクトル (Forward): 画面の奥
+        fx = math.cos(rad_pitch) * math.sin(rad_yaw)
+        fy = -math.cos(rad_pitch) * math.cos(rad_yaw)
+        fz = math.sin(rad_pitch)
+        forward = np.array([fx, fy, fz], dtype=np.float32)
+
+        # 上方向ベクトル (Up): 画面の上
+        ux = -math.sin(rad_pitch) * math.sin(rad_yaw)
+        uy = math.sin(rad_pitch) * math.cos(rad_yaw)
+        uz = math.cos(rad_pitch)
+        up = np.array([ux, uy, uz], dtype=np.float32)
+
+        return forward, right, up
+
     def _draw_grid(self):
-        """地面グリッドを描画"""
+        """数学座標系の地面グリッド（XY平面）を描画"""
         gl.glPushAttrib(gl.GL_ALL_ATTRIB_BITS)
         gl.glDisable(gl.GL_LIGHTING)
         gl.glLineWidth(1.0)
 
-        # 点群のZ最小値を基準とする
         z_floor = float(self.bounds_min[2]) if self.points_raw is not None else 0.0
-
         grid_size = max(20.0, float(self.camera_distance * 1.5))
         step = 5.0 if grid_size > 50 else (1.0 if grid_size > 10 else 0.5)
-
         half = int(grid_size / step)
 
         gl.glBegin(gl.GL_LINES)
@@ -212,6 +263,44 @@ class PointCloudViewer(QOpenGLWidget):
             gl.glVertex3f(coord, -half * step, z_floor)
             gl.glVertex3f(coord, half * step, z_floor)
         gl.glEnd()
+        gl.glPopAttrib()
+
+    def _draw_section_box(self):
+        """有効化された断面の範囲枠線を描画"""
+        if not (self.clip_x_enabled or self.clip_y_enabled or self.clip_z_enabled):
+            return
+        if self.points_raw is None:
+            return
+
+        gl.glPushAttrib(gl.GL_ALL_ATTRIB_BITS)
+        gl.glDisable(gl.GL_LIGHTING)
+        gl.glLineWidth(1.5)
+        gl.glColor4f(0.0, 0.9, 1.0, 0.6)
+
+        x0 = (self.clip_x_range[0] - self.center_offset[0]) if self.clip_x_enabled else self.bounds_min[0]
+        x1 = (self.clip_x_range[1] - self.center_offset[0]) if self.clip_x_enabled else self.bounds_max[0]
+        y0 = (self.clip_y_range[0] - self.center_offset[1]) if self.clip_y_enabled else self.bounds_min[1]
+        y1 = (self.clip_y_range[1] - self.center_offset[1]) if self.clip_y_enabled else self.bounds_max[1]
+        z0 = (self.clip_z_range[0] - self.center_offset[2]) if self.clip_z_enabled else self.bounds_min[2]
+        z1 = (self.clip_z_range[1] - self.center_offset[2]) if self.clip_z_enabled else self.bounds_max[2]
+
+        gl.glBegin(gl.GL_LINES)
+        # 底面
+        gl.glVertex3f(x0, y0, z0); gl.glVertex3f(x1, y0, z0)
+        gl.glVertex3f(x1, y0, z0); gl.glVertex3f(x1, y1, z0)
+        gl.glVertex3f(x1, y1, z0); gl.glVertex3f(x0, y1, z0)
+        gl.glVertex3f(x0, y1, z0); gl.glVertex3f(x0, y0, z0)
+        # 上面
+        gl.glVertex3f(x0, y0, z1); gl.glVertex3f(x1, y0, z1)
+        gl.glVertex3f(x1, y0, z1); gl.glVertex3f(x1, y1, z1)
+        gl.glVertex3f(x1, y1, z1); gl.glVertex3f(x0, y1, z1)
+        gl.glVertex3f(x0, y1, z1); gl.glVertex3f(x0, y0, z1)
+        # 柱
+        gl.glVertex3f(x0, y0, z0); gl.glVertex3f(x0, y0, z1)
+        gl.glVertex3f(x1, y0, z0); gl.glVertex3f(x1, y0, z1)
+        gl.glVertex3f(x1, y1, z0); gl.glVertex3f(x1, y1, z1)
+        gl.glVertex3f(x0, y1, z0); gl.glVertex3f(x0, y1, z1)
+        gl.glEnd()
 
         gl.glPopAttrib()
 
@@ -221,7 +310,6 @@ class PointCloudViewer(QOpenGLWidget):
         gl.glDisable(gl.GL_DEPTH_TEST)
         gl.glLineWidth(2.5)
 
-        # 1点目マーカー
         p1 = self.measure_points[0][0]
         gl.glPointSize(10.0)
         gl.glBegin(gl.GL_POINTS)
@@ -231,13 +319,11 @@ class PointCloudViewer(QOpenGLWidget):
 
         if len(self.measure_points) >= 2:
             p2 = self.measure_points[1][0]
-            # 2点目マーカー
             gl.glBegin(gl.GL_POINTS)
             gl.glColor3f(0.0, 1.0, 0.8)
             gl.glVertex3f(p2[0], p2[1], p2[2])
             gl.glEnd()
 
-            # 結ぶ直線
             gl.glBegin(gl.GL_LINES)
             gl.glColor3f(1.0, 0.9, 0.1)
             gl.glVertex3f(p1[0], p1[1], p1[2])
@@ -247,7 +333,7 @@ class PointCloudViewer(QOpenGLWidget):
         gl.glPopAttrib()
 
     def _draw_axes(self):
-        """画面左下に小さなXYZ軸ギズモを描画する"""
+        """画面左下に数学座標系のXYZ軸ギズモを描画"""
         gl.glPushAttrib(gl.GL_ALL_ATTRIB_BITS)
         gl.glDisable(gl.GL_DEPTH_TEST)
 
@@ -260,23 +346,23 @@ class PointCloudViewer(QOpenGLWidget):
         gl.glMatrixMode(gl.GL_MODELVIEW)
         gl.glPushMatrix()
         gl.glLoadIdentity()
-        gl.glTranslatef(-aspect + 0.15, -0.82, 0.0)
+        gl.glTranslatef(-aspect + 0.18, -0.78, 0.0)
         gl.glRotatef(self.pitch, 1.0, 0.0, 0.0)
         gl.glRotatef(self.yaw, 0.0, 0.0, 1.0)
-        gl.glScalef(0.12, 0.12, 0.12)
+        gl.glScalef(0.14, 0.14, 0.14)
 
-        gl.glLineWidth(3.0)
+        gl.glLineWidth(3.5)
         gl.glBegin(gl.GL_LINES)
-        # X軸: 赤
-        gl.glColor3f(1.0, 0.2, 0.2)
+        # X軸: 赤 (数学座標系: 右/東)
+        gl.glColor3f(1.0, 0.25, 0.25)
         gl.glVertex3f(0.0, 0.0, 0.0)
         gl.glVertex3f(1.0, 0.0, 0.0)
-        # Y軸: 緑
-        gl.glColor3f(0.2, 1.0, 0.2)
+        # Y軸: 緑 (数学座標系: 奥行/北)
+        gl.glColor3f(0.25, 1.0, 0.25)
         gl.glVertex3f(0.0, 0.0, 0.0)
         gl.glVertex3f(0.0, 1.0, 0.0)
-        # Z軸: 青
-        gl.glColor3f(0.3, 0.6, 1.0)
+        # Z軸: 青 (数学座標系: 鉛直上向き)
+        gl.glColor3f(0.3, 0.65, 1.0)
         gl.glVertex3f(0.0, 0.0, 0.0)
         gl.glVertex3f(0.0, 0.0, 1.0)
         gl.glEnd()
@@ -287,15 +373,15 @@ class PointCloudViewer(QOpenGLWidget):
         gl.glPopAttrib()
 
     def _draw_2d_overlays(self):
-        """矩形選択枠や寸法計測情報の2Dオーバーレイ描画"""
-        if not self.is_selecting and not self.measure_result_text and not self.measure_mode:
-            return
-
+        """2Dオーバーレイ描画（矩形・円形・多角形選択枠、XYZ軸ラベル、計測情報）"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # 矩形選択中
-        if self.is_selecting:
+        # 1. 軸ラベル (X, Y, Z) の描画
+        self._draw_axes_labels_2d(painter)
+
+        # 2. 矩形選択枠
+        if self.is_selecting and self.selection_shape == self.SELECT_RECT:
             rect = QRect(self.selection_start, self.selection_end).normalized()
             pen = QPen(QColor(0, 210, 255, 230), 2, Qt.DashLine)
             painter.setPen(pen)
@@ -303,37 +389,109 @@ class PointCloudViewer(QOpenGLWidget):
             painter.setBrush(brush)
             painter.drawRect(rect)
 
-        # 計測モード通知または結果表示
+        # 3. 円形選択枠
+        elif self.is_selecting and self.selection_shape == self.SELECT_CIRCLE:
+            p1 = self.selection_start
+            p2 = self.selection_end
+            radius = int(math.hypot(p2.x() - p1.x(), p2.y() - p1.y()))
+            pen = QPen(QColor(0, 220, 255, 230), 2, Qt.DashLine)
+            painter.setPen(pen)
+            brush = QBrush(QColor(0, 150, 255, 45))
+            painter.setBrush(brush)
+            painter.drawEllipse(p1, radius, radius)
+
+        # 4. 多角形選択枠
+        elif self.selection_mode and self.selection_shape == self.SELECT_POLYGON and len(self.polygon_points) > 0:
+            pen = QPen(QColor(0, 220, 255, 230), 2, Qt.SolidLine)
+            painter.setPen(pen)
+            # 既存のエッジ
+            for i in range(len(self.polygon_points) - 1):
+                painter.drawLine(self.polygon_points[i], self.polygon_points[i + 1])
+            # マウス追従線
+            dash_pen = QPen(QColor(0, 220, 255, 180), 1.5, Qt.DashLine)
+            painter.setPen(dash_pen)
+            painter.drawLine(self.polygon_points[-1], self.current_mouse_pos)
+
+            # 頂点マーカー
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(255, 200, 0, 240)))
+            for pt in self.polygon_points:
+                painter.drawEllipse(pt, 4, 4)
+
+        # 5. 計測情報表示
         if self.measure_result_text:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
-            box_rect = QRect(14, 14, 380, 75)
-            painter.drawRoundedRect(box_rect, 8, 8)
+            painter.drawRoundedRect(QRect(14, 14, 380, 75), 8, 8)
 
             painter.setPen(QColor(56, 189, 248))
-            font = QFont("Segoe UI", 11, QFont.Bold)
-            painter.setFont(font)
+            painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
             painter.drawText(26, 36, "📐 2点間寸法計測結果")
 
             painter.setPen(QColor(241, 245, 249))
-            font_res = QFont("Consolas", 10, QFont.Normal)
-            painter.setFont(font_res)
+            painter.setFont(QFont("Consolas", 10, QFont.Normal))
             painter.drawText(26, 56, self.measure_result_text)
             painter.drawText(26, 74, "※右クリックでクリア / Mキーで終了")
         elif self.measure_mode:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(QColor(15, 23, 42, 200)))
-            box_rect = QRect(14, 14, 320, 50)
-            painter.drawRoundedRect(box_rect, 8, 8)
+            painter.drawRoundedRect(QRect(14, 14, 320, 50), 8, 8)
 
             painter.setPen(QColor(250, 204, 21))
-            font = QFont("Segoe UI", 10, QFont.Bold)
-            painter.setFont(font)
-            msg = "計測点 1 をクリックしてください" if len(self.measure_points) == 0 else "計測点 2 をクリックしてください"
+            painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+            msg = "計測点 1 をクリック" if len(self.measure_points) == 0 else "計測点 2 をクリック"
             painter.drawText(24, 34, f"📐 計測モード: {msg}")
             painter.drawText(24, 52, "※右クリックでキャンセル")
 
         painter.end()
+
+    def _draw_axes_labels_2d(self, painter: QPainter):
+        """ギズモ先端のX, Y, Z文字を2D描画"""
+        w, h = self.width(), self.height()
+        aspect = w / max(1, h)
+        cx = 0.18
+        cy = -0.78
+        rad_yaw = math.radians(self.yaw)
+        rad_pitch = math.radians(self.pitch)
+
+        font = QFont("Segoe UI", 9, QFont.Bold)
+        painter.setFont(font)
+
+        # X軸先端
+        x_rot = np.array([math.cos(rad_yaw), math.sin(rad_yaw), 0.0])
+        # Y軸先端
+        y_rot = np.array([-math.sin(rad_yaw), math.cos(rad_yaw), 0.0])
+        # Z軸先端
+        z_rot = np.array([0.0, 0.0, 1.0])
+
+        # ピッチ回転
+        def rotate_pitch(v):
+            vy = v[1] * math.cos(rad_pitch) - v[2] * math.sin(rad_pitch)
+            vz = v[1] * math.sin(rad_pitch) + v[2] * math.cos(rad_pitch)
+            return np.array([v[0], vy, vz])
+
+        xp = rotate_pitch(x_rot) * 0.18
+        yp = rotate_pitch(y_rot) * 0.18
+        zp = rotate_pitch(z_rot) * 0.18
+
+        base_x = (-aspect + cx + aspect) * 0.5 * w
+        base_y = (1.0 - (cy + 1.0) * 0.5) * h
+
+        # スクリーン投影
+        sx = int(base_x + xp[0] * 0.5 * w)
+        sy = int(base_y - xp[1] * 0.5 * h)
+        painter.setPen(QColor(255, 80, 80))
+        painter.drawText(sx, sy, "X")
+
+        sx = int(base_x + yp[0] * 0.5 * w)
+        sy = int(base_y - yp[1] * 0.5 * h)
+        painter.setPen(QColor(60, 230, 80))
+        painter.drawText(sx, sy, "Y")
+
+        sx = int(base_x + zp[0] * 0.5 * w)
+        sy = int(base_y - zp[1] * 0.5 * h)
+        painter.setPen(QColor(80, 160, 255))
+        painter.drawText(sx, sy, "Z")
 
     def set_point_cloud(
         self,
@@ -354,16 +512,17 @@ class PointCloudViewer(QOpenGLWidget):
 
         self.points_raw = np.asarray(points, dtype=np.float64)
 
-        # 中心オフセット（大座標系でのグラフィックジッター完全防止）
         min_b = np.min(self.points_raw, axis=0)
         max_b = np.max(self.points_raw, axis=0)
+        self.world_bounds_min = min_b.copy()
+        self.world_bounds_max = max_b.copy()
+
         self.center_offset = (min_b + max_b) / 2.0
         self.points_centered = np.ascontiguousarray((self.points_raw - self.center_offset), dtype=np.float32)
 
         self.bounds_min = (min_b - self.center_offset).astype(np.float32)
         self.bounds_max = (max_b - self.center_offset).astype(np.float32)
 
-        # カラーデータの正規化
         if colors is not None and len(colors) == len(points):
             c = np.asarray(colors, dtype=np.float32)
             if np.max(c) > 1.0:
@@ -377,20 +536,20 @@ class PointCloudViewer(QOpenGLWidget):
         else:
             self.intensities_raw = None
 
-        # 全体のカラー配列を生成
         self._update_active_colors()
-        # 表示用バジェット配列を生成
         self._update_display_arrays()
 
-        # カメラのリセット
         if reset_camera:
             self.fit_to_screen()
+
+        # ワールド範囲をUI側に通知
+        self.bounds_ready.emit(self.world_bounds_min, self.world_bounds_max)
 
         self.update()
         self.status_changed.emit(f"点群読み込み完了: {len(points):,} 点")
 
     def _update_active_colors(self):
-        """カラーモードに応じて原本全体のカラー配列を生成"""
+        """原本全体のカラー配列を生成"""
         if self.points_centered is None:
             return
 
@@ -409,10 +568,8 @@ class PointCloudViewer(QOpenGLWidget):
             t = (iv - i_min) / max(1e-5, (i_max - i_min))
             self.active_colors = np.column_stack([t, t, t]).astype(np.float32)
         else:
-            # デフォルトシアンカラー
             self.active_colors = np.tile([0.3, 0.8, 0.95], (n, 1)).astype(np.float32)
 
-        # 選択中の点を赤色でハイライト
         if len(self.selected_indices) > 0:
             valid = self.selected_indices[self.selected_indices < n]
             self.active_colors[valid] = [1.0, 0.1, 0.1]
@@ -420,36 +577,69 @@ class PointCloudViewer(QOpenGLWidget):
         self.active_colors = np.ascontiguousarray(self.active_colors, dtype=np.float32)
 
     def _update_display_arrays(self):
-        """Point Budget（最大描画点数）に応じて表示用バッファを生成"""
-        if self.points_centered is None:
+        """断面スライス＆Point Budgetを適用して描画バッファを生成"""
+        if self.points_raw is None or len(self.points_raw) == 0:
             self.display_points = None
             self.display_colors = None
-            self.display_indices = None
+            self.display_orig_indices = None
             return
 
-        n = len(self.points_centered)
-        budget = self.point_budget
+        # 1. 断面スライスのフィルタリング
+        mask = np.ones(len(self.points_raw), dtype=bool)
+        if self.clip_x_enabled:
+            mask &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
+        if self.clip_y_enabled:
+            mask &= (self.points_raw[:, 1] >= self.clip_y_range[0]) & (self.points_raw[:, 1] <= self.clip_y_range[1])
+        if self.clip_z_enabled:
+            mask &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
 
-        if budget <= 0 or n <= budget:
-            # 全点表示
-            self.display_points = self.points_centered
-            self.display_colors = self.active_colors
-            self.display_indices = None
+        surviving_indices = np.where(mask)[0]
+        n_surv = len(surviving_indices)
+
+        if n_surv == 0:
+            self.display_points = np.empty((0, 3), dtype=np.float32)
+            self.display_colors = np.empty((0, 3), dtype=np.float32)
+            self.display_orig_indices = np.empty(0, dtype=np.int64)
+            return
+
+        # 2. Point Budget (最大描画点数) の間引き適用
+        budget = self.point_budget
+        if budget <= 0 or n_surv <= budget:
+            sampled_idx = surviving_indices
         else:
-            # 均等スライス間引き (2,770万点でも瞬時に生成可能)
-            step = max(1, int(math.ceil(n / budget)))
-            self.display_indices = np.arange(0, n, step)
-            self.display_points = np.ascontiguousarray(self.points_centered[self.display_indices])
-            self.display_colors = np.ascontiguousarray(self.active_colors[self.display_indices])
+            step = max(1, int(math.ceil(n_surv / budget)))
+            sampled_idx = surviving_indices[::step]
+
+        self.display_orig_indices = sampled_idx
+        self.display_points = np.ascontiguousarray(self.points_centered[sampled_idx])
+        self.display_colors = np.ascontiguousarray(self.active_colors[sampled_idx])
+
+    # --- 断面スライサー制御 ---
+    def set_section_x(self, enabled: bool, min_val: float, max_val: float):
+        self.clip_x_enabled = enabled
+        self.clip_x_range = [min_val, max_val]
+        self._update_display_arrays()
+        self.update()
+
+    def set_section_y(self, enabled: bool, min_val: float, max_val: float):
+        self.clip_y_enabled = enabled
+        self.clip_y_range = [min_val, max_val]
+        self._update_display_arrays()
+        self.update()
+
+    def set_section_z(self, enabled: bool, min_val: float, max_val: float):
+        self.clip_z_enabled = enabled
+        self.clip_z_range = [min_val, max_val]
+        self._update_display_arrays()
+        self.update()
 
     def set_point_budget(self, budget: int):
-        """最大描画点数を設定 (0: 全点, 1000000: 100万点 等)"""
         self.point_budget = budget
         self._update_display_arrays()
         self.update()
 
     def fit_to_screen(self):
-        """点群全体を画面中央にぴったりフィット (Fキー)"""
+        """全体フィット (F)"""
         if self.bounds_min is None or self.bounds_max is None:
             return
         diag = np.linalg.norm(self.bounds_max - self.bounds_min)
@@ -461,15 +651,11 @@ class PointCloudViewer(QOpenGLWidget):
         self.status_changed.emit("全体フィット実行 (F)")
 
     def toggle_projection(self):
-        """透視投影と正射影の切り替え (Pキー)"""
+        """透視投影 / 正射影 切替 (P)"""
         self.is_orthographic = not self.is_orthographic
         self.projection_changed.emit(self.is_orthographic)
-        mode_str = "正射影 (平行投影)" if self.is_orthographic else "透視投影 (パースペクティブ)"
-        self.status_changed.emit(f"投影モード切替: {mode_str} (P)")
-        self.update()
-
-    def set_orthographic(self, ortho: bool):
-        self.is_orthographic = ortho
+        mode_str = "正射影" if self.is_orthographic else "透視投影"
+        self.status_changed.emit(f"投影切替: {mode_str} (P)")
         self.update()
 
     def set_point_shape(self, shape: str):
@@ -495,14 +681,13 @@ class PointCloudViewer(QOpenGLWidget):
         self.update()
 
     def _colormap_turbo(self, t: np.ndarray) -> np.ndarray:
-        """鮮やかな高さグラデーション"""
         t = np.clip(t, 0.0, 1.0)
         r = np.clip(1.5 - np.abs(t * 4.0 - 3.0), 0.0, 1.0)
         g = np.clip(1.5 - np.abs(t * 4.0 - 2.0), 0.0, 1.0)
         b = np.clip(1.5 - np.abs(t * 4.0 - 1.0), 0.0, 1.0)
         return np.column_stack([r, g, b]).astype(np.float32)
 
-    # --- 視点プリセット ---
+    # --- 視点プリセット (数学座標系: Z-up) ---
     def reset_view(self):
         self.yaw = 45.0
         self.pitch = 30.0
@@ -510,16 +695,19 @@ class PointCloudViewer(QOpenGLWidget):
         self.update()
 
     def set_view_top(self):
+        """上面 (Top): Z軸上から見下ろし (XY平面)"""
         self.yaw = 0.0
         self.pitch = 89.9
         self.update()
 
     def set_view_front(self):
+        """正面 (Front): 手前から奥(北)を見る (XZ平面)"""
         self.yaw = 0.0
         self.pitch = 0.0
         self.update()
 
     def set_view_side(self):
+        """側面 (Side): 東から西を見る (YZ平面)"""
         self.yaw = -90.0
         self.pitch = 0.0
         self.update()
@@ -528,15 +716,22 @@ class PointCloudViewer(QOpenGLWidget):
     def mousePressEvent(self, event: QMouseEvent):
         self.last_mouse_pos = event.pos()
 
+        # 右クリックで計測リセット
         if event.button() == Qt.RightButton and self.measure_mode:
-            # 計測のリセット
             self.measure_points.clear()
             self.measure_result_text = ""
             self.update()
             return
 
+        # 多角形選択中の右クリック: 直前の頂点を取り消し
+        if event.button() == Qt.RightButton and self.selection_mode and self.selection_shape == self.SELECT_POLYGON:
+            if len(self.polygon_points) > 0:
+                self.polygon_points.pop()
+                self.update()
+            return
+
+        # 計測モード
         if self.measure_mode and event.button() == Qt.LeftButton:
-            # クリック箇所の最も近い点を取得
             hit = self._pick_nearest_point(event.pos())
             if hit is not None:
                 centered_pt, world_pt = hit
@@ -558,17 +753,26 @@ class PointCloudViewer(QOpenGLWidget):
                 self.update()
             return
 
+        # 手動選択モード
         if self.selection_mode and event.button() == Qt.LeftButton:
-            self.is_selecting = True
-            self.selection_start = event.pos()
-            self.selection_end = event.pos()
-            self.update()
-        elif event.button() == Qt.LeftButton:
+            if self.selection_shape == self.SELECT_POLYGON:
+                self.polygon_points.append(event.pos())
+                self.update()
+            else:
+                self.is_selecting = True
+                self.selection_start = event.pos()
+                self.selection_end = event.pos()
+                self.update()
+            return
+
+        # カメラ回転・パン
+        if event.button() == Qt.LeftButton:
             self.is_rotating = True
         elif event.button() in (Qt.RightButton, Qt.MiddleButton):
             self.is_panning = True
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        self.current_mouse_pos = event.pos()
         dx = event.position().x() - self.last_mouse_pos.x()
         dy = event.position().y() - self.last_mouse_pos.y()
         self.last_mouse_pos = event.pos()
@@ -576,31 +780,41 @@ class PointCloudViewer(QOpenGLWidget):
         if self.is_selecting:
             self.selection_end = event.pos()
             self.update()
+        elif self.selection_mode and self.selection_shape == self.SELECT_POLYGON:
+            self.update()  # ガイドライン描画更新
         elif self.is_rotating:
             self.yaw += dx * 0.5
             self.pitch = max(-89.0, min(89.0, self.pitch + dy * 0.5))
             self.update()
         elif self.is_panning:
+            # 見ている画面に対するパン平行移動
+            _, right, up = self._get_camera_vectors()
             pan_speed = self.camera_distance * 0.0015
-            rad_y = math.radians(self.yaw)
-            sin_y, cos_y = math.sin(rad_y), math.cos(rad_y)
-            self.camera_target.setX(self.camera_target.x() - dx * pan_speed * cos_y)
-            self.camera_target.setY(self.camera_target.y() - dx * pan_speed * sin_y)
-            self.camera_target.setZ(self.camera_target.z() + dy * pan_speed)
+            delta = (-dx * pan_speed * right) + (dy * pan_speed * up)
+            self.camera_target.setX(self.camera_target.x() + float(delta[0]))
+            self.camera_target.setY(self.camera_target.y() + float(delta[1]))
+            self.camera_target.setZ(self.camera_target.z() + float(delta[2]))
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self.is_selecting:
             self.is_selecting = False
             self.selection_end = event.pos()
-            self._process_selection_rect()
+            self._process_selection()
             self.update()
 
         self.is_rotating = False
         self.is_panning = False
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """ダブルクリックでその場所を中心フォーカス"""
+        """ダブルクリック: 多角形選択確定 または 中心フォーカス"""
+        if self.selection_mode and self.selection_shape == self.SELECT_POLYGON:
+            if len(self.polygon_points) >= 3:
+                self._process_polygon_selection()
+                self.polygon_points.clear()
+                self.update()
+            return
+
         if event.button() == Qt.LeftButton:
             hit = self._pick_nearest_point(event.pos())
             if hit is not None:
@@ -618,48 +832,70 @@ class PointCloudViewer(QOpenGLWidget):
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent):
-        """WASDキー移動 & 各種ショートカット"""
+        """
+        見ている画面に対するWASDフライスルー移動
+        - W: 画面の視線方向（奥）へ前進
+        - S: 画面の視線方向（手前）へ後退
+        - A: 画面の左方向へ平行移動
+        - D: 画面の右方向へ平行移動
+        - Q: 画面の上方向へ上昇
+        - E: 画面の下方向へ下降
+        """
         key = event.key()
         move_speed = max(0.2, self.camera_distance * 0.05)
-        rad_y = math.radians(self.yaw)
-        sin_y, cos_y = math.sin(rad_y), math.cos(rad_y)
+        forward, right, up = self._get_camera_vectors()
 
         if key == Qt.Key_W:
-            # 前進 (注視点方向へ寄る)
-            self.camera_target.setX(self.camera_target.x() + sin_y * move_speed)
-            self.camera_target.setY(self.camera_target.y() - cos_y * move_speed)
+            # 視線方向 (画面奥) へ前進
+            self.camera_target.setX(self.camera_target.x() + float(forward[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() + float(forward[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() + float(forward[2] * move_speed))
             self.update()
         elif key == Qt.Key_S:
-            # 後退
-            self.camera_target.setX(self.camera_target.x() - sin_y * move_speed)
-            self.camera_target.setY(self.camera_target.y() + cos_y * move_speed)
+            # 視線方向 (画面手前) へ後退
+            self.camera_target.setX(self.camera_target.x() - float(forward[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() - float(forward[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() - float(forward[2] * move_speed))
             self.update()
         elif key == Qt.Key_A:
-            # 左移動
-            self.camera_target.setX(self.camera_target.x() - cos_y * move_speed)
-            self.camera_target.setY(self.camera_target.y() - sin_y * move_speed)
+            # 画面の左へ移動
+            self.camera_target.setX(self.camera_target.x() - float(right[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() - float(right[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() - float(right[2] * move_speed))
             self.update()
         elif key == Qt.Key_D:
-            # 右移動
-            self.camera_target.setX(self.camera_target.x() + cos_y * move_speed)
-            self.camera_target.setY(self.camera_target.y() + sin_y * move_speed)
+            # 画面の右へ移動
+            self.camera_target.setX(self.camera_target.x() + float(right[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() + float(right[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() + float(right[2] * move_speed))
             self.update()
         elif key == Qt.Key_Q:
-            # 上昇
-            self.camera_target.setZ(self.camera_target.z() + move_speed)
+            # 画面の上へ上昇
+            self.camera_target.setX(self.camera_target.x() + float(up[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() + float(up[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() + float(up[2] * move_speed))
             self.update()
         elif key == Qt.Key_E:
-            # 下降
-            self.camera_target.setZ(self.camera_target.z() - move_speed)
+            # 画面の下へ下降
+            self.camera_target.setX(self.camera_target.x() - float(up[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() - float(up[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() - float(up[2] * move_speed))
+            self.update()
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            # 多角形選択の確定
+            if self.selection_mode and self.selection_shape == self.SELECT_POLYGON and len(self.polygon_points) >= 3:
+                self._process_polygon_selection()
+                self.polygon_points.clear()
+                self.update()
+        elif key == Qt.Key_Escape:
+            # 選択キャンセル
+            self.polygon_points.clear()
             self.update()
         elif key == Qt.Key_F:
-            # 全体フィット
             self.fit_to_screen()
         elif key == Qt.Key_P:
-            # 投影切り替え
             self.toggle_projection()
         elif key == Qt.Key_M:
-            # 計測モードトグル
             self.measure_mode = not self.measure_mode
             if not self.measure_mode:
                 self.measure_points.clear()
@@ -671,63 +907,30 @@ class PointCloudViewer(QOpenGLWidget):
             super().keyPressEvent(event)
 
     def _pick_nearest_point(self, click_pos: QPoint) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """スクリーン上のクリック位置から最も近い点を探索 (表示点群から高速探索)"""
+        """スクリーン上のクリック位置から最も近い点を探索"""
         if self.display_points is None or len(self.display_points) == 0:
             return None
 
-        # サンプリング点が多すぎる場合は最大5万点に絞って高速スクリーン投影
         pts = self.display_points
         step = max(1, len(pts) // 50000)
         sub_pts = pts[::step]
 
-        aspect = self.width() / max(1, self.height())
-        proj = QMatrix4x4()
-        near_plane = max(0.1, self.camera_distance * 0.01)
-        far_plane = max(500.0, self.camera_distance * 50.0)
-
-        if self.is_orthographic:
-            ortho_size = max(0.5, self.camera_distance * 0.35)
-            proj.ortho(-ortho_size * aspect, ortho_size * aspect, -ortho_size, ortho_size, -far_plane, far_plane)
-        else:
-            proj.perspective(self.fov, aspect, near_plane, far_plane)
-
-        view = self._get_view_matrix()
-        mvp = proj * view
-        mvp_np = np.array(mvp.data(), dtype=np.float32).reshape((4, 4))
-
-        ones = np.ones((len(sub_pts), 1), dtype=np.float32)
-        pts4 = np.hstack([sub_pts, ones])
-        clip_pts = pts4 @ mvp_np
-
-        w = clip_pts[:, 3]
-        valid_z = w > 0.001
-        ndc_x = clip_pts[:, 0] / np.where(valid_z, w, 1.0)
-        ndc_y = clip_pts[:, 1] / np.where(valid_z, w, 1.0)
-
-        scr_x = (ndc_x + 1.0) * 0.5 * self.width()
-        scr_y = (1.0 - ndc_y) * 0.5 * self.height()
+        scr_x, scr_y, valid_z = self._project_to_screen(sub_pts)
 
         cx, cy = click_pos.x(), click_pos.y()
         dists_sq = (scr_x - cx) ** 2 + (scr_y - cy) ** 2
         dists_sq[~valid_z] = 1e9
 
         min_idx = np.argmin(dists_sq)
-        if dists_sq[min_idx] < (30.0 ** 2):  # 30ピクセル以内の最近傍
+        if dists_sq[min_idx] < (30.0 ** 2):
             best_centered = sub_pts[min_idx]
             best_world = best_centered.astype(np.float64) + self.center_offset
             return best_centered, best_world
 
         return None
 
-    def _process_selection_rect(self):
-        """スクリーン上の矩形選択範囲に含まれる原本点を判定"""
-        if self.points_centered is None or len(self.points_centered) == 0:
-            return
-
-        rect = QRect(self.selection_start, self.selection_end).normalized()
-        if rect.width() < 4 or rect.height() < 4:
-            return
-
+    def _project_to_screen(self, pts_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """3D点群をスクリーン2D座標に投影"""
         aspect = self.width() / max(1, self.height())
         proj = QMatrix4x4()
         near_plane = max(0.1, self.camera_distance * 0.01)
@@ -743,32 +946,107 @@ class PointCloudViewer(QOpenGLWidget):
         mvp = proj * view
         mvp_np = np.array(mvp.data(), dtype=np.float32).reshape((4, 4))
 
-        pts = self.points_centered
-        ones = np.ones((len(pts), 1), dtype=np.float32)
-        pts4 = np.hstack([pts, ones])
-
+        ones = np.ones((len(pts_centered), 1), dtype=np.float32)
+        pts4 = np.hstack([pts_centered, ones])
         clip_pts = pts4 @ mvp_np
 
         w = clip_pts[:, 3]
         valid_z = w > 0.001
-
         ndc_x = clip_pts[:, 0] / np.where(valid_z, w, 1.0)
         ndc_y = clip_pts[:, 1] / np.where(valid_z, w, 1.0)
 
         scr_x = (ndc_x + 1.0) * 0.5 * self.width()
         scr_y = (1.0 - ndc_y) * 0.5 * self.height()
 
-        in_rect = (
-            valid_z
-            & (scr_x >= rect.left())
-            & (scr_x <= rect.right())
-            & (scr_y >= rect.top())
-            & (scr_y <= rect.bottom())
-        )
+        return scr_x, scr_y, valid_z
 
-        selected = np.where(in_rect)[0]
+    def _process_selection(self):
+        """矩形または円形選択の実行 (断面スライス内の点のみを対象)"""
+        if self.points_centered is None or len(self.points_centered) == 0:
+            return
+
+        # 断面フィルタリング
+        in_section = np.ones(len(self.points_raw), dtype=bool)
+        if self.clip_x_enabled:
+            in_section &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
+        if self.clip_y_enabled:
+            in_section &= (self.points_raw[:, 1] >= self.clip_y_range[0]) & (self.points_raw[:, 1] <= self.clip_y_range[1])
+        if self.clip_z_enabled:
+            in_section &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
+
+        cand_indices = np.where(in_section)[0]
+        if len(cand_indices) == 0:
+            return
+
+        pts = self.points_centered[cand_indices]
+        scr_x, scr_y, valid_z = self._project_to_screen(pts)
+
+        if self.selection_shape == self.SELECT_RECT:
+            rect = QRect(self.selection_start, self.selection_end).normalized()
+            if rect.width() < 4 or rect.height() < 4:
+                return
+            in_shape = (
+                valid_z
+                & (scr_x >= rect.left())
+                & (scr_x <= rect.right())
+                & (scr_y >= rect.top())
+                & (scr_y <= rect.bottom())
+            )
+        elif self.selection_shape == self.SELECT_CIRCLE:
+            cx, cy = self.selection_start.x(), self.selection_start.y()
+            radius = math.hypot(self.selection_end.x() - cx, self.selection_end.y() - cy)
+            if radius < 3:
+                return
+            dists_sq = (scr_x - cx) ** 2 + (scr_y - cy) ** 2
+            in_shape = valid_z & (dists_sq <= (radius ** 2))
+        else:
+            return
+
+        selected = cand_indices[in_shape]
         self.selected_indices = selected
         self._update_active_colors()
         self._update_display_arrays()
         self.point_selected.emit(selected.tolist())
         self.status_changed.emit(f"範囲選択完了: {len(selected):,} 点を選択中")
+
+    def _process_polygon_selection(self):
+        """多角形(ポリゴン)選択の実行"""
+        if self.points_centered is None or len(self.points_centered) == 0 or len(self.polygon_points) < 3:
+            return
+
+        in_section = np.ones(len(self.points_raw), dtype=bool)
+        if self.clip_x_enabled:
+            in_section &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
+        if self.clip_y_enabled:
+            in_section &= (self.points_raw[:, 1] >= self.clip_y_range[0]) & (self.points_raw[:, 1] <= self.clip_y_range[1])
+        if self.clip_z_enabled:
+            in_section &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
+
+        cand_indices = np.where(in_section)[0]
+        if len(cand_indices) == 0:
+            return
+
+        pts = self.points_centered[cand_indices]
+        scr_x, scr_y, valid_z = self._project_to_screen(pts)
+
+        # 多角形内外判定 (Ray Castingアルゴリズムの高速ベクトル化)
+        poly = np.array([[p.x(), p.y()] for p in self.polygon_points], dtype=np.float32)
+        n_poly = len(poly)
+        inside = np.zeros(len(pts), dtype=bool)
+
+        j = n_poly - 1
+        for i in range(n_poly):
+            xi, yi = poly[i]
+            xj, yj = poly[j]
+            cond = ((yi > scr_y) != (yj > scr_y)) & (
+                scr_x < (xj - xi) * (scr_y - yi) / np.maximum(1e-6, np.abs(yj - yi)) * np.sign(yj - yi) + xi
+            )
+            inside ^= cond
+            j = i
+
+        selected = cand_indices[valid_z & inside]
+        self.selected_indices = selected
+        self._update_active_colors()
+        self._update_display_arrays()
+        self.point_selected.emit(selected.tolist())
+        self.status_changed.emit(f"多角形選択完了: {len(selected):,} 点を選択中")

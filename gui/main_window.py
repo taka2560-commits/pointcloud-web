@@ -1,8 +1,10 @@
 """
 PySide6によるE57点群ノイズ処理ツールのメインウィンドウ
-3D点群ビューア（OpenGL）をシームレスに統合し、表示操作および手動/自動ノイズ除去を提供します。
-Web版の機能（全体フィット、正射影切替、WASD移動、ダブルクリック中心移動、2点間寸法計測、
-Point Budget描画点数制限、点形状切替、背景色変更、サイドバー格納）をローカル版にも全面実装。
+- 数学座標系（Z-up）に準拠した表示およびXYZ軸方向ギズモ
+- 見ている画面に対するWASDフライスルー移動
+- XYZ別シーク断面スライサー (各軸の位置・厚みスライダーによる断面抽出)
+- 手動選択ツール（矩形、円形、多角形ポリゴン選択）
+- 2点間寸法計測、全体フィット、正射影/透視投影、描画点数バジェット
 """
 
 import os
@@ -52,13 +54,15 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(1000, 650))
         self.setStyleSheet(DARK_THEME_QSS)
 
-        # ドラッグ＆ドロップの有効化
         self.setAcceptDrops(True)
 
-        # 点群データと履歴管理 (Undo用)
         self.current_scans: List[E57ScanData] = []
         self.undo_stack: List[List[E57ScanData]] = []
         self.worker: Optional[ProcessWorker] = None
+
+        # 点群のワールド範囲キャッシュ
+        self.world_min = np.array([-10.0, -10.0, -5.0])
+        self.world_max = np.array([10.0, 10.0, 5.0])
 
         self._init_ui()
         self._setup_shortcuts()
@@ -113,8 +117,8 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addWidget(file_group)
 
-        # 2. 3D表示・カメラ操作パネル
-        view_group = QGroupBox("3D表示・カメラ操作")
+        # 2. 3D表示・カメラ操作パネル (数学座標系: Z-up)
+        view_group = QGroupBox("3D表示・カメラ操作 (数学座標系)")
         view_layout = QGridLayout(view_group)
 
         # 視点プリセット
@@ -122,15 +126,15 @@ class MainWindow(QMainWindow):
         view_btn_layout = QHBoxLayout()
         self.btn_view_iso = QPushButton("等角")
         self.btn_view_iso.clicked.connect(lambda: self.viewer.reset_view())
-        self.btn_view_top = QPushButton("上面")
+        self.btn_view_top = QPushButton("上面 (XY)")
         self.btn_view_top.clicked.connect(lambda: self.viewer.set_view_top())
-        self.btn_view_front = QPushButton("正面")
+        self.btn_view_front = QPushButton("正面 (XZ)")
         self.btn_view_front.clicked.connect(lambda: self.viewer.set_view_front())
-        self.btn_view_side = QPushButton("側面")
+        self.btn_view_side = QPushButton("側面 (YZ)")
         self.btn_view_side.clicked.connect(lambda: self.viewer.set_view_side())
 
         for b in [self.btn_view_iso, self.btn_view_top, self.btn_view_front, self.btn_view_side]:
-            b.setStyleSheet("padding: 4px 6px; font-size: 11px;")
+            b.setStyleSheet("padding: 4px 5px; font-size: 11px;")
             view_btn_layout.addWidget(b)
         view_layout.addLayout(view_btn_layout, 0, 1)
 
@@ -181,14 +185,14 @@ class MainWindow(QMainWindow):
         self.shape_combo.currentIndexChanged.connect(self._on_point_shape_changed)
         view_layout.addWidget(self.shape_combo, 4, 1)
 
-        # 最大描画点数 (Point Budget / 2700万点など巨大点群の超高速化)
+        # 最大描画点数 (Point Budget)
         view_layout.addWidget(QLabel("描画点数:"), 5, 0)
         self.budget_combo = QComboBox()
         self.budget_combo.addItem("100万点 (超高速・推奨)", 1000000)
         self.budget_combo.addItem("200万点 (標準)", 2000000)
         self.budget_combo.addItem("500万点 (高精細)", 5000000)
         self.budget_combo.addItem("全点表示 (無制限)", 0)
-        self.budget_combo.setCurrentIndex(1)  # 200万点
+        self.budget_combo.setCurrentIndex(1)
         self.budget_combo.currentIndexChanged.connect(self._on_budget_changed)
         view_layout.addWidget(self.budget_combo, 5, 1)
 
@@ -210,8 +214,107 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addWidget(view_group)
 
-        # 3. ノイズ除去・計測ツールパネル
-        tools_group = QGroupBox("編集・計測ツール")
+        # 3. XYZ別 シーク断面スライサー
+        section_group = QGroupBox("📐 XYZ断面シークスライサー")
+        sec_layout = QVBoxLayout(section_group)
+
+        # X断面
+        x_box = QWidget()
+        x_layout = QVBoxLayout(x_box)
+        x_layout.setContentsMargins(0, 2, 0, 2)
+        x_head = QHBoxLayout()
+        self.chk_sec_x = QCheckBox("X断面スライス (左右)")
+        self.chk_sec_x.toggled.connect(self._on_section_x_changed)
+        x_head.addWidget(self.chk_sec_x)
+        self.lbl_sec_x = QLabel("位置: 0.0m (厚み: 2.0m)")
+        self.lbl_sec_x.setStyleSheet("font-size: 11px; color: #38bdf8;")
+        x_head.addStretch()
+        x_head.addWidget(self.lbl_sec_x)
+        x_layout.addLayout(x_head)
+
+        x_sliders = QHBoxLayout()
+        self.slider_pos_x = QSlider(Qt.Horizontal)
+        self.slider_pos_x.setRange(-1000, 1000)
+        self.slider_pos_x.setValue(0)
+        self.slider_pos_x.valueChanged.connect(self._on_section_x_changed)
+        x_sliders.addWidget(QLabel("位置:"))
+        x_sliders.addWidget(self.slider_pos_x)
+
+        self.slider_thick_x = QSlider(Qt.Horizontal)
+        self.slider_thick_x.setRange(1, 200)  # 0.1m - 20.0m
+        self.slider_thick_x.setValue(20)      # 2.0m
+        self.slider_thick_x.valueChanged.connect(self._on_section_x_changed)
+        x_sliders.addWidget(QLabel("厚み:"))
+        x_sliders.addWidget(self.slider_thick_x)
+        x_layout.addLayout(x_sliders)
+        sec_layout.addWidget(x_box)
+
+        # Y断面
+        y_box = QWidget()
+        y_layout = QVBoxLayout(y_box)
+        y_layout.setContentsMargins(0, 2, 0, 2)
+        y_head = QHBoxLayout()
+        self.chk_sec_y = QCheckBox("Y断面スライス (奥行)")
+        self.chk_sec_y.toggled.connect(self._on_section_y_changed)
+        y_head.addWidget(self.chk_sec_y)
+        self.lbl_sec_y = QLabel("位置: 0.0m (厚み: 2.0m)")
+        self.lbl_sec_y.setStyleSheet("font-size: 11px; color: #38bdf8;")
+        y_head.addStretch()
+        y_head.addWidget(self.lbl_sec_y)
+        y_layout.addLayout(y_head)
+
+        y_sliders = QHBoxLayout()
+        self.slider_pos_y = QSlider(Qt.Horizontal)
+        self.slider_pos_y.setRange(-1000, 1000)
+        self.slider_pos_y.setValue(0)
+        self.slider_pos_y.valueChanged.connect(self._on_section_y_changed)
+        y_sliders.addWidget(QLabel("位置:"))
+        y_sliders.addWidget(self.slider_pos_y)
+
+        self.slider_thick_y = QSlider(Qt.Horizontal)
+        self.slider_thick_y.setRange(1, 200)
+        self.slider_thick_y.setValue(20)
+        self.slider_thick_y.valueChanged.connect(self._on_section_y_changed)
+        y_sliders.addWidget(QLabel("厚み:"))
+        y_sliders.addWidget(self.slider_thick_y)
+        y_layout.addLayout(y_sliders)
+        sec_layout.addWidget(y_box)
+
+        # Z断面
+        z_box = QWidget()
+        z_layout = QVBoxLayout(z_box)
+        z_layout.setContentsMargins(0, 2, 0, 2)
+        z_head = QHBoxLayout()
+        self.chk_sec_z = QCheckBox("Z断面スライス (高さ/フロア)")
+        self.chk_sec_z.toggled.connect(self._on_section_z_changed)
+        z_head.addWidget(self.chk_sec_z)
+        self.lbl_sec_z = QLabel("位置: 0.0m (厚み: 2.0m)")
+        self.lbl_sec_z.setStyleSheet("font-size: 11px; color: #38bdf8;")
+        z_head.addStretch()
+        z_head.addWidget(self.lbl_sec_z)
+        z_layout.addLayout(z_head)
+
+        z_sliders = QHBoxLayout()
+        self.slider_pos_z = QSlider(Qt.Horizontal)
+        self.slider_pos_z.setRange(-1000, 1000)
+        self.slider_pos_z.setValue(0)
+        self.slider_pos_z.valueChanged.connect(self._on_section_z_changed)
+        z_sliders.addWidget(QLabel("位置:"))
+        z_sliders.addWidget(self.slider_pos_z)
+
+        self.slider_thick_z = QSlider(Qt.Horizontal)
+        self.slider_thick_z.setRange(1, 200)
+        self.slider_thick_z.setValue(20)
+        self.slider_thick_z.valueChanged.connect(self._on_section_z_changed)
+        z_sliders.addWidget(QLabel("厚み:"))
+        z_sliders.addWidget(self.slider_thick_z)
+        z_layout.addLayout(z_sliders)
+        sec_layout.addWidget(z_box)
+
+        sidebar_layout.addWidget(section_group)
+
+        # 4. 手動選択・編集・計測ツール
+        tools_group = QGroupBox("編集・選択ツール (矩形 / 円 / 多角形)")
         tools_layout = QVBoxLayout(tools_group)
 
         # 計測ツールトグルボタン
@@ -221,17 +324,34 @@ class MainWindow(QMainWindow):
         self.btn_measure.toggled.connect(self._toggle_measure_mode)
         tools_layout.addWidget(self.btn_measure)
 
-        # 手動矩形選択ツール
-        manual_btn_layout = QHBoxLayout()
-        self.select_mode_btn = QPushButton("矩形選択モード")
+        # 選択形状セレクタ & モード切替
+        sel_shape_layout = QHBoxLayout()
+        sel_shape_layout.addWidget(QLabel("選択形状:"))
+        self.select_shape_combo = QComboBox()
+        self.select_shape_combo.addItem("矩形 (四角)", PointCloudViewer.SELECT_RECT)
+        self.select_shape_combo.addItem("円形 (サークル)", PointCloudViewer.SELECT_CIRCLE)
+        self.select_shape_combo.addItem("多角形 (ポリゴン)", PointCloudViewer.SELECT_POLYGON)
+        self.select_shape_combo.currentIndexChanged.connect(self._on_selection_shape_changed)
+        sel_shape_layout.addWidget(self.select_shape_combo)
+
+        self.select_mode_btn = QPushButton("手動選択モード")
         self.select_mode_btn.setCheckable(True)
         self.select_mode_btn.toggled.connect(self._toggle_selection_mode)
-        manual_btn_layout.addWidget(self.select_mode_btn)
+        sel_shape_layout.addWidget(self.select_mode_btn)
+        tools_layout.addLayout(sel_shape_layout)
 
-        self.clear_sel_btn = QPushButton("選択解除")
+        # 多角形確定ボタン & 選択解除ボタン
+        poly_action_layout = QHBoxLayout()
+        self.btn_poly_confirm = QPushButton("多角形を確定 (Enter)")
+        self.btn_poly_confirm.setStyleSheet("background-color: #0f766e; font-size: 11px;")
+        self.btn_poly_confirm.clicked.connect(self._confirm_polygon_selection)
+        self.btn_poly_confirm.setEnabled(False)
+        poly_action_layout.addWidget(self.btn_poly_confirm)
+
+        self.clear_sel_btn = QPushButton("選択解除 (Esc)")
         self.clear_sel_btn.clicked.connect(self._clear_selection)
-        manual_btn_layout.addWidget(self.clear_sel_btn)
-        tools_layout.addLayout(manual_btn_layout)
+        poly_action_layout.addWidget(self.clear_sel_btn)
+        tools_layout.addLayout(poly_action_layout)
 
         manual_action_layout = QHBoxLayout()
         self.delete_pts_btn = QPushButton("選択点を削除 (Delete)")
@@ -245,7 +365,7 @@ class MainWindow(QMainWindow):
         manual_action_layout.addWidget(self.undo_btn)
         tools_layout.addLayout(manual_action_layout)
 
-        self.manual_status_label = QLabel("※矩形選択モードで画面上をドラッグして点を選択できます")
+        self.manual_status_label = QLabel("※選択モードONで画面上の点を囲んで削除できます (断面スライス併用可)")
         self.manual_status_label.setWordWrap(True)
         self.manual_status_label.setStyleSheet("color: #888899; font-size: 11px;")
         tools_layout.addWidget(self.manual_status_label)
@@ -256,7 +376,7 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addWidget(tools_group)
 
-        # 4. 自動ノイズ除去フィルタ設定
+        # 5. 自動ノイズ除去フィルタ設定
         auto_group = QGroupBox("自動ノイズ除去フィルタ")
         auto_layout = QVBoxLayout(auto_group)
 
@@ -268,13 +388,11 @@ class MainWindow(QMainWindow):
         self.sor_chk = QCheckBox("統計的外れ値除去 (SOR) を有効化")
         self.sor_chk.setChecked(True)
         sor_l.addWidget(self.sor_chk, 0, 0, 1, 2)
-
         sor_l.addWidget(QLabel("近傍探索点数:"), 1, 0)
         self.sor_k_spin = QSpinBox()
         self.sor_k_spin.setRange(5, 200)
         self.sor_k_spin.setValue(20)
         sor_l.addWidget(self.sor_k_spin, 1, 1)
-
         sor_l.addWidget(QLabel("標準偏差倍率:"), 2, 0)
         self.sor_r_spin = QDoubleSpinBox()
         self.sor_r_spin.setRange(0.1, 10.0)
@@ -301,7 +419,7 @@ class MainWindow(QMainWindow):
         ror_l.addWidget(self.ror_pts_spin, 2, 1)
         tab_widget.addTab(ror_tab, "ROR")
 
-        # 距離・間引き
+        # 間引き
         other_tab = QWidget()
         other_l = QGridLayout(other_tab)
         self.voxel_chk = QCheckBox("ボクセル間引き")
@@ -322,7 +440,7 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addWidget(auto_group)
 
-        # 5. ステータス・ログ
+        # 6. ステータス・ログ
         log_group = QGroupBox("ステータス")
         log_layout = QVBoxLayout(log_group)
         self.progress_bar = QProgressBar()
@@ -345,20 +463,18 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
 
-        # 上部ナビゲーションバー（高さを38pxに固定し、3Dビューアを最大化）
+        # ナビゲーションバー
         nav_bar = QWidget()
         nav_bar.setFixedHeight(38)
         nav_bar.setStyleSheet("background-color: #17171c; border-bottom: 1px solid #333344;")
         nav_layout = QHBoxLayout(nav_bar)
         nav_layout.setContentsMargins(8, 2, 8, 2)
 
-        # サイドバー格納/展開ボタン
         self.btn_toggle_sidebar = QPushButton("◀ パネル格納")
         self.btn_toggle_sidebar.setStyleSheet("padding: 3px 8px; font-size: 11px; background-color: #334155;")
         self.btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
         nav_layout.addWidget(self.btn_toggle_sidebar)
 
-        # ナビバー上のクイックボタン
         nav_btn_fit = QPushButton("フィット (F)")
         nav_btn_fit.setStyleSheet("padding: 3px 8px; font-size: 11px;")
         nav_btn_fit.clicked.connect(lambda: self.viewer.fit_to_screen())
@@ -376,7 +492,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.nav_btn_measure)
 
         help_label = QLabel(
-            "操作: [左ドラッグ]回転 | [右/中]移動 | [ホイール]ズーム | [WASD]移動 | [ダブルクリック]中心移動"
+            "操作: [左ドラッグ]回転 | [右/中]画面基準パン | [ホイール]ズーム | [W/A/S/D]画面基準移動 | [ダブルクリック]中心移動"
         )
         help_label.setStyleSheet("color: #94a3b8; font-size: 11px; margin-left: 6px;")
         nav_layout.addWidget(help_label)
@@ -386,41 +502,34 @@ class MainWindow(QMainWindow):
         self.point_count_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 12px;")
         nav_layout.addWidget(self.point_count_label)
 
-        # 重要: nav_barは stretch 0, viewerは stretch 1 に設定して3D画面を画面いっぱいに広げる
         right_layout.addWidget(nav_bar, 0)
 
-        # 3D点群ビューアウィジェット
+        # 3D点群ビューア
         self.viewer = PointCloudViewer()
         self.viewer.status_changed.connect(self._on_viewer_status)
         self.viewer.point_selected.connect(self._on_points_selected)
         self.viewer.projection_changed.connect(self._on_projection_changed)
+        self.viewer.bounds_ready.connect(self._on_bounds_ready)
         self.viewer.measure_updated.connect(lambda msg: self.status_label.setText(msg))
         right_layout.addWidget(self.viewer, 1)
 
         self.splitter.addWidget(right_container)
-        # スプリッター初期比率（サイドバー 360px、メイン3D画面 1040px）
         self.splitter.setSizes([360, 1040])
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
 
     def _setup_shortcuts(self):
         """ショートカットキーの設定"""
-        # Deleteキーで選択点を削除
         del_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
         del_shortcut.activated.connect(self._delete_selected_points)
 
-        # Ctrl+Zで元に戻す
         undo_shortcut = QShortcut(QKeySequence.Undo, self)
         undo_shortcut.activated.connect(self._undo_action)
 
     def _toggle_sidebar(self):
-        """サイドバーの折りたたみ・展開切替"""
         is_visible = self.sidebar_scroll.isVisible()
         self.sidebar_scroll.setVisible(not is_visible)
-        if is_visible:
-            self.btn_toggle_sidebar.setText("▶ パネル展開")
-        else:
-            self.btn_toggle_sidebar.setText("◀ パネル格納")
+        self.btn_toggle_sidebar.setText("▶ パネル展開" if is_visible else "◀ パネル格納")
 
     def _on_projection_changed(self, is_ortho: bool):
         mode_str = "正射影" if is_ortho else "透視投影"
@@ -443,17 +552,76 @@ class MainWindow(QMainWindow):
             self.viewer.update()
             self.status_label.setText("計測モードを終了しました")
 
+    def _on_selection_shape_changed(self, index: int):
+        shape = self.select_shape_combo.currentData()
+        self.viewer.selection_shape = shape
+        self.btn_poly_confirm.setEnabled(shape == PointCloudViewer.SELECT_POLYGON)
+        if shape == PointCloudViewer.SELECT_POLYGON:
+            self.manual_status_label.setText("【多角形選択】左クリックで頂点追加、ダブルクリックまたはEnterで確定")
+        elif shape == PointCloudViewer.SELECT_CIRCLE:
+            self.manual_status_label.setText("【円形選択】中心からドラッグして円を描いてください")
+        else:
+            self.manual_status_label.setText("【矩形選択】ドラッグして四角く囲んでください")
+
+    def _confirm_polygon_selection(self):
+        if len(self.viewer.polygon_points) >= 3:
+            self.viewer._process_polygon_selection()
+            self.viewer.polygon_points.clear()
+            self.viewer.update()
+
+    def _on_bounds_ready(self, b_min: np.ndarray, b_max: np.ndarray):
+        """点群のワールド範囲に合わせて断面スライダーの範囲を初期化"""
+        self.world_min = b_min
+        self.world_max = b_max
+
+        # Xスライダー
+        self.slider_pos_x.setRange(int(b_min[0] * 10), int(b_max[0] * 10))
+        self.slider_pos_x.setValue(int((b_min[0] + b_max[0]) * 5))
+
+        # Yスライダー
+        self.slider_pos_y.setRange(int(b_min[1] * 10), int(b_max[1] * 10))
+        self.slider_pos_y.setValue(int((b_min[1] + b_max[1]) * 5))
+
+        # Zスライダー
+        self.slider_pos_z.setRange(int(b_min[2] * 10), int(b_max[2] * 10))
+        self.slider_pos_z.setValue(int((b_min[2] + b_max[2]) * 5))
+
+        self._on_section_x_changed()
+        self._on_section_y_changed()
+        self._on_section_z_changed()
+
+    def _on_section_x_changed(self):
+        enabled = self.chk_sec_x.isChecked()
+        pos = self.slider_pos_x.value() / 10.0
+        thick = self.slider_thick_x.value() / 10.0
+        half = thick / 2.0
+        self.lbl_sec_x.setText(f"X: {pos:.1f}m (厚: {thick:.1f}m)")
+        self.viewer.set_section_x(enabled, pos - half, pos + half)
+
+    def _on_section_y_changed(self):
+        enabled = self.chk_sec_y.isChecked()
+        pos = self.slider_pos_y.value() / 10.0
+        thick = self.slider_thick_y.value() / 10.0
+        half = thick / 2.0
+        self.lbl_sec_y.setText(f"Y: {pos:.1f}m (厚: {thick:.1f}m)")
+        self.viewer.set_section_y(enabled, pos - half, pos + half)
+
+    def _on_section_z_changed(self):
+        enabled = self.chk_sec_z.isChecked()
+        pos = self.slider_pos_z.value() / 10.0
+        thick = self.slider_thick_z.value() / 10.0
+        half = thick / 2.0
+        self.lbl_sec_z.setText(f"Z: {pos:.1f}m (厚: {thick:.1f}m)")
+        self.viewer.set_section_z(enabled, pos - half, pos + half)
+
     def _on_point_shape_changed(self, index: int):
-        shape = self.shape_combo.currentData()
-        self.viewer.set_point_shape(shape)
+        self.viewer.set_point_shape(self.shape_combo.currentData())
 
     def _on_budget_changed(self, index: int):
-        budget = self.budget_combo.currentData()
-        self.viewer.set_point_budget(budget)
+        self.viewer.set_point_budget(self.budget_combo.currentData())
 
     def _on_bg_color_changed(self, index: int):
-        color = self.bg_combo.currentData()
-        self.viewer.set_bg_color(color)
+        self.viewer.set_bg_color(self.bg_combo.currentData())
 
     def _on_input_file_changed(self, text: str):
         path = text.strip()
@@ -462,7 +630,6 @@ class MainWindow(QMainWindow):
             suggested_out = f"{base}_cleaned{ext}"
             if not self.output_edit.text() or self.output_edit.text().endswith("_cleaned.e57"):
                 self.output_edit.setText(suggested_out)
-            # 即座に3Dビューアに読み込み
             self._load_file_to_viewer(path)
 
     def _browse_input_file(self):
@@ -511,7 +678,6 @@ class MainWindow(QMainWindow):
             self.undo_stack.clear()
             self.undo_btn.setEnabled(False)
 
-            # 全スキャンの点群を統合してビューアに設定
             self._update_viewer_from_scans()
 
             total_pts = sum(s.point_count for s in self.current_scans)
@@ -555,16 +721,18 @@ class MainWindow(QMainWindow):
     def _toggle_selection_mode(self, enabled: bool):
         self.viewer.selection_mode = enabled
         if enabled:
-            self.select_mode_btn.setText("矩形選択モード: ON")
+            shape_str = self.select_shape_combo.currentText()
+            self.select_mode_btn.setText(f"選択モード: ON ({shape_str})")
             self.select_mode_btn.setStyleSheet("background-color: #0078d4; font-weight: bold;")
-            self.manual_status_label.setText("【選択中】画面上をマウス左ドラッグで四角く囲んでください")
         else:
-            self.select_mode_btn.setText("矩形選択モード")
+            self.select_mode_btn.setText("手動選択モード")
             self.select_mode_btn.setStyleSheet("")
-            self.manual_status_label.setText("※「矩形選択モード」をONにして画面上をドラッグすると点を選択できます")
+            self.viewer.polygon_points.clear()
+            self.viewer.update()
 
     def _clear_selection(self):
         self.viewer.selected_indices = np.array([], dtype=np.int64)
+        self.viewer.polygon_points.clear()
         self.viewer._update_active_colors()
         self.viewer._update_display_arrays()
         self.viewer.update()
@@ -579,7 +747,6 @@ class MainWindow(QMainWindow):
         if len(selected_idx) == 0:
             return
 
-        # 現在の状態をUndoスタックに退避
         saved_scans = [
             E57ScanData(
                 scan_index=s.scan_index,
@@ -619,7 +786,6 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"{del_count:,} 点を削除しました")
 
     def _undo_action(self):
-        """直前の操作を取り消す (Undo)"""
         if not self.undo_stack:
             return
 
@@ -631,7 +797,6 @@ class MainWindow(QMainWindow):
         self.status_label.setText("操作を取り消しました")
 
     def _save_current_scans(self):
-        """現在の手動編集結果をE57に書き出す"""
         if not self.current_scans:
             QMessageBox.warning(self, "警告", "保存する点群データがありません。")
             return
@@ -659,7 +824,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText("保存失敗")
 
     def _run_auto_processing(self):
-        """自動フィルタ処理を実行"""
         in_path = self.input_edit.text().strip()
         out_path = self.output_edit.text().strip()
 
@@ -697,7 +861,6 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         self.status_label.setText("自動ノイズ処理が完了しました")
 
-        # 処理後のファイルをビューアにロード
         self._load_file_to_viewer(summary.output_file)
 
         res_msg = (
