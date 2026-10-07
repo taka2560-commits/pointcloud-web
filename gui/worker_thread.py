@@ -101,3 +101,31 @@ class PreviewWorker(QThread):
             self.preview_ready.emit(inliers, outliers)
         except Exception as e:
             self.preview_error.emit(str(e))
+
+
+class FileLoadWorker(QThread):
+    """E57ファイル読み込みを実行するバックグラウンドワーカースレッド"""
+
+    progress_changed = Signal(int, str)  # (0-100%, メッセージ)
+    finished_success = Signal(list)      # List[E57ScanData]
+    finished_error = Signal(str)         # エラーメッセージ
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            def callback(ratio: float, msg: str):
+                percent = int(ratio * 100)
+                self.progress_changed.emit(percent, msg)
+
+            scans = read_e57_scans(self.file_path, progress_callback=callback)
+            if not scans:
+                raise ValueError("E57ファイル内にスキャンデータが見つかりませんでした。")
+
+            self.progress_changed.emit(100, "点群読み込み完了")
+            self.finished_success.emit(scans)
+        except Exception as e:
+            self.finished_error.emit(str(e))
+

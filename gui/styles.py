@@ -127,17 +127,18 @@ QSpinBox:focus, QDoubleSpinBox:focus {
 }
 
 QProgressBar {
-    border: 1px solid #3d3d4d;
+    border: 1px solid #1e293b;
     border-radius: 6px;
     text-align: center;
-    background-color: #16161c;
+    background-color: #0f172a;
     color: #ffffff;
     font-weight: bold;
-    height: 22px;
+    font-size: 12px;
+    height: 24px;
 }
 
 QProgressBar::chunk {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0078d4, stop:1 #00bcbc);
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0ea5e9, stop:1 #22bdd6);
     border-radius: 5px;
 }
 

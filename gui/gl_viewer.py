@@ -841,15 +841,16 @@ class PointCloudViewer(QOpenGLWidget):
         move_speed = max(0.2, self.camera_distance * 0.05)
         forward, right, up = self._get_camera_vectors()
 
+        # 見ている画面に対する直感的なWASD移動 (W:画面上, S:画面下, A:画面左, D:画面右, Q:画面奥, E:画面手前)
         if key == Qt.Key_W:
-            self.camera_target.setX(self.camera_target.x() + float(forward[0] * move_speed))
-            self.camera_target.setY(self.camera_target.y() + float(forward[1] * move_speed))
-            self.camera_target.setZ(self.camera_target.z() + float(forward[2] * move_speed))
+            self.camera_target.setX(self.camera_target.x() + float(up[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() + float(up[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() + float(up[2] * move_speed))
             self.update()
         elif key == Qt.Key_S:
-            self.camera_target.setX(self.camera_target.x() - float(forward[0] * move_speed))
-            self.camera_target.setY(self.camera_target.y() - float(forward[1] * move_speed))
-            self.camera_target.setZ(self.camera_target.z() - float(forward[2] * move_speed))
+            self.camera_target.setX(self.camera_target.x() - float(up[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() - float(up[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() - float(up[2] * move_speed))
             self.update()
         elif key == Qt.Key_A:
             self.camera_target.setX(self.camera_target.x() - float(right[0] * move_speed))
@@ -862,14 +863,14 @@ class PointCloudViewer(QOpenGLWidget):
             self.camera_target.setZ(self.camera_target.z() + float(right[2] * move_speed))
             self.update()
         elif key == Qt.Key_Q:
-            self.camera_target.setX(self.camera_target.x() + float(up[0] * move_speed))
-            self.camera_target.setY(self.camera_target.y() + float(up[1] * move_speed))
-            self.camera_target.setZ(self.camera_target.z() + float(up[2] * move_speed))
+            self.camera_target.setX(self.camera_target.x() + float(forward[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() + float(forward[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() + float(forward[2] * move_speed))
             self.update()
         elif key == Qt.Key_E:
-            self.camera_target.setX(self.camera_target.x() - float(up[0] * move_speed))
-            self.camera_target.setY(self.camera_target.y() - float(up[1] * move_speed))
-            self.camera_target.setZ(self.camera_target.z() - float(up[2] * move_speed))
+            self.camera_target.setX(self.camera_target.x() - float(forward[0] * move_speed))
+            self.camera_target.setY(self.camera_target.y() - float(forward[1] * move_speed))
+            self.camera_target.setZ(self.camera_target.z() - float(forward[2] * move_speed))
             self.update()
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             if self.selection_mode and self.selection_shape == self.SELECT_POLYGON and len(self.polygon_points) >= 3:

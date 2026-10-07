@@ -39,7 +39,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, 
 
 from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
-from gui.worker_thread import ProcessWorker
+from gui.worker_thread import ProcessWorker, FileLoadWorker
 from gui.gl_viewer import PointCloudViewer
 from gui.styles import DARK_THEME_QSS
 
@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self.current_scans: List[E57ScanData] = []
         self.undo_stack: List[List[E57ScanData]] = []
         self.worker: Optional[ProcessWorker] = None
+        self.load_worker: Optional[FileLoadWorker] = None
 
         # 点群のワールド範囲キャッシュ
         self.world_min = np.array([-10.0, -10.0, -5.0])
@@ -664,28 +665,46 @@ class MainWindow(QMainWindow):
                 self.input_edit.setText(path)
 
     def _load_file_to_viewer(self, file_path: str):
-        """E57ファイルを読み込み、3Dビューアに反映する"""
-        try:
-            self.status_label.setText(f"ファイル読み込み中: {os.path.basename(file_path)}...")
-            self.log_text.append(f"読み込み中: {file_path}")
+        """E57ファイルをバックグラウンドスレッドで読み込み、進捗バーをリアルタイム更新する"""
+        fname = os.path.basename(file_path)
+        self.status_label.setText(f"点群読み込み中: {fname} (0%)")
+        self.progress_bar.setValue(0)
+        self.log_text.append(f"--- 点群読み込み開始: {fname} ---")
 
-            scans = read_e57_scans(file_path)
-            if not scans:
-                QMessageBox.warning(self, "警告", "スキャンデータが見つかりませんでした。")
-                return
+        # 既存ワーカーの終了待ち
+        if self.load_worker and self.load_worker.isRunning():
+            self.load_worker.terminate()
+            self.load_worker.wait()
 
+        self.load_worker = FileLoadWorker(file_path)
+
+        def on_progress(percent: int, msg: str):
+            self.progress_bar.setValue(percent)
+            self.status_label.setText(f"{msg} ({percent}%)")
+
+        def on_success(scans):
             self.current_scans = scans
             self.undo_stack.clear()
             self.undo_btn.setEnabled(False)
 
+            self.status_label.setText("3Dビューアへ点群転送中...")
             self._update_viewer_from_scans()
 
             total_pts = sum(s.point_count for s in self.current_scans)
+            self.progress_bar.setValue(100)
+            self.status_label.setText(f"読み込み完了: {total_pts:,} 点")
             self.log_text.append(f"読み込み成功: スキャン数 {len(scans)}, 総点数 {total_pts:,} 点")
-            self.status_label.setText("準備完了")
-        except Exception as e:
-            QMessageBox.critical(self, "読み込みエラー", f"E57ファイルの読み込みに失敗しました:\n{e}")
+
+        def on_error(err_msg: str):
+            self.progress_bar.setValue(0)
             self.status_label.setText("読み込みエラー")
+            self.log_text.append(f"エラー: {err_msg}")
+            QMessageBox.critical(self, "読み込みエラー", f"E57ファイルの読み込みに失敗しました:\n{err_msg}")
+
+        self.load_worker.progress_changed.connect(on_progress)
+        self.load_worker.finished_success.connect(on_success)
+        self.load_worker.finished_error.connect(on_error)
+        self.load_worker.start()
 
     def _update_viewer_from_scans(self):
         """現在のスキャンリストから点群データをまとめてビューアに転送"""

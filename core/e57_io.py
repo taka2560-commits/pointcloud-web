@@ -52,21 +52,34 @@ class E57ScanData:
         )
 
 
-def read_e57_scans(file_path: str) -> List[E57ScanData]:
+def read_e57_scans(
+    file_path: str,
+    progress_callback: Optional[Any] = None,
+) -> List[E57ScanData]:
     """
     E57ファイルを読み込み、各スキャンの点群データオブジェクトのリストを返す。
     
     :param file_path: 入力E57ファイルのパス
+    :param progress_callback: 進捗コールバック関数 (ratio: float, msg: str)
     :return: E57ScanData のリスト
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"ファイルが見つかりません: {file_path}")
+
+    if progress_callback:
+        progress_callback(0.05, f"E57ヘッダー解析中: {os.path.basename(file_path)}")
 
     scans = []
     with pye57.E57(file_path, mode="r") as e57:
         scan_count = e57.scan_count
 
         for i in range(scan_count):
+            if progress_callback:
+                progress_callback(
+                    0.1 + (i / max(1, scan_count)) * 0.8,
+                    f"スキャン #{i + 1}/{scan_count} を読み込み中...",
+                )
+
             header = e57.get_header(i)
             raw_data = e57.read_scan_raw(i)
 
@@ -109,6 +122,9 @@ def read_e57_scans(file_path: str) -> List[E57ScanData]:
                 translation=translation,
             )
             scans.append(scan_data)
+
+    if progress_callback:
+        progress_callback(0.95, "点群データの統合中...")
 
     return scans
 
