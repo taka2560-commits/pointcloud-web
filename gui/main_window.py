@@ -809,22 +809,42 @@ class MainWindow(QMainWindow):
             return
 
         all_pts = []
+        has_any_color = any(
+            "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields
+            for s in self.current_scans if s.point_count > 0
+        )
+        has_any_int = any("intensity" in s.raw_fields for s in self.current_scans if s.point_count > 0)
+
         all_cols = []
         all_ints = []
 
         for s in self.current_scans:
+            if s.point_count == 0:
+                continue
             all_pts.append(s.points)
-            if "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields:
-                r = s.raw_fields["colorRed"]
-                g = s.raw_fields["colorGreen"]
-                b = s.raw_fields["colorBlue"]
-                all_cols.append(np.column_stack([r, g, b]))
-            if "intensity" in s.raw_fields:
-                all_ints.append(s.raw_fields["intensity"])
+            if has_any_color:
+                if "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields:
+                    r = np.asarray(s.raw_fields["colorRed"], dtype=np.float32)
+                    g = np.asarray(s.raw_fields["colorGreen"], dtype=np.float32)
+                    b = np.asarray(s.raw_fields["colorBlue"], dtype=np.float32)
+                    c = np.column_stack([r, g, b])
+                    max_c = float(np.max(c)) if len(c) > 0 else 1.0
+                    if max_c > 255.0:
+                        c = c / 65535.0
+                    elif max_c > 1.0:
+                        c = c / 255.0
+                    all_cols.append(np.clip(c, 0.0, 1.0))
+                else:
+                    all_cols.append(np.tile([0.3, 0.8, 0.95], (s.point_count, 1)).astype(np.float32))
+            if has_any_int:
+                if "intensity" in s.raw_fields:
+                    all_ints.append(np.asarray(s.raw_fields["intensity"], dtype=np.float32))
+                else:
+                    all_ints.append(np.zeros(s.point_count, dtype=np.float32))
 
-        combined_pts = np.vstack(all_pts) if all_pts else np.empty((0, 3))
-        combined_cols = np.vstack(all_cols) if len(all_cols) == len(all_pts) else None
-        combined_ints = np.concatenate(all_ints) if len(all_ints) == len(all_pts) else None
+        combined_pts = np.vstack(all_pts) if all_pts else np.empty((0, 3), dtype=np.float64)
+        combined_cols = np.vstack(all_cols) if all_cols else None
+        combined_ints = np.concatenate(all_ints) if all_ints else None
 
         self.viewer.set_point_cloud(combined_pts, combined_cols, combined_ints, reset_camera=True)
         self.point_count_label.setText(f"点数: {len(combined_pts):,} 点")
@@ -853,7 +873,7 @@ class MainWindow(QMainWindow):
         self.manual_status_label.setText("選択を解除しました")
 
     def _on_points_selected(self, indices: list):
-        self.manual_status_label.setText(f"選択中: {len(indices):,} 点 (赤色ハイライト) | [Delete]で削除")
+        self.manual_status_label.setText(f"選択中: {len(indices):,} 点 (黄色ハイライト) | [Delete]でノイズへ移動")
 
     def _delete_selected_points(self):
         """選択されている点をノイズレイヤーへ移動する (手動削除)"""
@@ -894,9 +914,14 @@ class MainWindow(QMainWindow):
         self.status_label.setText("操作を取り消しました")
 
     def _save_current_scans(self):
-        """通常点群レイヤーに属する点のみをE57ファイルとして保存 (ノイズ除外)"""
+        """通常点群レイヤーに属する点のみをE57ファイルとしてロスレス保存 (ノイズ除外・元座標/元属性100%保持)"""
         if not self.current_scans or self.viewer.layer_mask is None:
             QMessageBox.warning(self, "警告", "保存する点群データがありません。")
+            return
+
+        layer_mask = self.viewer.layer_mask
+        if int(np.sum(layer_mask)) == 0:
+            QMessageBox.warning(self, "警告", "通常点群レイヤーの点数が 0 点のため保存できません。")
             return
 
         out_path = self.output_edit.text().strip()
@@ -906,9 +931,12 @@ class MainWindow(QMainWindow):
             if not out_path:
                 return
 
+        if not out_path.lower().endswith(".e57"):
+            out_path += ".e57"
+            self.output_edit.setText(out_path)
+
         try:
-            self.status_label.setText("E57書き出し中 (通常点群のみ抽出)...")
-            layer_mask = self.viewer.layer_mask
+            self.status_label.setText("E57書き出し中 (元の座標精度・属性形式を維持して通常点群のみ抽出)...")
 
             # 通常点群のみを抽出したスキャンデータを生成
             filtered_scans = []
@@ -920,6 +948,8 @@ class MainWindow(QMainWindow):
                 current_offset = 0
                 for scan in self.current_scans:
                     n_s = len(scan.points)
+                    if n_s == 0:
+                        continue
                     s_mask = layer_mask[current_offset : current_offset + n_s]
                     keep_idx = np.where(s_mask)[0]
                     filtered_scans.append(scan.filter_by_indices(keep_idx))
@@ -934,7 +964,8 @@ class MainWindow(QMainWindow):
                 f"通常点群レイヤーの点群をE57ファイルに保存しました！\n\n"
                 f"・保存点数 (通常点群): {total_clean_pts:,} 点\n"
                 f"・除外点数 (ノイズ): {total_noise_pts:,} 点\n"
-                f"・保存先: {out_path}",
+                f"・保存先: {out_path}\n\n"
+                f"※元の座標値精度・属性フィールド・ポーズ情報はすべて完全に維持されています。",
             )
             self.log_text.append(f"保存完了: {out_path} (通常点群: {total_clean_pts:,} 点, ノイズ除外: {total_noise_pts:,} 点)")
             self.status_label.setText("保存完了")

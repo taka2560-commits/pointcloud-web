@@ -536,7 +536,10 @@ class PointCloudViewer(QOpenGLWidget):
 
         if colors is not None and len(colors) == len(points):
             c = np.asarray(colors, dtype=np.float32)
-            if np.max(c) > 1.0:
+            max_c = float(np.max(c)) if len(c) > 0 else 1.0
+            if max_c > 255.0:
+                c = c / 65535.0
+            elif max_c > 1.0:
                 c = c / 255.0
             self.colors_raw = np.clip(c, 0.0, 1.0)
         else:
@@ -1045,10 +1048,8 @@ class PointCloudViewer(QOpenGLWidget):
 
         return scr_x, scr_y, valid_z
 
-    def _process_selection(self):
-        if self.points_centered is None or len(self.points_centered) == 0:
-            return
-
+    def _get_selectable_mask(self) -> np.ndarray:
+        """断面スライスおよび現在表示ONのレイヤーに基づく選択対象マスクを取得"""
         in_section = np.ones(len(self.points_raw), dtype=bool)
         if self.clip_x_enabled:
             in_section &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
@@ -1057,7 +1058,22 @@ class PointCloudViewer(QOpenGLWidget):
         if self.clip_z_enabled:
             in_section &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
 
-        cand_indices = np.where(in_section)[0]
+        layer_vis = np.zeros(len(self.points_raw), dtype=bool)
+        if self.layer_mask is not None:
+            if self.show_normal_layer:
+                layer_vis |= self.layer_mask
+            if self.show_noise_layer:
+                layer_vis |= (~self.layer_mask)
+        else:
+            layer_vis[:] = True
+
+        return in_section & layer_vis
+
+    def _process_selection(self):
+        if self.points_centered is None or len(self.points_centered) == 0:
+            return
+
+        cand_indices = np.where(self._get_selectable_mask())[0]
         if len(cand_indices) == 0:
             return
 
@@ -1096,15 +1112,7 @@ class PointCloudViewer(QOpenGLWidget):
         if self.points_centered is None or len(self.points_centered) == 0 or len(self.polygon_points) < 3:
             return
 
-        in_section = np.ones(len(self.points_raw), dtype=bool)
-        if self.clip_x_enabled:
-            in_section &= (self.points_raw[:, 0] >= self.clip_x_range[0]) & (self.points_raw[:, 0] <= self.clip_x_range[1])
-        if self.clip_y_enabled:
-            in_section &= (self.points_raw[:, 1] >= self.clip_y_range[0]) & (self.points_raw[:, 1] <= self.clip_y_range[1])
-        if self.clip_z_enabled:
-            in_section &= (self.points_raw[:, 2] >= self.clip_z_range[0]) & (self.points_raw[:, 2] <= self.clip_z_range[1])
-
-        cand_indices = np.where(in_section)[0]
+        cand_indices = np.where(self._get_selectable_mask())[0]
         if len(cand_indices) == 0:
             return
 

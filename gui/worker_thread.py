@@ -112,26 +112,49 @@ class FileLoadWorker(QThread):
                 raise ValueError("E57ファイル内にスキャンデータが見つかりませんでした。")
 
             total_pts = sum(s.point_count for s in scans)
+            if total_pts == 0:
+                raise ValueError("E57ファイル内の有効な点数が 0 点です。")
+
             self.progress_changed.emit(70, "全スキャン点群の統合中...", f"総点数: {total_pts:,} 点")
 
-            # 2. 点群・属性配列の結合 (NumPy高速処理)
+            # 2. 点群・属性配列の結合 (NumPy高速処理・複数スキャン一部属性欠損対応)
             all_pts = []
+            has_any_color = any(
+                "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields
+                for s in scans if s.point_count > 0
+            )
+            has_any_int = any("intensity" in s.raw_fields for s in scans if s.point_count > 0)
+
             all_cols = []
             all_ints = []
 
             for s in scans:
+                if s.point_count == 0:
+                    continue
                 all_pts.append(s.points)
-                if "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields:
-                    r = s.raw_fields["colorRed"]
-                    g = s.raw_fields["colorGreen"]
-                    b = s.raw_fields["colorBlue"]
-                    all_cols.append(np.column_stack([r, g, b]))
-                if "intensity" in s.raw_fields:
-                    all_ints.append(s.raw_fields["intensity"])
+                if has_any_color:
+                    if "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields:
+                        r = np.asarray(s.raw_fields["colorRed"], dtype=np.float32)
+                        g = np.asarray(s.raw_fields["colorGreen"], dtype=np.float32)
+                        b = np.asarray(s.raw_fields["colorBlue"], dtype=np.float32)
+                        c = np.column_stack([r, g, b])
+                        max_c = float(np.max(c)) if len(c) > 0 else 1.0
+                        if max_c > 255.0:
+                            c = c / 65535.0
+                        elif max_c > 1.0:
+                            c = c / 255.0
+                        all_cols.append(np.clip(c, 0.0, 1.0))
+                    else:
+                        all_cols.append(np.tile([0.3, 0.8, 0.95], (s.point_count, 1)).astype(np.float32))
+                if has_any_int:
+                    if "intensity" in s.raw_fields:
+                        all_ints.append(np.asarray(s.raw_fields["intensity"], dtype=np.float32))
+                    else:
+                        all_ints.append(np.zeros(s.point_count, dtype=np.float32))
 
             combined_pts = np.vstack(all_pts) if all_pts else np.empty((0, 3), dtype=np.float64)
-            combined_cols = np.vstack(all_cols) if len(all_cols) == len(all_pts) else None
-            combined_ints = np.concatenate(all_ints) if len(all_ints) == len(all_pts) else None
+            combined_cols = np.vstack(all_cols) if all_cols else None
+            combined_ints = np.concatenate(all_ints) if all_ints else None
 
             self.progress_changed.emit(80, "中心オフセット & 座標系計算中...", "数学座標系(Z-up)へマッピング中")
 
@@ -150,17 +173,14 @@ class FileLoadWorker(QThread):
             # カラー正規化
             n = len(combined_pts)
             if combined_cols is not None and len(combined_cols) == n:
-                c = np.asarray(combined_cols, dtype=np.float32)
-                if np.max(c) > 1.0:
-                    c = c / 255.0
-                colors_raw = np.clip(c, 0.0, 1.0)
+                colors_raw = np.ascontiguousarray(combined_cols, dtype=np.float32)
                 active_colors = colors_raw.copy()
             else:
                 colors_raw = None
                 active_colors = np.tile([0.3, 0.8, 0.95], (n, 1)).astype(np.float32)
 
             if combined_ints is not None and len(combined_ints) == n:
-                intensities_raw = np.asarray(combined_ints, dtype=np.float32)
+                intensities_raw = np.ascontiguousarray(combined_ints, dtype=np.float32)
             else:
                 intensities_raw = None
 
@@ -171,10 +191,10 @@ class FileLoadWorker(QThread):
             if budget <= 0 or n <= budget:
                 display_points = points_centered
                 display_colors = active_colors
-                display_orig_indices = None
+                display_orig_indices = np.arange(n, dtype=np.int64)
             else:
                 step = max(1, int(math.ceil(n / budget)))
-                display_orig_indices = np.arange(0, n, step)
+                display_orig_indices = np.arange(0, n, step, dtype=np.int64)
                 display_points = np.ascontiguousarray(points_centered[display_orig_indices])
                 display_colors = np.ascontiguousarray(active_colors[display_orig_indices])
 

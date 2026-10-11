@@ -486,7 +486,8 @@ function setPointCloud(points, colors = null, fit = true) {
   }
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(currentPoints, 3));
+  const posFloat32 = currentPoints instanceof Float32Array ? currentPoints : new Float32Array(currentPoints);
+  geometry.setAttribute("position", new THREE.BufferAttribute(posFloat32, 3));
   geometry.setAttribute("color", new THREE.BufferAttribute(currentColors.slice(), 3));
   geometry.computeBoundingBox();
 
@@ -641,7 +642,7 @@ function deleteSelectedPoints() {
 
   const total = currentPoints.length / 3;
   const remainCount = total - selectedIndices.size;
-  const newPoints = new Float32Array(remainCount * 3);
+  const newPoints = new Float64Array(remainCount * 3);
   const newColors = new Float32Array(remainCount * 3);
 
   let p = 0;
@@ -861,26 +862,34 @@ function exportPLY() {
   let header = "ply\n";
   header += "format ascii 1.0\n";
   header += `element vertex ${n}\n`;
-  header += "property float x\n";
-  header += "property float y\n";
-  header += "property float z\n";
+  header += "property double x\n";
+  header += "property double y\n";
+  header += "property double z\n";
   header += "property uchar red\n";
   header += "property uchar green\n";
   header += "property uchar blue\n";
   header += "end_header\n";
 
-  let body = "";
+  const chunks = [header];
+  let lineBuf = "";
   for (let i = 0; i < n; i++) {
-    const x = currentPoints[i * 3].toFixed(4);
-    const y = currentPoints[i * 3 + 1].toFixed(4);
-    const z = currentPoints[i * 3 + 2].toFixed(4);
-    const r = Math.round(currentColors[i * 3] * 255);
-    const g = Math.round(currentColors[i * 3 + 1] * 255);
-    const b = Math.round(currentColors[i * 3 + 2] * 255);
-    body += `${x} ${y} ${z} ${r} ${g} ${b}\n`;
+    const x = currentPoints[i * 3];
+    const y = currentPoints[i * 3 + 1];
+    const z = currentPoints[i * 3 + 2];
+    const r = Math.min(255, Math.max(0, Math.round(currentColors[i * 3] * 255)));
+    const g = Math.min(255, Math.max(0, Math.round(currentColors[i * 3 + 1] * 255)));
+    const b = Math.min(255, Math.max(0, Math.round(currentColors[i * 3 + 2] * 255)));
+    lineBuf += `${x} ${y} ${z} ${r} ${g} ${b}\n`;
+    if (lineBuf.length > 65536) {
+      chunks.push(lineBuf);
+      lineBuf = "";
+    }
+  }
+  if (lineBuf.length > 0) {
+    chunks.push(lineBuf);
   }
 
-  const blob = new Blob([header + body], { type: "text/plain" });
+  const blob = new Blob(chunks, { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -890,35 +899,60 @@ function exportPLY() {
 }
 
 /**
- * テキスト点群パース
+ * テキスト点群パース (倍精度 Float64Array で元の座標値を完全保持)
  */
 function parseTextPointCloud(text) {
   const lines = text.trim().split(/\r?\n/);
   const pts = [];
   const cols = [];
+  let inPlyHeader = false;
 
   for (let line of lines) {
     line = line.trim();
     if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+    if (line === "ply") {
+      inPlyHeader = true;
+      continue;
+    }
+    if (inPlyHeader) {
+      if (line === "end_header") {
+        inPlyHeader = false;
+      }
+      continue;
+    }
+    if (
+      line.startsWith("format") ||
+      line.startsWith("comment") ||
+      line.startsWith("element") ||
+      line.startsWith("property") ||
+      line.startsWith("obj_info") ||
+      line.startsWith("end_header")
+    ) {
+      continue;
+    }
+
     const parts = line.split(/[\s,]+/);
     if (parts.length >= 3) {
-      const x = parseFloat(parts[0]);
-      const y = parseFloat(parts[1]);
-      const z = parseFloat(parts[2]);
-      if (isNaN(x) || isNaN(y) || isNaN(z)) continue;
+      const x = Number(parts[0]);
+      const y = Number(parts[1]);
+      const z = Number(parts[2]);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
       pts.push(x, y, z);
 
       if (parts.length >= 6) {
-        const r = parseFloat(parts[3]) / (parts[3] > 1 ? 255 : 1);
-        const g = parseFloat(parts[4]) / (parts[4] > 1 ? 255 : 1);
-        const b = parseFloat(parts[5]) / (parts[5] > 1 ? 255 : 1);
-        cols.push(r, g, b);
+        const rv = Number(parts[3]);
+        const gv = Number(parts[4]);
+        const bv = Number(parts[5]);
+        if (Number.isFinite(rv) && Number.isFinite(gv) && Number.isFinite(bv)) {
+          const scale = (rv > 1 || gv > 1 || bv > 1) ? 255 : 1;
+          cols.push(rv / scale, gv / scale, bv / scale);
+        }
       }
     }
   }
 
   return {
-    points: new Float32Array(pts),
+    points: new Float64Array(pts),
     colors: cols.length === pts.length ? new Float32Array(cols) : null,
   };
 }
@@ -1434,7 +1468,7 @@ async function loadLargeFileStreaming(file, targetBudget) {
   hideLoading();
 
   if (pts.length > 0) {
-    const pointsArr = new Float32Array(pts);
+    const pointsArr = new Float64Array(pts);
     const colorsArr = cols.length === pts.length ? new Float32Array(cols) : null;
 
     originalPoints = pointsArr.slice();

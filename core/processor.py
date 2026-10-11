@@ -174,6 +174,7 @@ class PointCloudProcessor:
         self,
         points: np.ndarray,
         log_callback: Optional[Callable[[str], None]] = None,
+        intensities: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         メモリ上の3D点群座標に対して各種フィルタを直接適用し、(keep_indices, removed_indices) を返す。
@@ -192,13 +193,27 @@ class PointCloudProcessor:
             if len(current) > 0:
                 d_idx = filter_distance(
                     points[current],
-                    min_distance=self.config.min_distance,
-                    max_distance=self.config.max_distance,
+                    min_dist=self.config.min_distance,
+                    max_dist=self.config.max_distance,
                 )
                 m = np.zeros(total, dtype=bool)
                 m[current[d_idx]] = True
                 keep_mask &= m
                 log(f"距離フィルタ適用: 残り {np.sum(keep_mask):,} 点")
+
+        # 1b. 反射強度フィルタ
+        if self.config.use_intensity_filter and intensities is not None and len(intensities) == total:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                i_idx = filter_intensity(
+                    intensities[current],
+                    min_intensity=self.config.min_intensity,
+                    max_intensity=self.config.max_intensity,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[i_idx]] = True
+                keep_mask &= m
+                log(f"反射強度フィルタ適用: 残り {np.sum(keep_mask):,} 点")
 
         # 2. ボクセル間引き
         if self.config.use_voxel_downsample and self.config.voxel_size > 0:
