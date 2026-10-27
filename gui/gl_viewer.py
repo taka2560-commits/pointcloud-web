@@ -314,6 +314,12 @@ class PointCloudViewer(QOpenGLWidget):
 
         # ⑧ 高画質スクリーンショット撮影時のHUD一時非表示フラグ
         self._hide_hud_for_capture: bool = False
+        # スクリーンショット設定 (文字類は常に除外、グリッド・凡例は任意設定)
+        self.screenshot_include_grid: bool = False  # スクショ時にグリッドを含めるか
+        self.screenshot_include_axes: bool = True   # スクショ時にXYZ凡例を含めるか
+        self._is_capturing_screenshot: bool = False
+        self._capture_override_grid: Optional[bool] = None
+        self._capture_override_axes: Optional[bool] = None
 
     def initializeGL(self):
         """OpenGL初期化処理"""
@@ -368,7 +374,13 @@ class PointCloudViewer(QOpenGLWidget):
         gl.glLoadMatrixf(view.data())
 
         # 3. 地面グリッド描画 (XY平面, 高さZ基準)
-        if self.show_grid:
+        is_capture = getattr(self, "_is_capturing_screenshot", False)
+        if is_capture:
+            show_grid_now = getattr(self, "_capture_override_grid", False)
+        else:
+            show_grid_now = self.show_grid
+
+        if show_grid_now:
             self._draw_grid()
 
         # 4. 点群の描画 (VBO GPUキャッシュ対応・フォールバック付き)
@@ -460,16 +472,27 @@ class PointCloudViewer(QOpenGLWidget):
         # 5. 断面スライスボックス枠線描画
         self._draw_section_box()
 
-        # 6. 計測ライン & 2点ピック斜め壁基準ラインの描画
-        if len(self.measure_points) > 0:
-            self._draw_measure_lines()
-        if len(self.wall_align_points) > 0:
-            self._draw_wall_align_lines()
+        # 6. 計測ライン & 2点ピック斜め壁基準ラインの描画 (スクショ撮影時は除外)
+        if not is_capture:
+            if len(self.measure_points) > 0:
+                self._draw_measure_lines()
+            if len(self.wall_align_points) > 0:
+                self._draw_wall_align_lines()
 
-        # 7. XYZ座標軸ギズモ & 8. 2Dオーバーレイ描画 (スクリーンショットHUD非表示指定時はスキップ)
-        if not getattr(self, "_hide_hud_for_capture", False):
-            self._draw_axes()
-            self._draw_2d_overlays()
+        # 7. XYZ座標軸ギズモ & 8. 2Dオーバーレイ描画
+        if is_capture:
+            # スクリーンショット撮影時: 文字類・HUD・案内テキストは完全に省き、XYZ凡例のみ設定に従う
+            show_axes_now = getattr(self, "_capture_override_axes", True)
+            if show_axes_now:
+                self._draw_axes()
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.Antialiasing)
+                self._draw_axes_labels_2d(painter)
+                painter.end()
+        else:
+            if not getattr(self, "_hide_hud_for_capture", False):
+                self._draw_axes()
+                self._draw_2d_overlays()
 
     def _get_view_matrix(self) -> QMatrix4x4:
         """
@@ -2296,16 +2319,34 @@ class PointCloudViewer(QOpenGLWidget):
             self.animate_to_view(30.0, 45.0)
             self.status_changed.emit("視点切替: 等角 (3D鳥瞰)")
 
+    def set_screenshot_include_grid(self, val: bool):
+        """スクリーンショット時にグリッドを含めるかを設定"""
+        self.screenshot_include_grid = bool(val)
+
+    def set_screenshot_include_axes(self, val: bool):
+        """スクリーンショット時にXYZ座標軸凡例を含めるかを設定"""
+        self.screenshot_include_axes = bool(val)
+
     def capture_screenshot(
         self,
         save_path: Optional[str] = None,
         copy_to_clipboard: bool = True,
-        include_hud: bool = True,
+        include_hud: bool = False,
+        include_grid: Optional[bool] = None,
+        include_axes: Optional[bool] = None,
     ) -> Optional[QImage]:
         """
         ⑧ 高画質スクリーンショット保存機能 (クリップボード同時コピー対応)
-        - include_hud=False の場合は2D HUDやギズモを除外した純粋な3D点群のみを出力可能
+        - include_grid: 背景グリッドを含めるか (Noneの場合は設定値 self.screenshot_include_grid)
+        - include_axes: XYZ座標軸凡例を含めるか (Noneの場合は設定値 self.screenshot_include_axes)
+        - 文字類 (上部HUD・操作ガイド・計測テキスト等) は常に自動で完全に省かれます
         """
+        grid_val = self.screenshot_include_grid if include_grid is None else bool(include_grid)
+        axes_val = self.screenshot_include_axes if include_axes is None else bool(include_axes)
+
+        self._is_capturing_screenshot = True
+        self._capture_override_grid = grid_val
+        self._capture_override_axes = axes_val
         prev_hud_flag = getattr(self, "_hide_hud_for_capture", False)
         self._hide_hud_for_capture = not bool(include_hud)
         try:
@@ -2318,6 +2359,9 @@ class PointCloudViewer(QOpenGLWidget):
                 pixmap = self.grab()
                 img = pixmap.toImage()
         finally:
+            self._is_capturing_screenshot = False
+            self._capture_override_grid = None
+            self._capture_override_axes = None
             self._hide_hud_for_capture = prev_hud_flag
             self.update()
 

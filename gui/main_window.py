@@ -583,10 +583,33 @@ class MainWindow(QMainWindow):
 
         view_layout.addLayout(enh_row, 5, 1)
 
+        # スクショ設定行 (グリッドON/OFF, XYZ凡例ON/OFF, 文字類は自動除外)
+        ss_opt_row = QHBoxLayout()
+        ss_opt_row.setSpacing(4)
+        lbl_ss = QLabel("スクショ設定:")
+        lbl_ss.setStyleSheet("color: #cbd5e1; font-size: 11px;")
+        ss_opt_row.addWidget(lbl_ss)
+
+        self.chk_ss_grid = QCheckBox("グリッド")
+        self.chk_ss_grid.setChecked(False)
+        self.chk_ss_grid.setStyleSheet("font-size: 11px;")
+        self.chk_ss_grid.setToolTip("スクリーンショットに背景グリッド(床格子)を含めるか設定します (文字類は自動で除外)")
+        self.chk_ss_grid.toggled.connect(self._on_ss_options_changed)
+        ss_opt_row.addWidget(self.chk_ss_grid)
+
+        self.chk_ss_axes = QCheckBox("XYZ凡例")
+        self.chk_ss_axes.setChecked(True)
+        self.chk_ss_axes.setStyleSheet("font-size: 11px;")
+        self.chk_ss_axes.setToolTip("スクリーンショットに左下のXYZ座標軸凡例を含めるか設定します (文字類は自動で除外)")
+        self.chk_ss_axes.toggled.connect(self._on_ss_options_changed)
+        ss_opt_row.addWidget(self.chk_ss_axes)
+        ss_opt_row.addStretch()
+        view_layout.addLayout(ss_opt_row, 6, 0, 1, 2)
+
         view_hint = QLabel("※点サイズ・形状・背景色・描画点数・マウス感度は『⚙設定』タブにあります")
         view_hint.setWordWrap(True)
         view_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
-        view_layout.addWidget(view_hint, 6, 0, 1, 2)
+        view_layout.addWidget(view_hint, 7, 0, 1, 2)
 
         sidebar_layout.addWidget(view_group)
 
@@ -3157,6 +3180,11 @@ class MainWindow(QMainWindow):
         self.show_toast("📁 全パネルを折りたたみました")
 
 
+    def _on_ss_options_changed(self):
+        """スクリーンショット設定の変更をビューアへ反映"""
+        self.viewer.set_screenshot_include_grid(self.chk_ss_grid.isChecked())
+        self.viewer.set_screenshot_include_axes(self.chk_ss_axes.isChecked())
+
     def _on_capture_screenshot(self):
         """⑧ 高画質スクリーンショットのキャプチャ (クリップボード自動コピー ＆ ファイル保存)"""
         import datetime
@@ -3164,7 +3192,8 @@ class MainWindow(QMainWindow):
         default_filename = f"screenshot_{now_str}.png"
 
         # まずクリップボードに即時コピー
-        img = self.viewer.capture_screenshot(save_path=None, copy_to_clipboard=True, include_hud=True)
+        # 文字類(HUDなど)は常に省き、グリッド・XYZ凡例は設定値に従って撮影
+        img = self.viewer.capture_screenshot(save_path=None, copy_to_clipboard=True)
         if img is None or img.isNull():
             self.show_toast("⚠️ スクリーンショットの取得に失敗しました")
             return
