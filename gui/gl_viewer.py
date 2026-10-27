@@ -2421,10 +2421,93 @@ class PointCloudViewer(QOpenGLWidget):
         self._update_display_colors_only()
         self.update()
 
+    def preview_custom_height_range(self, enabled: bool, min_z: float, max_z: float):
+        """
+        スライダードラッグ操作専用の超高速カラープレビュー (60fps遅延ゼロ)。
+        原本全体(数千万点)の巨大配列の再計算をスキップし、現在画面に描画されている点群(display_points、通常100万〜200万点)
+        のZ座標のみを対象に数ミリ秒でカラーマップを引き当ててVBOへ即時反映します。
+        全体表示中であっても大容量点群であっても完全にヌルヌル追従します。
+        """
+        self.custom_height_enabled = bool(enabled)
+        self.custom_height_min = float(min(min_z, max_z))
+        self.custom_height_max = float(max(min_z, max_z))
+        self._cached_normalized_heights = None
+
+        if self.display_points is None or len(self.display_points) == 0:
+            return
+
+        mode = self.color_mode
+        is_height_related = (
+            "高さ" in mode
+            or mode in (
+                self.COLOR_MODE_HEIGHT,
+                self.COLOR_MODE_HEIGHT_VIRIDIS,
+                self.COLOR_MODE_HEIGHT_JET,
+                self.COLOR_MODE_HEIGHT_PLASMA,
+                self.COLOR_MODE_HEIGHT_TERRAIN,
+                self.COLOR_MODE_HEIGHT_HEAT,
+                self.COLOR_MODE_HEIGHT_COOLWARM,
+            )
+            or (mode == self.COLOR_MODE_RGB and self.colors_raw is None and self.intensities_raw is None)
+            or (mode == self.COLOR_MODE_INTENSITY and self.intensities_raw is None)
+        )
+        if not is_height_related:
+            return
+
+        # 画面表示中の点群(display_points)のZ座標から直接高速正規化 (100万〜200万点なら約1ms)
+        z = self.display_points[:, 2]
+        cz = float(self.center_offset[2]) if self.center_offset is not None else 0.0
+        if self.custom_height_enabled:
+            z_min = float(self.custom_height_min - cz)
+            z_max = float(self.custom_height_max - cz)
+        else:
+            z_min, z_max = float(np.min(z)), float(np.max(z))
+        diff = max(1e-5, z_max - z_min)
+        t = np.clip((z - z_min) / diff, 0.0, 1.0).astype(np.float32)
+
+        # 1024段事前計算LUTから一括インデックス引き当て
+        if "Viridis" in mode or self.color_palette == self.PALETTE_VIRIDIS:
+            new_colors = self._colormap_viridis(t)
+        elif "Jet" in mode or self.color_palette == self.PALETTE_JET:
+            new_colors = self._colormap_jet(t)
+        elif "Plasma" in mode or self.color_palette == self.PALETTE_PLASMA:
+            new_colors = self._colormap_plasma(t)
+        elif "地形" in mode or "Terrain" in mode or self.color_palette == self.PALETTE_TERRAIN:
+            new_colors = self._colormap_terrain(t)
+        elif "Heat" in mode or "温熱" in mode or self.color_palette == self.PALETTE_HEAT:
+            new_colors = self._colormap_heat(t)
+        elif "Cool-Warm" in mode or "青白赤" in mode or self.color_palette == self.PALETTE_COOLWARM:
+            new_colors = self._colormap_coolwarm(t)
+        elif self.color_palette == self.PALETTE_GRAYSCALE:
+            new_colors = self._colormap_grayscale(t)
+        else:
+            new_colors = self._colormap_turbo(t)
+
+        # 凹凸陰影(疑似EDL)のブレンド
+        if getattr(self, "shading_enabled", False):
+            if (
+                self.display_orig_indices is not None
+                and self._cached_shading_factors is not None
+                and len(self._cached_shading_factors) == len(self.points_centered)
+            ):
+                sh = self._cached_shading_factors[self.display_orig_indices, np.newaxis]
+                new_colors = np.clip(new_colors * sh, 0.0, 1.0).astype(np.float32)
+
+        # 選択中ハイライトのブレンド
+        if len(self.selected_indices) > 0 and self.display_orig_indices is not None:
+            is_selected = np.isin(self.display_orig_indices, self.selected_indices)
+            if np.any(is_selected):
+                sel_col = np.array([0.95, 0.25, 0.25] if self.instant_delete_mode else [0.0, 0.85, 1.0], dtype=np.float32)
+                new_colors[is_selected] = new_colors[is_selected] * 0.45 + sel_col * 0.55
+
+        self.display_colors = np.ascontiguousarray(new_colors, dtype=np.float32)
+        self._vbo_colors_dirty = True
+        self.update()
+
     def set_custom_height_range(self, enabled: bool, min_z: float, max_z: float):
         """
-        任意の高さ色分け範囲を設定し、カラーを即時更新 (VBO頂点再送スキップで超高速反映)。
-        スライダードラッグ中もラグなくヌルヌルとグラデーションが追従します。
+        任意の高さ色分け範囲を設定し、原本全体を含めて完全確定同期。
+        スライダー解放時や数値入力時に呼び出されます。
         """
         self.custom_height_enabled = bool(enabled)
         self.custom_height_min = float(min(min_z, max_z))

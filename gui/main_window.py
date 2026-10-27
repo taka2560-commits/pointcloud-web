@@ -507,6 +507,7 @@ class MainWindow(QMainWindow):
         self.slider_height_min.setRange(0, 1000)
         self.slider_height_min.setValue(0)
         self.slider_height_min.valueChanged.connect(self._on_slider_height_min_changed)
+        self.slider_height_min.sliderReleased.connect(self._apply_custom_height_range)
         min_row.addWidget(self.slider_height_min, 1)
 
         self.spin_height_min = QDoubleSpinBox()
@@ -531,6 +532,7 @@ class MainWindow(QMainWindow):
         self.slider_height_max.setRange(0, 1000)
         self.slider_height_max.setValue(1000)
         self.slider_height_max.valueChanged.connect(self._on_slider_height_max_changed)
+        self.slider_height_max.sliderReleased.connect(self._apply_custom_height_range)
         max_row.addWidget(self.slider_height_max, 1)
 
         self.spin_height_max = QDoubleSpinBox()
@@ -3522,7 +3524,8 @@ class MainWindow(QMainWindow):
             self.chk_custom_height.setChecked(True)
             self.chk_custom_height.blockSignals(False)
 
-        self._apply_custom_height_range()
+        # ドラッグ中は超高速プレビュー (60fps) でヌルヌル追従
+        self._preview_custom_height_range()
 
     def _on_slider_height_max_changed(self, val: int):
         """上限スライダー変更時 (直感ドラッグ)"""
@@ -3547,7 +3550,8 @@ class MainWindow(QMainWindow):
             self.chk_custom_height.setChecked(True)
             self.chk_custom_height.blockSignals(False)
 
-        self._apply_custom_height_range()
+        # ドラッグ中は超高速プレビュー (60fps) でヌルヌル追従
+        self._preview_custom_height_range()
 
     def _on_spin_height_min_changed(self, val: float):
         """下限スピンボックス変更時 (数値入力)"""
@@ -3596,6 +3600,25 @@ class MainWindow(QMainWindow):
             self.chk_custom_height.blockSignals(False)
 
         self._apply_custom_height_range()
+
+    def _preview_custom_height_range(self):
+        """スライダードラッグ中専用: 画面表示中の点群だけを超高速(60fps)でプレビュー更新"""
+        if not hasattr(self, "spin_height_min") or not hasattr(self, "viewer"):
+            return
+        min_z = float(self.spin_height_min.value())
+        max_z = float(self.spin_height_max.value())
+        if min_z > max_z:
+            min_z, max_z = max_z, min_z
+        span = max_z - min_z
+        enabled = self.chk_custom_height.isChecked() if hasattr(self, "chk_custom_height") else False
+
+        if hasattr(self, "lbl_height_range_info"):
+            if enabled:
+                self.lbl_height_range_info.setText(f"範囲: {min_z:.2f}m 〜 {max_z:.2f}m (高低差: {span:.2f}m)")
+            else:
+                self.lbl_height_range_info.setText(f"配色範囲: 全高自動 (待機: {min_z:.2f}m〜{max_z:.2f}m)")
+
+        self.viewer.preview_custom_height_range(enabled, min_z, max_z)
 
     def _apply_custom_height_range(self):
         """スライダー・スピンボックスの値をビューアーに適用して即時カラー反映"""
