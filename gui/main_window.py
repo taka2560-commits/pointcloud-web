@@ -616,6 +616,32 @@ class MainWindow(QMainWindow):
         sec_mode_row.addWidget(self.sec_origin_mode_combo, 1)
         sec_layout.addLayout(sec_mode_row)
 
+        # 枠線表示切替行 (黄色の基点枠・水色の厚み枠の個別ON/OFF & 一括切替)
+        sec_guide_row = QHBoxLayout()
+        sec_guide_row.setSpacing(4)
+        sec_guide_row.addWidget(QLabel("枠線:"))
+        self.chk_sec_show_origin = QCheckBox("基点(黄)")
+        self.chk_sec_show_origin.setChecked(True)
+        self.chk_sec_show_origin.setToolTip("シーク基点の黄色いプレーン枠線・半透明面の表示ON/OFF (点群観察時に邪魔な場合はOFFに)")
+        self.chk_sec_show_origin.toggled.connect(self._on_section_guide_visibility_changed)
+        sec_guide_row.addWidget(self.chk_sec_show_origin)
+
+        self.chk_sec_show_box = QCheckBox("厚み(水色)")
+        self.chk_sec_show_box.setChecked(True)
+        self.chk_sec_show_box.setToolTip("断面スライスの厚み範囲（水色枠）の表示ON/OFF")
+        self.chk_sec_show_box.toggled.connect(self._on_section_guide_visibility_changed)
+        sec_guide_row.addWidget(self.chk_sec_show_box)
+
+        self.btn_toggle_sec_guides = QPushButton("切替(B)")
+        self.btn_toggle_sec_guides.setProperty("role", "outline")
+        self.btn_toggle_sec_guides.setMaximumWidth(52)
+        self.btn_toggle_sec_guides.setStyleSheet("padding: 1px 3px; font-size: 10px;")
+        self.btn_toggle_sec_guides.setToolTip("断面の基点枠・厚み枠の表示を一括トグル切替 (ショートカット: Bキー)")
+        self.btn_toggle_sec_guides.clicked.connect(self._toggle_section_guides_ui)
+        sec_guide_row.addWidget(self.btn_toggle_sec_guides)
+        sec_guide_row.addStretch()
+        sec_layout.addLayout(sec_guide_row)
+
         # ② 現在見ている場所/選択点を一発でシーク基点にセット & シーク時のカメラ追従
         sec_focus_row = QHBoxLayout()
         sec_focus_row.setSpacing(4)
@@ -1715,6 +1741,7 @@ class MainWindow(QMainWindow):
         self.viewer.instant_erase_requested.connect(self._on_instant_erase_requested)
         self.viewer.brush_radius_changed.connect(self._on_viewer_brush_radius_changed)
         self.viewer.wall_aligned.connect(self._on_wall_aligned)
+        self.viewer.section_guides_changed.connect(self._on_viewer_section_guides_changed)
         right_layout.addWidget(self.viewer, 1)
 
         # ★ 柱② & 柱④: 3Dビューア下部 ボトムアクションバー (選択時クイック操作 + トースト通知表示)
@@ -3042,6 +3069,17 @@ class MainWindow(QMainWindow):
         view_sub.addAction("🔪 斜め壁: 壁真横・断面エッジ", lambda: self._apply_wall_view("edge"))
         view_sub.addAction("🔄 斜め壁: 180°向き反転", self._flip_wall_view)
 
+        if (
+            self.viewer.clip_x_enabled
+            or self.viewer.clip_y_enabled
+            or self.viewer.clip_z_enabled
+            or self.viewer.clip_wall_enabled
+        ):
+            guides_on = self.viewer.show_section_origin_plane or self.viewer.show_section_box
+            state_txt = "OFFにする (点群のみ表示)" if guides_on else "ONにする"
+            act_sec_guide = menu.addAction(f"📐 断面基点枠・厚み枠を{state_txt} (B)")
+            act_sec_guide.triggered.connect(self._toggle_section_guides_ui)
+
         menu.addSeparator()
         menu.addAction("🔍 全体フィット (F)", lambda: self.viewer.fit_to_screen())
         menu.addAction("🎥 透視 ⇄ 正射影切替 (P)", lambda: self.viewer.toggle_projection())
@@ -3565,6 +3603,26 @@ class MainWindow(QMainWindow):
         else:
             half = thick / 2.0
             return pos - half, pos + half, f"基点{pos:.2f}m (±{half:.2f}m)"
+
+    def _on_section_guide_visibility_changed(self):
+        """GUIチェックボックスからビューアの基点枠・厚み枠表示を更新"""
+        self.viewer.set_show_section_origin_plane(self.chk_sec_show_origin.isChecked())
+        self.viewer.set_show_section_box(self.chk_sec_show_box.isChecked())
+
+    def _on_viewer_section_guides_changed(self, show_origin: bool, show_box: bool):
+        """ビューア側（Bキーなど）の枠表示状態をGUIチェックボックスへ反映"""
+        self.chk_sec_show_origin.blockSignals(True)
+        self.chk_sec_show_box.blockSignals(True)
+        self.chk_sec_show_origin.setChecked(show_origin)
+        self.chk_sec_show_box.setChecked(show_box)
+        self.chk_sec_show_origin.blockSignals(False)
+        self.chk_sec_show_box.blockSignals(False)
+
+    def _toggle_section_guides_ui(self):
+        """断面ガイド枠を一括トグル切替"""
+        is_on = self.viewer.toggle_section_guides()
+        txt = "表示" if is_on else "非表示 (点群のみ)"
+        self.show_toast(f"📐 断面枠: {txt} (B)")
 
     def _on_section_origin_mode_changed(self):
         """断面スライスの基点基準モード切替時ハンドラ"""

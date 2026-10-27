@@ -60,6 +60,7 @@ class PointCloudViewer(QOpenGLWidget):
     instant_erase_requested = Signal(object)  # 即時削除モード時の1アクション消去要求 (np.ndarray)
     brush_radius_changed = Signal(int)        # ブラシサイズ変更通知 (px)
     wall_aligned = Signal(float, object, object)  # 2点ピック斜め壁視点合わせ完了通知 (angle_deg, p1_world, p2_world)
+    section_guides_changed = Signal(bool, bool)  # 断面ガイド枠表示変更通知 (show_origin_plane, show_box)
 
     COLOR_MODE_RGB = "RGB"
     COLOR_MODE_HEIGHT = "高さ (Z)"
@@ -251,6 +252,8 @@ class PointCloudViewer(QOpenGLWidget):
         self.clip_z_enabled = False
         self.clip_z_range = [-1e6, 1e6]
         self.clip_z_origin = 0.0
+        self.show_section_origin_plane: bool = True  # シーク基点プレーン枠(黄)の表示
+        self.show_section_box: bool = True           # 断面厚み範囲ボックス枠(水色)の表示
 
         # マウス操作用
         self.last_mouse_pos = QPoint()
@@ -562,6 +565,11 @@ class PointCloudViewer(QOpenGLWidget):
             return
         if self.points_raw is None:
             return
+        # 基点枠・厚み枠が両方非表示の場合は描画をスキップして点群のみ表示
+        if not getattr(self, "show_section_origin_plane", True) and not getattr(self, "show_section_box", True):
+            return
+        if not self.isValid():
+            return
 
         gl.glPushAttrib(gl.GL_ALL_ATTRIB_BITS)
         gl.glDisable(gl.GL_LIGHTING)
@@ -579,100 +587,101 @@ class PointCloudViewer(QOpenGLWidget):
         z1 = min(bz_max, float(self.clip_z_range[1] - self.center_offset[2])) if self.clip_z_enabled else bz_max
 
         # 1. 厚み範囲ボックス（シアン枠線）
-        gl.glLineWidth(1.5)
-        gl.glColor4f(0.0, 0.9, 1.0, 0.65)
-        gl.glBegin(gl.GL_LINES)
-        # 底面
-        gl.glVertex3f(x0, y0, z0); gl.glVertex3f(x1, y0, z0)
-        gl.glVertex3f(x1, y0, z0); gl.glVertex3f(x1, y1, z0)
-        gl.glVertex3f(x1, y1, z0); gl.glVertex3f(x0, y1, z0)
-        gl.glVertex3f(x0, y1, z0); gl.glVertex3f(x0, y0, z0)
-        # 上面
-        gl.glVertex3f(x0, y0, z1); gl.glVertex3f(x1, y0, z1)
-        gl.glVertex3f(x1, y0, z1); gl.glVertex3f(x1, y1, z1)
-        gl.glVertex3f(x1, y1, z1); gl.glVertex3f(x0, y1, z1)
-        gl.glVertex3f(x0, y1, z1); gl.glVertex3f(x0, y0, z1)
-        # 柱
-        gl.glVertex3f(x0, y0, z0); gl.glVertex3f(x0, y0, z1)
-        gl.glVertex3f(x1, y0, z0); gl.glVertex3f(x1, y0, z1)
-        gl.glVertex3f(x1, y1, z0); gl.glVertex3f(x1, y1, z1)
-        gl.glVertex3f(x0, y1, z0); gl.glVertex3f(x0, y1, z1)
-        gl.glEnd()
+        if getattr(self, "show_section_box", True):
+            gl.glLineWidth(1.5)
+            gl.glColor4f(0.0, 0.9, 1.0, 0.65)
+            gl.glBegin(gl.GL_LINES)
+            # 底面
+            gl.glVertex3f(x0, y0, z0); gl.glVertex3f(x1, y0, z0)
+            gl.glVertex3f(x1, y0, z0); gl.glVertex3f(x1, y1, z0)
+            gl.glVertex3f(x1, y1, z0); gl.glVertex3f(x0, y1, z0)
+            gl.glVertex3f(x0, y1, z0); gl.glVertex3f(x0, y0, z0)
+            # 上面
+            gl.glVertex3f(x0, y0, z1); gl.glVertex3f(x1, y0, z1)
+            gl.glVertex3f(x1, y0, z1); gl.glVertex3f(x1, y1, z1)
+            gl.glVertex3f(x1, y1, z1); gl.glVertex3f(x0, y1, z1)
+            gl.glVertex3f(x0, y1, z1); gl.glVertex3f(x0, y0, z1)
+            # 柱
+            gl.glVertex3f(x0, y0, z0); gl.glVertex3f(x0, y0, z1)
+            gl.glVertex3f(x1, y0, z0); gl.glVertex3f(x1, y0, z1)
+            gl.glVertex3f(x1, y1, z0); gl.glVertex3f(x1, y1, z1)
+            gl.glVertex3f(x0, y1, z0); gl.glVertex3f(x0, y1, z1)
+            gl.glEnd()
 
         # 2. 今シークしている「基点（Origin）断面プレーン」をゴールド枠＋半透明面で強調描画
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        gl.glDepthMask(gl.GL_FALSE)
+        if getattr(self, "show_section_origin_plane", True):
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            gl.glDepthMask(gl.GL_FALSE)
+            if self.clip_x_enabled:
+                ox = float(np.clip(self.clip_x_origin - self.center_offset[0], bx_min, bx_max))
+                gl.glColor4f(1.0, 0.78, 0.10, 0.10)
+                gl.glBegin(gl.GL_QUADS)
+                gl.glVertex3f(ox, y0, z0); gl.glVertex3f(ox, y1, z0)
+                gl.glVertex3f(ox, y1, z1); gl.glVertex3f(ox, y0, z1)
+                gl.glEnd()
+                gl.glLineWidth(2.4)
+                gl.glColor4f(1.0, 0.80, 0.15, 0.95)
+                gl.glBegin(gl.GL_LINE_LOOP)
+                gl.glVertex3f(ox, y0, z0); gl.glVertex3f(ox, y1, z0)
+                gl.glVertex3f(ox, y1, z1); gl.glVertex3f(ox, y0, z1)
+                gl.glEnd()
 
-        if self.clip_x_enabled:
-            ox = float(np.clip(self.clip_x_origin - self.center_offset[0], bx_min, bx_max))
-            gl.glColor4f(1.0, 0.78, 0.10, 0.10)
-            gl.glBegin(gl.GL_QUADS)
-            gl.glVertex3f(ox, y0, z0); gl.glVertex3f(ox, y1, z0)
-            gl.glVertex3f(ox, y1, z1); gl.glVertex3f(ox, y0, z1)
-            gl.glEnd()
-            gl.glLineWidth(2.4)
-            gl.glColor4f(1.0, 0.80, 0.15, 0.95)
-            gl.glBegin(gl.GL_LINE_LOOP)
-            gl.glVertex3f(ox, y0, z0); gl.glVertex3f(ox, y1, z0)
-            gl.glVertex3f(ox, y1, z1); gl.glVertex3f(ox, y0, z1)
-            gl.glEnd()
+            if self.clip_y_enabled:
+                oy = float(np.clip(self.clip_y_origin - self.center_offset[1], by_min, by_max))
+                gl.glColor4f(0.25, 0.95, 0.45, 0.10)
+                gl.glBegin(gl.GL_QUADS)
+                gl.glVertex3f(x0, oy, z0); gl.glVertex3f(x1, oy, z0)
+                gl.glVertex3f(x1, oy, z1); gl.glVertex3f(x0, oy, z1)
+                gl.glEnd()
+                gl.glLineWidth(2.4)
+                gl.glColor4f(1.0, 0.80, 0.15, 0.95)
+                gl.glBegin(gl.GL_LINE_LOOP)
+                gl.glVertex3f(x0, oy, z0); gl.glVertex3f(x1, oy, z0)
+                gl.glVertex3f(x1, oy, z1); gl.glVertex3f(x0, oy, z1)
+                gl.glEnd()
 
-        if self.clip_y_enabled:
-            oy = float(np.clip(self.clip_y_origin - self.center_offset[1], by_min, by_max))
-            gl.glColor4f(0.25, 0.95, 0.45, 0.10)
-            gl.glBegin(gl.GL_QUADS)
-            gl.glVertex3f(x0, oy, z0); gl.glVertex3f(x1, oy, z0)
-            gl.glVertex3f(x1, oy, z1); gl.glVertex3f(x0, oy, z1)
-            gl.glEnd()
-            gl.glLineWidth(2.4)
-            gl.glColor4f(1.0, 0.80, 0.15, 0.95)
-            gl.glBegin(gl.GL_LINE_LOOP)
-            gl.glVertex3f(x0, oy, z0); gl.glVertex3f(x1, oy, z0)
-            gl.glVertex3f(x1, oy, z1); gl.glVertex3f(x0, oy, z1)
-            gl.glEnd()
+            if self.clip_z_enabled:
+                oz = float(np.clip(self.clip_z_origin - self.center_offset[2], bz_min, bz_max))
+                gl.glColor4f(1.0, 0.78, 0.10, 0.10)
+                gl.glBegin(gl.GL_QUADS)
+                gl.glVertex3f(x0, y0, oz); gl.glVertex3f(x1, y0, oz)
+                gl.glVertex3f(x1, y1, oz); gl.glVertex3f(x0, y1, oz)
+                gl.glEnd()
+                gl.glLineWidth(2.4)
+                gl.glColor4f(1.0, 0.80, 0.15, 0.95)
+                gl.glBegin(gl.GL_LINE_LOOP)
+                gl.glVertex3f(x0, y0, oz); gl.glVertex3f(x1, y0, oz)
+                gl.glVertex3f(x1, y1, oz); gl.glVertex3f(x0, y1, oz)
+                gl.glEnd()
 
-        if self.clip_z_enabled:
-            oz = float(np.clip(self.clip_z_origin - self.center_offset[2], bz_min, bz_max))
-            gl.glColor4f(1.0, 0.78, 0.10, 0.10)
-            gl.glBegin(gl.GL_QUADS)
-            gl.glVertex3f(x0, y0, oz); gl.glVertex3f(x1, y0, oz)
-            gl.glVertex3f(x1, y1, oz); gl.glVertex3f(x0, y1, oz)
-            gl.glEnd()
-            gl.glLineWidth(2.4)
-            gl.glColor4f(1.0, 0.80, 0.15, 0.95)
-            gl.glBegin(gl.GL_LINE_LOOP)
-            gl.glVertex3f(x0, y0, oz); gl.glVertex3f(x1, y0, oz)
-            gl.glVertex3f(x1, y1, oz); gl.glVertex3f(x0, y1, oz)
-            gl.glEnd()
+            # 3. 2点ピック斜め壁スライス有効時の斜め基準プレーン・厚み枠線描画
+            if self.clip_wall_enabled and self.wall_align_angle_deg is not None and self.wall_align_center_world is not None:
+                rad = math.radians(self.wall_align_angle_deg)
+                tx, ty = math.cos(rad), math.sin(rad)
+                nx, ny = -math.sin(rad), math.cos(rad)
+                cx = float(self.wall_align_center_world[0] - self.center_offset[0])
+                cy = float(self.wall_align_center_world[1] - self.center_offset[1])
+                half_len = max(5.0, float(np.linalg.norm(self.bounds_max[:2] - self.bounds_min[:2])) * 0.55)
+                d_orig = float(self.clip_wall_origin)
+                ox_c = cx + d_orig * nx
+                oy_c = cy + d_orig * ny
+                p_a = (ox_c - half_len * tx, oy_c - half_len * ty)
+                p_b = (ox_c + half_len * tx, oy_c + half_len * ty)
 
-        # 3. 2点ピック斜め壁スライス有効時の斜め基準プレーン・厚み枠線描画
-        if self.clip_wall_enabled and self.wall_align_angle_deg is not None and self.wall_align_center_world is not None:
-            rad = math.radians(self.wall_align_angle_deg)
-            tx, ty = math.cos(rad), math.sin(rad)
-            nx, ny = -math.sin(rad), math.cos(rad)
-            cx = float(self.wall_align_center_world[0] - self.center_offset[0])
-            cy = float(self.wall_align_center_world[1] - self.center_offset[1])
-            half_len = max(5.0, float(np.linalg.norm(self.bounds_max[:2] - self.bounds_min[:2])) * 0.55)
-            d_orig = float(self.clip_wall_origin)
-            ox_c = cx + d_orig * nx
-            oy_c = cy + d_orig * ny
-            p_a = (ox_c - half_len * tx, oy_c - half_len * ty)
-            p_b = (ox_c + half_len * tx, oy_c + half_len * ty)
+                gl.glColor4f(0.95, 0.45, 0.95, 0.12)
+                gl.glBegin(gl.GL_QUADS)
+                gl.glVertex3f(p_a[0], p_a[1], z0); gl.glVertex3f(p_b[0], p_b[1], z0)
+                gl.glVertex3f(p_b[0], p_b[1], z1); gl.glVertex3f(p_a[0], p_a[1], z1)
+                gl.glEnd()
+                gl.glLineWidth(2.5)
+                gl.glColor4f(0.95, 0.55, 1.0, 0.95)
+                gl.glBegin(gl.GL_LINE_LOOP)
+                gl.glVertex3f(p_a[0], p_a[1], z0); gl.glVertex3f(p_b[0], p_b[1], z0)
+                gl.glVertex3f(p_b[0], p_b[1], z1); gl.glVertex3f(p_a[0], p_a[1], z1)
+                gl.glEnd()
 
-            gl.glColor4f(0.95, 0.45, 0.95, 0.12)
-            gl.glBegin(gl.GL_QUADS)
-            gl.glVertex3f(p_a[0], p_a[1], z0); gl.glVertex3f(p_b[0], p_b[1], z0)
-            gl.glVertex3f(p_b[0], p_b[1], z1); gl.glVertex3f(p_a[0], p_a[1], z1)
-            gl.glEnd()
-            gl.glLineWidth(2.5)
-            gl.glColor4f(0.95, 0.55, 1.0, 0.95)
-            gl.glBegin(gl.GL_LINE_LOOP)
-            gl.glVertex3f(p_a[0], p_a[1], z0); gl.glVertex3f(p_b[0], p_b[1], z0)
-            gl.glVertex3f(p_b[0], p_b[1], z1); gl.glVertex3f(p_a[0], p_a[1], z1)
-            gl.glEnd()
-
-        gl.glDepthMask(gl.GL_TRUE)
+            gl.glDepthMask(gl.GL_TRUE)
         gl.glPopAttrib()
 
     def _draw_wall_align_lines(self):
@@ -912,7 +921,16 @@ class PointCloudViewer(QOpenGLWidget):
                     f"Z基点:{self.clip_z_origin:.2f}m [{self.clip_z_range[0]:.2f}〜{self.clip_z_range[1]:.2f}m / 厚{tz:.2f}m]"
                 )
             vis_cnt = len(self.display_points) if self.display_points is not None else 0
-            sec_text = f"📐 断面シーク中 (黄枠=基点 / 水色枠=厚み)  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点"
+            guide_tag = ""
+            if not getattr(self, "show_section_origin_plane", True) and not getattr(self, "show_section_box", True):
+                guide_tag = " (枠非表示 / B:再表示)"
+            elif not getattr(self, "show_section_origin_plane", True):
+                guide_tag = " (基点枠OFF / B:切替)"
+            elif not getattr(self, "show_section_box", True):
+                guide_tag = " (厚み枠OFF / B:切替)"
+            else:
+                guide_tag = " (黄枠=基点 / 水色枠=厚み)"
+            sec_text = f"📐 断面シーク中{guide_tag}  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点"
 
             font_sec = QFont("Segoe UI", 9, QFont.Bold)
             painter.setFont(font_sec)
@@ -2575,6 +2593,31 @@ class PointCloudViewer(QOpenGLWidget):
         self.yaw = -90.0
         self.update()
 
+    def set_show_section_origin_plane(self, show: bool):
+        """シーク基点プレーン（黄色枠・半透明面）の表示ON/OFFを設定"""
+        if self.show_section_origin_plane != bool(show):
+            self.show_section_origin_plane = bool(show)
+            self.section_guides_changed.emit(self.show_section_origin_plane, self.show_section_box)
+            self.update()
+
+    def set_show_section_box(self, show: bool):
+        """断面厚み範囲ボックス（水色枠）の表示ON/OFFを設定"""
+        if self.show_section_box != bool(show):
+            self.show_section_box = bool(show)
+            self.section_guides_changed.emit(self.show_section_origin_plane, self.show_section_box)
+            self.update()
+
+    def toggle_section_guides(self) -> bool:
+        """断面ガイド枠（基点枠・厚み枠）の表示を一括トグル切替 (ショートカット: Bキー)"""
+        new_state = not (self.show_section_origin_plane or self.show_section_box)
+        self.show_section_origin_plane = new_state
+        self.show_section_box = new_state
+        self.section_guides_changed.emit(self.show_section_origin_plane, self.show_section_box)
+        state_txt = "ON" if new_state else "OFF (点群のみ表示中 / Bキーで再表示)"
+        self.status_changed.emit(f"📐 断面ガイド枠表示: {state_txt}")
+        self.update()
+        return new_state
+
     def set_brush_radius(self, radius: int):
         """ブラシ選択・消しゴムの半径(px)を設定 (6〜150px)"""
         new_r = max(6, min(150, int(radius)))
@@ -2867,6 +2910,8 @@ class PointCloudViewer(QOpenGLWidget):
             self.toggle_projection()
         elif key == Qt.Key_I:
             self.invert_selection()
+        elif key == Qt.Key_B:
+            self.toggle_section_guides()
         elif key == Qt.Key_BracketLeft:
             self.set_brush_radius(self.brush_radius - 4)
         elif key == Qt.Key_BracketRight:
