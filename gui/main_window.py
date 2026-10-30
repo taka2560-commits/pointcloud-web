@@ -1434,23 +1434,36 @@ class MainWindow(QMainWindow):
         tab_widget.setUsesScrollButtons(True)
         self.filter_tab_widget = tab_widget
 
-        # SORタブ
+        # SORタブ (統計的外れ値除去)
         sor_tab = QWidget()
         sor_l = QGridLayout(sor_tab)
         self.sor_chk = QCheckBox("統計的外れ値除去 (SOR) を有効化")
         self.sor_chk.setChecked(True)
         sor_l.addWidget(self.sor_chk, 0, 0, 1, 2)
-        sor_l.addWidget(QLabel("近傍探索点数:"), 1, 0)
+
+        lbl_sor_k = QLabel("近傍探索点数 (k):")
+        lbl_sor_k.setToolTip("各点から距離を調べる周囲の点数。標準: 20点\n・上げると: より広い平均を見るため安定（計算時間微増）\n・下げると: 孤立点に鋭く反応するが壁端も消えやすい")
+        sor_l.addWidget(lbl_sor_k, 1, 0)
         self.sor_k_spin = QSpinBox()
         self.sor_k_spin.setRange(5, 200)
         self.sor_k_spin.setValue(20)
+        self.sor_k_spin.setToolTip("各点から距離を調べる周囲の点数 (標準: 20点)")
         sor_l.addWidget(self.sor_k_spin, 1, 1)
-        sor_l.addWidget(QLabel("標準偏差倍率:"), 2, 0)
+
+        lbl_sor_r = QLabel("標準偏差倍率 (σ):")
+        lbl_sor_r.setToolTip("【最重要】平均距離からの許容ばらつき倍率。標準: 2.0\n・上げると(3.0等): 判定が緩くなり極端なゴミだけ消去(安全)\n・下げると(1.3等): 判定が厳しくなり微細ホコリも強力消去(壁削れ注意)")
+        sor_l.addWidget(lbl_sor_r, 2, 0)
         self.sor_r_spin = QDoubleSpinBox()
         self.sor_r_spin.setRange(0.1, 10.0)
         self.sor_r_spin.setSingleStep(0.1)
         self.sor_r_spin.setValue(2.0)
+        self.sor_r_spin.setToolTip("標準偏差倍率 (下げるほど強力にノイズ消去、上げるほど安全)")
         sor_l.addWidget(self.sor_r_spin, 2, 1)
+
+        sor_hint = QLabel("💡 浮遊ホコリ・飛び散り点を除去。倍率を下げるほど強力、上げると安全に残ります。")
+        sor_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
+        sor_hint.setWordWrap(True)
+        sor_l.addWidget(sor_hint, 3, 0, 1, 2)
         tab_widget.addTab(sor_tab, "SOR")
 
         # RORタブ
@@ -1476,17 +1489,30 @@ class MainWindow(QMainWindow):
         cluster_l = QGridLayout(cluster_tab)
         self.cluster_chk = QCheckBox("孤立クラスタ(塊ノイズ)除去を有効化")
         cluster_l.addWidget(self.cluster_chk, 0, 0, 1, 2)
-        cluster_l.addWidget(QLabel("連結距離 eps (m):"), 1, 0)
+
+        lbl_c_eps = QLabel("連結距離 eps (m):")
+        lbl_c_eps.setToolTip("同一の塊とみなす点と点の間隔(m)。標準: 0.15〜0.25m\n・上げると: 離れたゴミ同士が合体して1つの塊と誤認され消えにくい\n・下げると: 隙間のある壁や天井がバラバラの塊とみなされ消えやすい")
+        cluster_l.addWidget(lbl_c_eps, 1, 0)
         self.cluster_eps_spin = QDoubleSpinBox()
         self.cluster_eps_spin.setRange(0.01, 20.0)
         self.cluster_eps_spin.setSingleStep(0.05)
         self.cluster_eps_spin.setValue(0.15)
+        self.cluster_eps_spin.setToolTip("同一塊とみなす最大点間距離 (標準: 0.15m)")
         cluster_l.addWidget(self.cluster_eps_spin, 1, 1)
-        cluster_l.addWidget(QLabel("最小塊点数 (点):"), 2, 0)
+
+        lbl_c_pts = QLabel("最小塊点数 (点):")
+        lbl_c_pts.setToolTip("この点数未満の小さな塊を一括除去。標準: 30〜50点\n・上げると(100点等): より大きな塊ゴミ(通行人・看板等)まで一掃\n・下げると(10点等): 極小の浮遊ゴミだけを消し、小物を残す")
+        cluster_l.addWidget(lbl_c_pts, 2, 0)
         self.cluster_pts_spin = QSpinBox()
         self.cluster_pts_spin.setRange(2, 50000)
         self.cluster_pts_spin.setValue(30)
+        self.cluster_pts_spin.setToolTip("残す塊の最小点数 (この点数未満の小塊をすべて除去)")
         cluster_l.addWidget(self.cluster_pts_spin, 2, 1)
+
+        cls_hint = QLabel("💡 通行人・看板・木の葉など小塊ゴミを除去。最小塊点数を上げると大きな浮遊塊まで一掃できます。")
+        cls_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
+        cls_hint.setWordWrap(True)
+        cluster_l.addWidget(cls_hint, 3, 0, 1, 2)
         tab_widget.addTab(cluster_tab, "クラスタ")
 
         # エッジ飛散・ヒゲ（ベールノイズ）精密除去タブ
@@ -1494,17 +1520,28 @@ class MainWindow(QMainWindow):
         edge_l = QGridLayout(edge_tab)
         self.edge_veil_chk = QCheckBox("エッジ飛散・ヒゲ(ベール)精密除去を有効化")
         edge_l.addWidget(self.edge_veil_chk, 0, 0, 1, 2)
-        edge_l.addWidget(QLabel("局所近傍点数:"), 1, 0)
+
+        lbl_e_k = QLabel("局所近傍点数:")
+        lbl_e_k.setToolTip("エッジ形状を解析する局所点数 (標準: 16点)")
+        edge_l.addWidget(lbl_e_k, 1, 0)
         self.edge_k_spin = QSpinBox()
         self.edge_k_spin.setRange(6, 60)
         self.edge_k_spin.setValue(16)
         edge_l.addWidget(self.edge_k_spin, 1, 1)
-        edge_l.addWidget(QLabel("線状ヒゲ感度:"), 2, 0)
+
+        lbl_e_lin = QLabel("線状ヒゲ感度:")
+        lbl_e_lin.setToolTip("輪郭から飛び出したヒゲと判定する直線性の閾値。標準: 0.72\n・上げると(0.85等): 明らかな尖ったヒゲだけを除去(安全)\n・下げると(0.60等): わずかなエッジの乱れも徹底除去(手すり・配管注意)")
+        edge_l.addWidget(lbl_e_lin, 2, 0)
         self.edge_lin_spin = QDoubleSpinBox()
         self.edge_lin_spin.setRange(0.30, 0.98)
         self.edge_lin_spin.setSingleStep(0.05)
         self.edge_lin_spin.setValue(0.72)
         edge_l.addWidget(self.edge_lin_spin, 2, 1)
+
+        edge_hint = QLabel("💡 柱や壁の角でレーザーが引き伸ばされる「混合ピクセル・ヒゲ」をピンポイント除去します。")
+        edge_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
+        edge_hint.setWordWrap(True)
+        edge_l.addWidget(edge_hint, 3, 0, 1, 2)
         tab_widget.addTab(edge_tab, "エッジ・ヒゲ")
 
         # 距離・反射強度タブ
@@ -1547,16 +1584,25 @@ class MainWindow(QMainWindow):
         di_l.addWidget(self.int_max_spin, 3, 1)
         tab_widget.addTab(dist_int_tab, "距離・強度")
 
-        # 間引き
+        # 間引き (均一化・軽量化)
         other_tab = QWidget()
         other_l = QGridLayout(other_tab)
         self.voxel_chk = QCheckBox("ボクセル間引き")
         other_l.addWidget(self.voxel_chk, 0, 0, 1, 2)
-        other_l.addWidget(QLabel("ボクセルサイズ (m):"), 1, 0)
+
+        lbl_v_size = QLabel("ボクセルサイズ (m):")
+        lbl_v_size.setToolTip("点の間隔を均一化するサイコロの1辺の長さ(m)。標準: 0.02m (2cm)\n・上げると(0.05m等): 点数が大幅に減り動作が爆速化(形状は粗め)\n・下げると(0.005m等): 超高精細に形状を維持(点数は多め)")
+        other_l.addWidget(lbl_v_size, 1, 0)
         self.voxel_spin = QDoubleSpinBox()
         self.voxel_spin.setRange(0.001, 5.0)
+        self.voxel_spin.setSingleStep(0.005)
         self.voxel_spin.setValue(0.02)
         other_l.addWidget(self.voxel_spin, 1, 1)
+
+        vox_hint = QLabel("💡 空間を格子状に区切り各マス1点に均一化。数値を上げると点数が減り描画・CAD処理が軽くなります。")
+        vox_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
+        vox_hint.setWordWrap(True)
+        other_l.addWidget(vox_hint, 2, 0, 1, 2)
         tab_widget.addTab(other_tab, "間引き")
 
         auto_layout.addWidget(tab_widget)
