@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>E57 点群ノイズフィルター設定 完全マニュアル（初心者対応版）</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --accent: #38bdf8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --code-bg: #0b1120;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --card-bg: #ffffff;
+        --border: #e2e8f0;
+        --text: #0f172a;
+        --text-muted: #64748b;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --accent: #0284c7;
+        --success: #059669;
+        --warning: #d97706;
+        --danger: #dc2626;
+        --code-bg: #f1f5f9;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      padding: 32px 16px;
+    }
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 40px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--primary);
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    h2 {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-top: 36px;
+      margin-bottom: 16px;
+      border-left: 4px solid var(--accent);
+      padding-left: 12px;
+    }
+    h3 {
+      font-size: 17px;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 12px;
+      color: var(--text);
+    }
+    h4 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-top: 16px;
+      margin-bottom: 8px;
+    }
+    p { margin-bottom: 14px; }
+    ul, ol { margin-left: 24px; margin-bottom: 16px; }
+    li { margin-bottom: 6px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 12px 14px;
+      text-align: left;
+    }
+    th {
+      background: rgba(59, 130, 246, 0.1);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: rgba(255, 255, 255, 0.02); }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge-green { background: rgba(16, 185, 129, 0.2); color: var(--success); border: 1px solid var(--success); }
+    .badge-yellow { background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning); }
+    .badge-red { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
+    .card-box {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin: 16px 0;
+    }
+    .tip-box {
+      border-left: 4px solid var(--success);
+      background: rgba(16, 185, 129, 0.08);
+      padding: 14px 18px;
+      border-radius: 4px;
+      margin: 18px 0;
+    }
+    .warn-box {
+      border-left: 4px solid var(--warning);
+      background: rgba(245, 158, 11, 0.08);
+      padding: 14px 18px;
+      border-radius: 4px;
+      margin: 18px 0;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    .nav-box {
+      background: rgba(59, 130, 246, 0.05);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+    }
+    .nav-box a {
+      color: var(--primary);
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .nav-box a:hover { text-decoration: underline; }
+    @media print {
+      body { background: #fff; color: #000; padding: 0; }
+      .container { border: none; box-shadow: none; padding: 0; max-width: 100%; }
+      th { background: #f0f0f0; color: #000; }
+      code { background: #eee; color: #000; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>📘 E57 点群ノイズフィルター設定 完全マニュアル（初心者対応版）</h1>
+  <p>本マニュアルは、3D点群処理ツール「E57 Point Cloud Tool」に搭載されている各種ノイズ除去フィルターおよび間引き処理の仕組み、パラメータ変更時の挙動（数値を上げるとどうなるか／下げるとどうなるか）、現場ごとの最適な設定方法をわかりやすく解説したガイドです。</p>
+
+  <div class="nav-box">
+    <strong>📑 目次</strong>
+    <ol style="margin-top: 8px; margin-bottom: 0;">
+      <li><a href="#concept">本ツールのノイズ処理コンセプト（安心の完全ロスレス）</a></li>
+      <li><a href="#preset">ワンクリック・プリセットの選び方</a></li>
+      <li><a href="#filters">各フィルターの詳細解説（数値を上げたら／下げたら）</a>
+        <ul>
+          <li><a href="#sor">3.1 統計的外れ値除去 (SOR)</a></li>
+          <li><a href="#cluster">3.2 孤立クラスタ（塊ノイズ）除去</a></li>
+          <li><a href="#edge">3.3 エッジ飛散・ヒゲ（ベールノイズ）精密除去</a></li>
+          <li><a href="#voxel">3.4 ボクセル間引き（均一化・爆速軽量化）</a></li>
+          <li><a href="#dist_int">3.5 距離・反射強度フィルター</a></li>
+        </ul>
+      </li>
+      <li><a href="#recipes">現場シチュエーション別 実践レシピ</a></li>
+      <li><a href="#safety">消しすぎた時の安全対策・復元テクニック</a></li>
+    </ol>
+  </div>
+
+  <h2 id="concept">1. 本ツールのノイズ処理コンセプト</h2>
+  <div class="tip-box">
+    <strong>💡 安心の完全ロスレス仕様</strong><br>
+    本ツールでは、ノイズ処理を行っても<strong>「点データをファイルから物理的に削除して失ってしまう」ことは一切ありません</strong>。ノイズと判定された点は「ノイズレイヤー」という別の引き出しに安全に隔離される仕組みになっています。
+  </div>
+  <ul>
+    <li><strong>完全な元に戻す (Undo / Redo)</strong>: キーボードの <code>Ctrl + Z</code> で、いつでも直前の状態へ戻せます。</li>
+    <li><strong>ピンポイント復元</strong>: 「間違えて壁の一部が消えてしまった」場合でも、ノイズレイヤーを表示してその部分だけを選択し、通常レイヤーへ戻すことができます。</li>
+    <li><strong>安心の非破壊保存</strong>: E57ファイルへの保存時も、ノイズを除外した点群だけを座標精度ロスゼロで安全に出力できます。</li>
+  </ul>
+
+  <h2 id="preset">2. ワンクリック・プリセットの選び方</h2>
+  <p>画面上部にある3つのボタンを使えば、専門的な数値を細かく調整しなくても、ワンクリックで最適な組み合わせを瞬時に適用できます。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>プリセット名</th>
+        <th>推奨シーン</th>
+        <th>処理内容の概要</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="badge badge-green">🟢 大まか (粗取り)</span></td>
+        <td>スキャン直後、まずは大きな浮遊ゴミを一掃したい時</td>
+        <td>浮遊塊除去 (<code>eps=0.25m</code>, <code>45点</code>) ＋ 安全寄りのSOR (<code>k=25</code>, <code>倍率2.2</code>)</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-yellow">🟡 標準バランス</span></td>
+        <td>一般的な室内・外構のバランス良いノイズ掃除</td>
+        <td>標準SOR (<code>k=20</code>, <code>倍率1.8</code>) ＋ 孤立クラスタ (<code>eps=0.15m</code>, <code>25点</code>)</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-red">🟠 細かい (精密仕上げ)</span></td>
+        <td>柱・梁・壁の角をシャープにしてCAD図面を引きたい時</td>
+        <td>エッジ飛散・ヒゲ精密除去 ＋ 高感度SOR (<code>倍率1.3</code>) ＋ 狭半径ROR</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="filters">3. 各フィルターの詳細解説</h2>
+
+  <h3 id="sor">3.1 統計的外れ値除去 (SOR)</h3>
+  <p><strong>💡 ターゲット:</strong> 空気中にフワフワ浮いているホコリ、微細なチリ、空間に飛び散った孤立点</p>
+  <div class="card-box">
+    <strong>仕組み:</strong> 各点について「周囲の <code>k</code> 個の点までの平均距離」を計算します。全体の平均距離から標準偏差（ばらつき）の何倍（<code>σ</code>）離れているかを判定し、飛び抜けて離れている「ひとりぼっちの点」をノイズと判定します。
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>パラメータ</th>
+        <th>標準値</th>
+        <th>数値を上げるとどうなる？</th>
+        <th>数値を下げるとどうなる？</th>
+        <th>おすすめの使い方</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>近傍探索点数 (k)</strong></td>
+        <td><code>20</code></td>
+        <td>より広い範囲の平均を見るため、点密度のムラ（近い場所と遠い場所の密度の差）に強くなり、<strong>判定が非常に安定</strong>します（計算時間がわずかに増えます）。</td>
+        <td>ごく身近な点だけを見るため、孤立点に鋭く反応しますが、<strong>壁の端や配管・アンテナの先端などが消えやすく</strong>なります。</td>
+        <td>基本は <code>20</code> のままでOK。大きな建物の場合は <code>25〜30</code> にするとさらに安定します。</td>
+      </tr>
+      <tr>
+        <td><strong>標準偏差倍率 (σ)</strong><br><span style="color:var(--danger); font-size:12px;">★最重要</span></td>
+        <td><code>2.0</code></td>
+        <td>許容範囲が広がり、<strong>判定が緩く（安全に）</strong>なります。「誰が見ても明らかに飛び散っている極端なゴミ」だけを消去し、建物の壁や細部を絶対に削りません。</td>
+        <td>許容範囲が狭まり、<strong>判定が厳しく（強力に）</strong>なります。空間に漂う微細なモヤ・チリ・ホコリまで根こそぎ消し去りますが、薄い壁や角の点が少し削れるリスクがあります。</td>
+        <td><strong>安全第一なら <code>2.5〜3.0</code></strong><br><strong>ホコリを徹底的に消したいなら <code>1.3〜1.6</code></strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="cluster">3.2 孤立クラスタ（塊ノイズ）除去</h3>
+  <p><strong>💡 ターゲット:</strong> スキャン時に写り込んだ<strong>通行人、車、仮設看板、木の葉、低木、鳥</strong>など、ある程度点同士が固まった浮遊ゴミ</p>
+  <div class="card-box">
+    <strong>仕組み:</strong> 指定した距離（<code>eps</code>）以内にある点同士をつなげて「1つの塊（クラスタ）」として認識します。その塊に含まれる点の合計数が「最小塊点数」未満であれば、丸ごと浮遊ゴミとして一括除去します。
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>パラメータ</th>
+        <th>標準値</th>
+        <th>数値を上げるとどうなる？</th>
+        <th>数値を下げるとどうなる？</th>
+        <th>おすすめの使い方</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>連結距離 eps (m)</strong></td>
+        <td><code>0.15m</code></td>
+        <td>離れた点同士でも「同じ塊」と判定します。ゴミ同士が合体して大きな塊とみなされ、<strong>ゴミが消えにくく</strong>なります。</td>
+        <td>少しでも離れていると別々の塊とみなします。点密度の粗いスキャンの場合、<strong>本来残したい壁や天井がバラバラの小さな塊とみなされて誤って消える</strong>リスクがあります。</td>
+        <td>通常の建物内・敷地なら <code>0.15m〜0.20m</code>。屋外で点密度が粗いときは <code>0.25m</code> に広げます。</td>
+      </tr>
+      <tr>
+        <td><strong>最小塊点数 (点)</strong><br><span style="color:var(--danger); font-size:12px;">★最重要</span></td>
+        <td><code>30</code></td>
+        <td><strong>より大きな塊（通行人、立て看板、低木、室内の什器など）まで一気に消去</strong>できます。</td>
+        <td>極小の浮遊ゴミだけを消し、<strong>室内の小物や小さな突起、消火器、照明器具などを残す</strong>ことができます。</td>
+        <td><strong>通行人や看板を一掃したい時は <code>50〜200点</code></strong> に引き上げると効果絶大です。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="edge">3.3 エッジ飛散・ヒゲ（ベールノイズ）精密除去</h3>
+  <p><strong>💡 ターゲット:</strong> 柱や壁の角、梁、開口部のエッジから**ピョロっと外側へ線状に伸びたヒゲ**（混合ピクセルノイズ）</p>
+  <div class="card-box">
+    <strong>仕組み:</strong> レーザー光のスポット径が物体の角に差し掛かった際、光の半分が手前の角に当たり、残り半分が奥の背景に当たることで、角から奥に向かって虚像の点が線状に伸びる現象（ベール効果）を、局所線形性（直線成分の強さ）から検出してピンポイント除去します。
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>パラメータ</th>
+        <th>標準値</th>
+        <th>数値を上げるとどうなる？</th>
+        <th>数値を下げるとどうなる？</th>
+        <th>おすすめの使い方</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>局所近傍点数</strong></td>
+        <td><code>16</code></td>
+        <td>エッジの局所形状を調べる点数です。標準のままで問題ありません。</td>
+        <td>点数を絞り、ごく局所の尖り具合を判定します。</td>
+        <td>基本は <code>16</code> のままで最適化されています。</td>
+      </tr>
+      <tr>
+        <td><strong>線状ヒゲ感度</strong><br><span style="color:var(--danger); font-size:12px;">★最重要</span></td>
+        <td><code>0.72</code></td>
+        <td>判定が慎重になり、<strong>「誰が見ても尖った明らかなヒゲ」だけを除去</strong>します。手すり・細い配管・ワイヤーなどの部材を誤消去したくない場合に安全です。</td>
+        <td>わずかなエッジの乱れもヒゲとみなして徹底除去し、<strong>角（エッジ）をパキッとシャープに成形</strong>します。下げすぎると細い電線や手すりが削れる場合があります。</td>
+        <td><strong>配管や手すりが多い場合は <code>0.80〜0.85</code></strong><br><strong>角をシャープにして図面を引きたい場合は <code>0.65〜0.70</code></strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="voxel">3.4 ボクセル間引き（均一化・爆速軽量化）</h3>
+  <p><strong>💡 目的:</strong> 点群の過密な部分を均一化し、**画面描画を爆速化＆CAD読み込み時のファイルサイズを大幅軽量化**する</p>
+  <div class="card-box">
+    <strong>仕組み:</strong> 3次元空間を立方体（サイコロ状のグリッド）に区切り、1つのサイコロの中に存在する多数の点の中から代表1点だけを残し、他を間引きます。
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>パラメータ</th>
+        <th>標準値</th>
+        <th>数値を上げるとどうなる？</th>
+        <th>数値を下げるとどうなる？</th>
+        <th>おすすめの使い方</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>ボクセルサイズ (m)</strong></td>
+        <td><code>0.02m</code><br>(2cm)</td>
+        <td>サイコロが大きくなり、点数が大幅に削減されます。<strong>動作が超爆速・超軽量になり、CADでの処理負荷が劇的に下がります</strong>（形状はややカクカクします）。</td>
+        <td>サイコロが細かくなり、<strong>元の形状を高精細に維持</strong>します（点数があまり減らないため、PCへの負荷は高いままになります）。</td>
+        <td><strong>CAD作成・重いデータの軽量化には <code>0.03〜0.05m (3〜5cm)</code></strong><br><strong>ミリ単位の高精細確認には <code>0.005〜0.01m (5mm〜1cm)</code></strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="dist_int">3.5 距離・反射強度フィルター</h3>
+  <ul>
+    <li><strong>距離 Min / Max (m)</strong>: スキャナー原点からの直線距離で不要な範囲をカットします。
+      <ul>
+        <li><code>距離 Min (例: 0.5m)</code>: スキャナー直下の三脚や作業者の写り込みをカット。</li>
+        <li><code>距離 Max (例: 50m〜100m)</code>: 計測精度が落ちる遠方の点群をカット。</li>
+      </ul>
+    </li>
+    <li><strong>反射強度 (Intensity) Min / Max</strong>: レーザー光の戻り光の強さでカットします。
+      <ul>
+        <li><code>強度 Min</code>: 黒いアスファルト、濡れた路面、窓ガラス乱反射などの低強度虚像ノイズをカット。</li>
+        <li><code>強度 Max</code>: 金属プレートや反射テープによるハレーション（ギラつき）ノイズをカット。</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2 id="recipes">4. 現場シチュエーション別 実践レシピ</h2>
+  
+  <div class="card-box">
+    <h4>🍳 レシピA: 「まずは全体のゴミをサクッと掃除したい」</h4>
+    <ol>
+      <li>画面上部の <strong>「🟢 大まか (粗取り)」</strong> ボタンをクリック。</li>
+      <li>自動的に浮遊塊除去と安全寄りのSORが実行され、大きな浮遊物が一掃されます。</li>
+    </ol>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピB: 「建物の壁や細部を絶対に削りたくない（安全第一）」</h4>
+    <ol>
+      <li>「SOR」タブを開く。</li>
+      <li><strong>標準偏差倍率 (σ) を <code>2.5 〜 3.0</code></strong> に引き上げる。</li>
+      <li>「クラスタ」タブの「最小塊点数」を <code>15 〜 20点</code> 程度の小さめにして実行。</li>
+    </ol>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピC: 「通行人や看板、仮設物を根こそぎ消したい」</h4>
+    <ol>
+      <li>「クラスタ」タブを開く。</li>
+      <li><strong>最小塊点数を <code>100 〜 300点</code></strong> に大きく引き上げる。</li>
+      <li><strong>連結距離 (eps) を <code>0.20m 〜 0.25m</code></strong> に少し広げて実行。</li>
+    </ol>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピD: 「柱や梁の角をシャープにして、CADで壁芯を取りやすくしたい」</h4>
+    <ol>
+      <li>画面上部の <strong>「🟠 細かい (精密仕上げ)」</strong> ボタンをクリック。</li>
+      <li>または「エッジ・ヒゲ」タブを開き、<strong>線状ヒゲ感度を <code>0.65 〜 0.70</code></strong> に設定して実行。</li>
+    </ol>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピE: 「巨大点群でCADやPCが重い、動かない」</h4>
+    <ol>
+      <li>「間引き」タブを開く。</li>
+      <li><strong>ボクセルサイズを <code>0.03m (3cm)</code> または <code>0.05m (5cm)</code></strong> に設定してチェックを入れて実行。</li>
+      <li>2,000万点規模の点群でも、形状を保ったまま数百万点〜数十万点へ瞬時に均一圧縮されます。</li>
+    </ol>
+  </div>
+
+  <h2 id="safety">5. 消しすぎた時の安全対策・復元テクニック</h2>
+  <div class="warn-box">
+    <strong>間違えて必要な壁まで消してしまっても慌てる必要はありません！</strong>
+  </div>
+  <ol>
+    <li><strong>直後なら <code>Ctrl + Z</code> (元に戻す)</strong>:
+      キーボードの <code>Ctrl + Z</code> または画面左側の「↶ 1つ戻る」ボタンで即座に直前の状態へ戻せます。
+    </li>
+    <li><strong>特定のパーツだけピンポイント復元</strong>:
+      右パネルの「ノイズレイヤー」の表示チェックをON（目のアイコン点灯）にします。画面上で消えてしまった壁の点群を矩形選択またはブラシ選択し、レイヤーパネルで「通常レイヤー」を選択して「選択点を通常へ復元」をクリックします。
+    </li>
+    <li><strong>重要構造物をあらかじめ守る（保護ロック 🔒）</strong>:
+      新規レイヤーを作成し（例: 「重要壁」）、残したい点群をそのレイヤーへ移動させた後、レイヤー横の 🔒 アイコンをクリックして「保護」状態にすると、以後の自動ノイズ除去フィルターの対象から完全に除外されます。
+    </li>
+  </ol>
+</div>
+
+</body>
+</html>
