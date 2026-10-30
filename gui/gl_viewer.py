@@ -1831,11 +1831,68 @@ class PointCloudViewer(QOpenGLWidget):
 
         self.layer_ids[idx] = int(target_layer_id)
         self._sync_mask_from_ids()
-        self._update_active_colors()
+        # レイヤー別カラーモード以外では元の色配列は不変のため、全点の再計算をスキップして高速化
+        if self.color_mode == self.COLOR_MODE_LAYER or self.active_colors is None or len(self.active_colors) != len(self.points_raw):
+            self._update_active_colors()
         self._update_display_arrays()
         self.update()
         self._emit_layer_counts()
         return len(idx)
+
+    def batch_move_indices_to_layers(
+        self,
+        moves: list,
+        respect_lock: bool = True,
+    ) -> int:
+        """
+        複数レイヤーへの点移動を一括（バッチ）で高速実行する。
+        各移動ごとに全点VBOやカラーを再構築するのを防ぎ、全てのレイヤーIDを代入した後に
+        1回だけマスク同期・VBO構築・再描画を行うことで劇的に高速化する。
+
+        :param moves: [(点インデックス配列, 移動先layer_id), ...] のリスト
+        :param respect_lock: ロック中レイヤーの点を保護するかどうか
+        :return: 実際に移動した総点数
+        """
+        if self.points_raw is None or not moves:
+            return 0
+        self._ensure_layer_sync()
+
+        total_moved = 0
+        n_pts = len(self.points_raw)
+        unlocked_mask = self._get_unlocked_mask() if respect_lock else None
+
+        for indices, target_layer_id in moves:
+            if indices is None or len(indices) == 0:
+                continue
+            target_layer_id = int(target_layer_id)
+            if target_layer_id not in self.layers:
+                self.add_custom_layer(f"レイヤー {target_layer_id}", layer_id=target_layer_id)
+
+            if respect_lock and self.layers[target_layer_id].locked:
+                continue
+
+            idx = np.asarray(indices, dtype=np.int64)
+            idx = idx[(idx >= 0) & (idx < n_pts)]
+            if len(idx) == 0:
+                continue
+
+            if unlocked_mask is not None:
+                idx = idx[unlocked_mask[idx]]
+                if len(idx) == 0:
+                    continue
+
+            self.layer_ids[idx] = target_layer_id
+            total_moved += len(idx)
+
+        if total_moved > 0:
+            self._sync_mask_from_ids()
+            if self.color_mode == self.COLOR_MODE_LAYER or self.active_colors is None or len(self.active_colors) != n_pts:
+                self._update_active_colors()
+            self._update_display_arrays()
+            self.update()
+            self._emit_layer_counts()
+
+        return total_moved
 
     def move_indices_to_noise(self, indices: np.ndarray, respect_lock: bool = True):
         """指定されたインデックスの点をノイズレイヤーへ移動 (手動削除 / 自動検出)"""

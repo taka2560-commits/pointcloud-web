@@ -13,6 +13,7 @@ import numpy as np
 
 from PySide6.QtCore import Qt, QSize, QTimer, QPoint, QSettings, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -1985,11 +1986,17 @@ class MainWindow(QMainWindow):
         self.viewer._emit_layer_counts()
 
     def _push_layer_undo_state(self):
-        """レイヤー変更前の状態をUndoスタックに保存し、Redoスタックをクリア"""
+        """レイヤー変更前の状態をUndoスタックに保存し、Redoスタックをクリア（大規模点群向け自動メモリ保護付き）"""
         if self.viewer.layer_mask is not None:
             self.layer_undo_stack.append(self._capture_layer_snapshot())
-            max_steps = getattr(self, "undo_max_steps", 50)
-            if max_steps > 0 and len(self.layer_undo_stack) > max_steps:
+            n_pts = len(self.viewer.points_raw) if self.viewer.points_raw is not None else 0
+            if n_pts > 10_000_000:
+                max_steps = 5
+            elif n_pts > 3_000_000:
+                max_steps = 10
+            else:
+                max_steps = getattr(self, "undo_max_steps", 50)
+            while len(self.layer_undo_stack) > max_steps:
                 self.layer_undo_stack.pop(0)
             self.layer_redo_stack.clear()
             self._sync_undo_buttons()
@@ -4546,35 +4553,41 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "🏝️ メイン塊のみ残す", "対象となる未ロック有効点群がありません。")
             return
 
-        eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.25
-        keep_local = keep_largest_clusters(
-            self.viewer.points_raw[normal_indices],
-            eps=max(0.08, eps),
-            top_k=1,
-            min_keep_ratio=0.05,
-        )
-        keep_mask = np.zeros(len(normal_indices), dtype=bool)
-        keep_mask[keep_local] = True
-        remove_orig = normal_indices[~keep_mask]
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.status_label.setText("🏝️ メイン構造物を高速解析中 (ボクセルクラスタリング)...")
+        QApplication.processEvents()
+        try:
+            eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.25
+            keep_local = keep_largest_clusters(
+                self.viewer.points_raw[normal_indices],
+                eps=max(0.08, eps),
+                top_k=1,
+                min_keep_ratio=0.05,
+            )
+            keep_mask = np.zeros(len(normal_indices), dtype=bool)
+            keep_mask[keep_local] = True
+            remove_orig = normal_indices[~keep_mask]
 
-        if len(remove_orig) == 0:
-            self.status_label.setText("🏝️ 周囲に分離可能な浮遊塊ノイズはありませんでした")
-            self.show_toast("🏝️ 周囲に浮遊塊ノイズはありませんでした")
-            return
+            if len(remove_orig) == 0:
+                self.status_label.setText("🏝️ 周囲に分離可能な浮遊塊ノイズはありませんでした")
+                self.show_toast("🏝️ 周囲に浮遊塊ノイズはありませんでした")
+                return
 
-        self._push_layer_undo_state()
-        layer_name = "自動除去: 浮遊塊一括"
-        lid = next((k for k, v in self.viewer.layers.items() if v.name == layer_name), None)
-        if lid is None:
-            lid = self.viewer.add_custom_layer(layer_name, is_noise=True)
-        moved = self.viewer.move_indices_to_layer(remove_orig, lid, respect_lock=True)
-        self._sync_undo_buttons()
+            self._push_layer_undo_state()
+            layer_name = "自動除去: 浮遊塊一括"
+            lid = next((k for k, v in self.viewer.layers.items() if v.name == layer_name), None)
+            if lid is None:
+                lid = self.viewer.add_custom_layer(layer_name, is_noise=True)
+            moved = self.viewer.move_indices_to_layer(remove_orig, lid, respect_lock=True)
+            self._sync_undo_buttons()
 
-        self.log_text.append(
-            f"🏝️ メイン塊のみ保持 (粗取り): 周囲の浮遊塊 {moved:,} 点を「{layer_name}」へ一括除去しました (残存: {len(normal_indices) - moved:,} 点)"
-        )
-        self.status_label.setText(f"🏝️ メイン塊以外の浮遊ノイズ {moved:,} 点を一括除去しました (Ctrl+Zで取消可)")
-        self.show_toast(f"🏝️ 浮遊塊 {moved:,} 点を一括除去しました")
+            self.log_text.append(
+                f"🏝️ メイン塊のみ保持 (粗取り): 周囲の浮遊塊 {moved:,} 点を「{layer_name}」へ一括除去しました (残存: {len(normal_indices) - moved:,} 点)"
+            )
+            self.status_label.setText(f"🏝️ メイン塊以外の浮遊ノイズ {moved:,} 点を一括除去しました (Ctrl+Zで取消可)")
+            self.show_toast(f"🏝️ 浮遊塊 {moved:,} 点を一括除去しました")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _on_quick_edge_veil_clean(self):
         """🪶 表面・輪郭のエッジ飛散ヒゲ(ベールノイズ)をワンクリックで精密除去"""
@@ -4903,6 +4916,15 @@ class MainWindow(QMainWindow):
         def on_stages(stages):
             stage_results.extend(stages)
 
+        def on_cancelled():
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+            self.auto_exec_btn.setEnabled(True)
+            self.progress_bar.setValue(0)
+            self.status_label.setText("自動ノイズ処理を中断しました")
+            self.show_toast("⚠️ 自動ノイズ処理を安全に中断しました")
+
         def on_success(keep_idx, remove_idx):
             if self.progress_dialog:
                 self.progress_dialog.set_progress(100, "処理完了！", f"{len(remove_idx):,} 点のノイズを分離")
@@ -4912,19 +4934,28 @@ class MainWindow(QMainWindow):
             self.auto_exec_btn.setEnabled(True)
             self.progress_bar.setValue(100)
 
-            # フィルタ種別ごとに別レイヤーへ振り分け (1フィルタ = 1Undo段階)
+            if len(stage_results) == 0 or len(remove_idx) == 0:
+                self.status_label.setText("検出されたノイズはありませんでした")
+                self.show_toast("✨ 検出ノイズ 0 点（除去対象なし）")
+                return
+
+            # 移動前にUndo状態を記録（1回の操作として元に戻せるようにする）
+            self._push_layer_undo_state()
+
+            # バッチ移動リストの構築
+            moves = []
             detail_lines = []
-            n_removed = 0
-            for i, (fname, local_idx) in enumerate(stage_results):
-                self._push_layer_undo_state()
+            for fname, local_idx in stage_results:
                 orig_idx = normal_indices[np.asarray(local_idx, dtype=np.int64)]
                 layer_name = f"自動除去: {fname}"
                 lid = next((k for k, v in self.viewer.layers.items() if v.name == layer_name), None)
                 if lid is None:
                     lid = self.viewer.add_custom_layer(layer_name)
-                moved = self.viewer.move_indices_to_layer(orig_idx, lid, respect_lock=True)
-                n_removed += moved
-                detail_lines.append(f"・{layer_name}: {moved:,} 点")
+                moves.append((orig_idx, lid))
+                detail_lines.append(f"・{layer_name}: {len(orig_idx):,} 点")
+
+            # 1回のバッチ更新で一括レイヤー移動（画面再描画・VBO転送は最後に1度だけ実行）
+            n_removed = self.viewer.batch_move_indices_to_layers(moves, respect_lock=True)
             self._sync_undo_buttons()
 
             n_remain = len(normal_indices) - n_removed
@@ -4936,12 +4967,12 @@ class MainWindow(QMainWindow):
                 f"・残存有効点: {n_remain:,} 点\n"
                 f"・検出ノイズ: {n_removed:,} 点 ({ratio:.2f}% 検出)\n"
                 + ("\n【フィルタ別レイヤー】\n" + "\n".join(detail_lines) + "\n" if detail_lines else "")
-                + f"\n※「◀ 1つ戻る / 1つ進む ▶」でフィルタ単位に取り消し・やり直しできます。"
+                + f"\n※「◀ 1つ戻る (Ctrl+Z)」で自動除去を一括で取り消せます。"
                 f"（🔒ロック中レイヤーと手動削除点はそのまま保護されます）"
             )
-            self.log_text.append(f"自動ノイズ処理完了: {n_removed:,} 点を {len(detail_lines)} 個のフィルタ別レイヤーへ移動 (残存: {n_remain:,} 点)")
+            self.log_text.append(f"自動ノイズ処理完了: {n_removed:,} 点を {len(detail_lines)} 個のフィルタ別レイヤーへ一括移動 (残存: {n_remain:,} 点)")
             self.status_label.setText(f"自動処理完了: ノイズ {n_removed:,} 点検出")
-            self.show_toast(f"🪄 自動除去: {n_removed:,} 点を {len(detail_lines)} レイヤーへ分離")
+            self.show_toast(f"🪄 自動除去: {n_removed:,} 点を高速分離完了")
             QMessageBox.information(self, "完了", res_msg)
 
         def on_error(err_msg: str):
@@ -4954,11 +4985,15 @@ class MainWindow(QMainWindow):
             self.log_text.append(f"エラー: {err_msg}")
             QMessageBox.critical(self, "処理エラー", f"自動ノイズ処理中にエラーが発生しました:\n{err_msg}")
 
+        # キャンセルハンドラを接続
+        self.progress_dialog.cancelled.connect(self.memory_filter_worker.cancel)
+
         self.memory_filter_worker.progress_changed.connect(on_progress)
         self.memory_filter_worker.log_message.connect(self.log_text.append)
         self.memory_filter_worker.finished_stages.connect(on_stages)
         self.memory_filter_worker.finished_success.connect(on_success)
         self.memory_filter_worker.finished_error.connect(on_error)
+        self.memory_filter_worker.cancelled.connect(on_cancelled)
         self.memory_filter_worker.start()
 
     def _on_viewer_status(self, msg: str):
