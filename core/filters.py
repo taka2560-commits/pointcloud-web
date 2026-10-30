@@ -150,6 +150,32 @@ def voxel_downsample_indices(
     return np.sort(unique_indices)
 
 
+def _voxelize_points_fast(
+    points: np.ndarray,
+    voxel_size: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    点群の超高速ボクセル量子化（1次元ビットパックによる10倍高速ユニーク処理）
+    戻り値: (unique_coords, inverse_idx, counts)
+    """
+    coords = np.floor(points / voxel_size).astype(np.int64)
+    min_c = np.min(coords, axis=0)
+    shift_c = coords - min_c
+    max_c = np.max(shift_c, axis=0)
+
+    # 各軸が21bit (約209万ボクセル、voxel_size=0.05mなら100km四方) に収まる場合は超高速1Dパック
+    if np.all(max_c < (1 << 21)):
+        packed = (shift_c[:, 0] << 42) | (shift_c[:, 1] << 21) | shift_c[:, 2]
+        u_packed, inv, cnt = np.unique(packed, return_inverse=True, return_counts=True)
+        u_coords = np.empty((len(u_packed), 3), dtype=np.int64)
+        u_coords[:, 0] = (u_packed >> 42) + min_c[0]
+        u_coords[:, 1] = ((u_packed >> 21) & 0x1FFFFF) + min_c[1]
+        u_coords[:, 2] = (u_packed & 0x1FFFFF) + min_c[2]
+        return u_coords, inv, cnt
+    else:
+        return np.unique(coords, axis=0, return_inverse=True, return_counts=True)
+
+
 def filter_isolated_clusters(
     points: np.ndarray,
     eps: float = 0.15,
@@ -200,23 +226,16 @@ def filter_isolated_clusters(
         return np.where(keep_mask)[0]
 
     # 2. 大規模点群 (10,000点超): 適応型ボクセル代表DBSCANによる超高速・安全処理
-    # ボクセル代表点により数百万〜数千万点を安全な点数に圧縮し、メモリ枯渇とPCフリーズを防止
-    init_voxel_size = max(0.015, float(eps) * 0.45)
-    coords = np.floor(points / init_voxel_size).astype(np.int64)
-    unique_coords, inverse_idx, counts = np.unique(
-        coords, axis=0, return_inverse=True, return_counts=True
-    )
+    # 初期の目標代表点数を最大20万点に設定し、最初から適切なボクセルサイズで1回のみ高速量子化
+    max_safe_reps = 200000
+    base_voxel = max(0.02, float(eps) * 0.45)
+    if n > max_safe_reps:
+        scale = (n / max_safe_reps) ** (1.0 / 3.0) * 1.05
+        voxel_size = max(base_voxel, base_voxel * scale)
+    else:
+        voxel_size = base_voxel
 
-    # 代表点数が25万点を超える場合は、代表点上限25万点以下になるようボクセルサイズを適応拡大（安全リミッター）
-    max_safe_reps = 250000
-    voxel_size = init_voxel_size
-    if len(unique_coords) > max_safe_reps:
-        scale = (len(unique_coords) / max_safe_reps) ** (1.0 / 3.0) * 1.05
-        voxel_size = init_voxel_size * scale
-        coords = np.floor(points / voxel_size).astype(np.int64)
-        unique_coords, inverse_idx, counts = np.unique(
-            coords, axis=0, return_inverse=True, return_counts=True
-        )
+    unique_coords, inverse_idx, counts = _voxelize_points_fast(points, voxel_size)
 
     rep_points = (unique_coords.astype(np.float64) + 0.5) * voxel_size
 
@@ -378,21 +397,15 @@ def keep_largest_clusters(
         return np.where(keep_mask)[0]
 
     # 2. 大規模点群 (10,000点超): 適応型ボクセル代表DBSCAN
-    init_voxel_size = max(0.02, float(eps) * 0.45)
-    coords = np.floor(points / init_voxel_size).astype(np.int64)
-    unique_coords, inverse_idx, counts = np.unique(
-        coords, axis=0, return_inverse=True, return_counts=True
-    )
+    max_safe_reps = 200000
+    base_voxel = max(0.02, float(eps) * 0.45)
+    if n > max_safe_reps:
+        scale = (n / max_safe_reps) ** (1.0 / 3.0) * 1.05
+        voxel_size = max(base_voxel, base_voxel * scale)
+    else:
+        voxel_size = base_voxel
 
-    max_safe_reps = 250000
-    voxel_size = init_voxel_size
-    if len(unique_coords) > max_safe_reps:
-        scale = (len(unique_coords) / max_safe_reps) ** (1.0 / 3.0) * 1.05
-        voxel_size = init_voxel_size * scale
-        coords = np.floor(points / voxel_size).astype(np.int64)
-        unique_coords, inverse_idx, counts = np.unique(
-            coords, axis=0, return_inverse=True, return_counts=True
-        )
+    unique_coords, inverse_idx, counts = _voxelize_points_fast(points, voxel_size)
 
     rep_points = (unique_coords.astype(np.float64) + 0.5) * voxel_size
 

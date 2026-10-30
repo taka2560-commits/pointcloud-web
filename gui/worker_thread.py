@@ -13,6 +13,7 @@ from PySide6.QtCore import QThread, Signal
 import numpy as np
 
 from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
+from core.filters import keep_largest_clusters
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 
 
@@ -375,9 +376,14 @@ class MemoryFilterWorker(QThread):
                 single_cfg = dataclasses.replace(self.config, **{**all_off, attr: True})
                 processor = PointCloudProcessor(config=single_cfg)
                 sub_int = self.intensities[remaining] if self.intensities is not None else None
+
+                def on_filter_log(msg: str):
+                    self.log_message.emit(msg)
+                    self.progress_changed.emit(pct, f"{name}フィルタ処理中...", msg)
+
                 keep_local, remove_local = processor.apply_filters_to_points(
                     self.points[remaining],
-                    log_callback=self.log_message.emit,
+                    log_callback=on_filter_log,
                     intensities=sub_int,
                 )
                 removed_global = remaining[np.asarray(remove_local, dtype=np.int64)]
@@ -395,6 +401,62 @@ class MemoryFilterWorker(QThread):
             self.progress_changed.emit(100, "ノイズ検出完了！", f"除去: {len(remove_idx):,} 点をフィルタ別レイヤーへ移動")
             self.finished_stages.emit(stages)
             self.finished_success.emit(remaining, remove_idx)
+        except Exception as e:
+            self.finished_error.emit(str(e))
+
+
+class KeepMainClusterWorker(QThread):
+    """メイン構造物（最大連結クラスタ）のみを残し、周囲の浮遊塊ノイズを一括分離するバックグラウンドスレッド"""
+    progress_changed = Signal(int, str, str)
+    finished_success = Signal(object)  # remove_indices (points内の局所インデックス)
+    finished_error = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        points: np.ndarray,
+        eps: float = 0.25,
+        top_k: int = 1,
+        min_keep_ratio: float = 0.05,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.points = points
+        self.eps = eps
+        self.top_k = top_k
+        self.min_keep_ratio = min_keep_ratio
+        self._is_cancelled = False
+
+    def cancel(self):
+        """処理の中断を要求"""
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            total = len(self.points)
+            self.progress_changed.emit(20, "メイン構造物を解析中...", f"対象: {total:,} 点 (ボクセル量子化)")
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
+            keep_local = keep_largest_clusters(
+                self.points,
+                eps=self.eps,
+                top_k=self.top_k,
+                min_keep_ratio=self.min_keep_ratio,
+            )
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
+            self.progress_changed.emit(80, "浮遊ノイズを分離中...", "クラスタ判定完了")
+            keep_mask = np.zeros(total, dtype=bool)
+            keep_mask[keep_local] = True
+            remove_local = np.where(~keep_mask)[0]
+
+            self.progress_changed.emit(100, "解析完了！", f"浮遊ノイズ: {len(remove_local):,} 点")
+            self.finished_success.emit(remove_local)
         except Exception as e:
             self.finished_error.emit(str(e))
 

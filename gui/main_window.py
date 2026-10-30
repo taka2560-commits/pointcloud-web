@@ -59,6 +59,7 @@ from gui.worker_thread import (
     PreloadedData,
     MemoryFilterWorker,
     FileSaveWorker,
+    KeepMainClusterWorker,
     collect_e57_files,
 )
 from gui.progress_dialog import ModernProgressDialog
@@ -4543,7 +4544,7 @@ class MainWindow(QMainWindow):
         self.show_toast(f"📦 選択内から微細ノイズ {moved:,} 点を除去しました")
 
     def _on_keep_main_cluster_only(self):
-        """🏝️ メイン塊のみ残す (大まかな浮遊塊ノイズ一括除去): 最大連結クラスタ以外を一括でノイズレイヤーへ分離"""
+        """🏝️ メイン塊のみ残す (大まかな浮遊塊ノイズ一括除去): 最大連結クラスタ以外を一括でノイズレイヤーへ非同期分離"""
         if self.viewer.points_raw is None or len(self.viewer.points_raw) == 0:
             QMessageBox.information(self, "🏝️ メイン塊のみ残す", "先に点群データを読み込んでください。")
             return
@@ -4553,26 +4554,45 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "🏝️ メイン塊のみ残す", "対象となる未ロック有効点群がありません。")
             return
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.status_label.setText("🏝️ メイン構造物を高速解析中 (ボクセルクラスタリング)...")
-        QApplication.processEvents()
-        try:
-            eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.25
-            keep_local = keep_largest_clusters(
-                self.viewer.points_raw[normal_indices],
-                eps=max(0.08, eps),
-                top_k=1,
-                min_keep_ratio=0.05,
-            )
-            keep_mask = np.zeros(len(normal_indices), dtype=bool)
-            keep_mask[keep_local] = True
-            remove_orig = normal_indices[~keep_mask]
+        eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.25
 
-            if len(remove_orig) == 0:
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        self.progress_dialog = ModernProgressDialog("🏝️ メイン構造物の解析", self)
+        self.progress_dialog.set_progress(10, "メイン構造物を解析中...", f"対象: {len(normal_indices):,} 点")
+        self.progress_dialog.show()
+
+        target_points = self.viewer.points_raw[normal_indices]
+        self.cluster_worker = KeepMainClusterWorker(
+            target_points,
+            eps=max(0.08, eps),
+            top_k=1,
+            min_keep_ratio=0.05,
+        )
+
+        def on_cluster_progress(pct: int, msg: str, sub: str):
+            if self.progress_dialog:
+                self.progress_dialog.set_progress(pct, msg, sub)
+            self.status_label.setText(f"{msg} ({pct}%)")
+
+        def on_cluster_cancelled():
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+            self.status_label.setText("🏝️ メイン構造物の解析を中断しました")
+            self.show_toast("⚠️ メイン塊の抽出を中断しました")
+
+        def on_cluster_success(remove_local):
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+
+            if len(remove_local) == 0:
                 self.status_label.setText("🏝️ 周囲に分離可能な浮遊塊ノイズはありませんでした")
                 self.show_toast("🏝️ 周囲に浮遊塊ノイズはありませんでした")
                 return
 
+            remove_orig = normal_indices[np.asarray(remove_local, dtype=np.int64)]
             self._push_layer_undo_state()
             layer_name = "自動除去: 浮遊塊一括"
             lid = next((k for k, v in self.viewer.layers.items() if v.name == layer_name), None)
@@ -4586,8 +4606,20 @@ class MainWindow(QMainWindow):
             )
             self.status_label.setText(f"🏝️ メイン塊以外の浮遊ノイズ {moved:,} 点を一括除去しました (Ctrl+Zで取消可)")
             self.show_toast(f"🏝️ 浮遊塊 {moved:,} 点を一括除去しました")
-        finally:
-            QApplication.restoreOverrideCursor()
+
+        def on_cluster_error(err_msg: str):
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+            self.status_label.setText("エラーが発生しました")
+            QMessageBox.critical(self, "処理エラー", f"メイン塊の解析中にエラーが発生しました:\n{err_msg}")
+
+        self.progress_dialog.cancelled.connect(self.cluster_worker.cancel)
+        self.cluster_worker.progress_changed.connect(on_cluster_progress)
+        self.cluster_worker.finished_success.connect(on_cluster_success)
+        self.cluster_worker.finished_error.connect(on_cluster_error)
+        self.cluster_worker.cancelled.connect(on_cluster_cancelled)
+        self.cluster_worker.start()
 
     def _on_quick_edge_veil_clean(self):
         """🪶 表面・輪郭のエッジ飛散ヒゲ(ベールノイズ)をワンクリックで精密除去"""

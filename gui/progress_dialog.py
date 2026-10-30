@@ -3,13 +3,14 @@
 モダンダーク・シアンアクセントの進捗ダイアログ (モーダル)
 """
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QPushButton,
     QWidget,
     QGraphicsDropShadowEffect,
 )
@@ -19,8 +20,10 @@ from PySide6.QtGui import QColor, QFont
 class ModernProgressDialog(QDialog):
     """
     画面中央に表示される滑らかな進捗ダイアログ
-    ユーザー提示の motion-stage (#22bdd6) 仕様を完全再現
+    ユーザー提示の motion-stage (#22bdd6) 仕様を完全再現（安全中断ボタン付き）
     """
+
+    cancelled = Signal()
 
     def __init__(self, title: str = "点群データ読み込み中", parent=None):
         super().__init__(parent)
@@ -87,6 +90,30 @@ class ModernProgressDialog(QDialog):
             font-family: 'Segoe UI', 'Consolas', monospace;
         """)
         head_layout.addWidget(self.label_percent)
+
+        # 安全中断 (キャンセル) ボタン
+        self.btn_cancel = QPushButton("中止")
+        self.btn_cancel.setCursor(Qt.PointingHandCursor)
+        self.btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #94a3b8;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 600;
+                margin-left: 10px;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+                color: #ffffff;
+                border: 1px solid #ef4444;
+            }
+        """)
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        head_layout.addWidget(self.btn_cancel)
+
         layout.addLayout(head_layout)
 
         # 2. メインメッセージ (ファイル名・処理状態)
@@ -149,3 +176,14 @@ class ModernProgressDialog(QDialog):
             int_val = int(self._current_value)
             self.bar.setValue(int_val)
             self.label_percent.setText(f"{int_val}%")
+
+    def _on_cancel(self):
+        """ユーザーによる中止操作の通知"""
+        self.cancelled.emit()
+
+    def keyPressEvent(self, event):
+        """Escキーで安全中断"""
+        if event.key() == Qt.Key_Escape:
+            self._on_cancel()
+        else:
+            super().keyPressEvent(event)
