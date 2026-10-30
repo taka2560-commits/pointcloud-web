@@ -45,6 +45,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, 
 
 from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
+from core.logger import log_info, log_warning, log_error, log_exception, open_log_folder
 from core.filters import (
     segment_ground_points,
     segment_largest_plane,
@@ -1615,7 +1616,39 @@ class MainWindow(QMainWindow):
         self.log_text = QTextEdit()
         self.log_text.setMaximumHeight(70)
         self.log_text.setReadOnly(True)
+
+        # 画面ログ出力をそのままテキストログファイル (logs/system_history_YYYY-MM-DD.log) にも自動永続化
+        orig_append = self.log_text.append
+        def file_backed_append(msg: str):
+            orig_append(msg)
+            c_msg = str(msg).strip()
+            if c_msg:
+                log_info(c_msg)
+        self.log_text.append = file_backed_append
+
         log_layout.addWidget(self.log_text)
+
+        # ログフォルダを開くワンクリックボタン
+        btn_open_log_folder = QPushButton("📂 システム履歴ログフォルダを開く")
+        btn_open_log_folder.setCursor(Qt.PointingHandCursor)
+        btn_open_log_folder.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #38bdf8;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        btn_open_log_folder.setToolTip("起動環境、点群読込、ノイズ処理、エラー詳細が自動記録された logs フォルダをエクスプローラーで開きます")
+        btn_open_log_folder.clicked.connect(open_log_folder)
+        log_layout.addWidget(btn_open_log_folder)
         log_layout.setContentsMargins(6, 4, 6, 4)
         log_layout.setSpacing(3)
         sidebar_layout.addWidget(log_group)
@@ -2563,10 +2596,16 @@ class MainWindow(QMainWindow):
         self.chk_auto_save_settings.setToolTip("アプリケーション終了時に現在の表示・感度設定をPCに自動保存します")
         l_sys.addWidget(self.chk_auto_save_settings, 2, 0, 1, 2)
 
-        sys_hint = QLabel("※5〜10GBの中規模点群でもメモリ枯渇を起こさず、快適なヌルヌル動作を維持します。")
+        btn_sys_open_logs = QPushButton("📂 システム履歴ログフォルダを開く")
+        btn_sys_open_logs.setStyleSheet("background-color: #1e293b; color: #38bdf8; font-size: 11px; font-weight: bold; padding: 6px;")
+        btn_sys_open_logs.setToolTip("起動時の環境情報、処理履歴、エラー詳細が保存されたlogsフォルダをエクスプローラーで開きます")
+        btn_sys_open_logs.clicked.connect(open_log_folder)
+        l_sys.addWidget(btn_sys_open_logs, 3, 0, 1, 2)
+
+        sys_hint = QLabel("※起動時の挙動や処理履歴は logs/ フォルダにテキストで自動保存されます。")
         sys_hint.setWordWrap(True)
         sys_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
-        l_sys.addWidget(sys_hint, 3, 0, 1, 2)
+        l_sys.addWidget(sys_hint, 4, 0, 1, 2)
 
         tab_sub.addTab(tab_sys, "⚙️ システム")
 
@@ -3079,6 +3118,8 @@ class MainWindow(QMainWindow):
         clean_sub.addSeparator()
         clean_sub.addAction("🏝️ メイン塊のみ残す (大まかな浮遊塊を一括除去)", self._on_keep_main_cluster_only)
         clean_sub.addAction("🪶 表面・輪郭のエッジ飛散ヒゲを精密除去", self._on_quick_edge_veil_clean)
+        clean_sub.addSeparator()
+        clean_sub.addAction("📂 システム履歴ログフォルダを開く", open_log_folder)
 
         mode_sub = menu.addMenu("🧭 操作モード切替")
         mode_sub.addAction("🖐 視点回転モード (V)", lambda: self._set_interaction_mode("orbit"))

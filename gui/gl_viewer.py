@@ -322,12 +322,23 @@ class PointCloudViewer(QOpenGLWidget):
         self._capture_override_axes: Optional[bool] = None
 
     def initializeGL(self):
-        """OpenGL初期化処理"""
+        """OpenGL初期化処理 & GPU環境ログ記録"""
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDepthFunc(gl.GL_LEQUAL)
         gl.glEnable(gl.GL_POINT_SMOOTH)
         gl.glHint(gl.GL_POINT_SMOOTH_HINT, gl.GL_NICEST)
         gl.glDisable(gl.GL_LIGHTING)
+        try:
+            from core.logger import log_info
+            renderer = gl.glGetString(gl.GL_RENDERER)
+            version = gl.glGetString(gl.GL_VERSION)
+            vendor = gl.glGetString(gl.GL_VENDOR)
+            r_str = renderer.decode('utf-8', errors='ignore') if isinstance(renderer, bytes) else str(renderer)
+            v_str = version.decode('utf-8', errors='ignore') if isinstance(version, bytes) else str(version)
+            ven_str = vendor.decode('utf-8', errors='ignore') if isinstance(vendor, bytes) else str(vendor)
+            log_info(f"🖥️ OpenGL描画環境: GPU={r_str} | ベンダー={ven_str} | OpenGL={v_str}")
+        except Exception:
+            pass
 
     def resizeGL(self, width: int, height: int):
         """ウィンドウリサイズ処理"""
