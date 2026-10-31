@@ -1430,6 +1430,32 @@ class MainWindow(QMainWindow):
         preset_row.addWidget(self.btn_preset_fine, 1)
         auto_layout.addLayout(preset_row)
 
+        # ★ 現場シチュエーション別 実践レシピセレクター
+        recipe_row = QHBoxLayout()
+        recipe_row.setSpacing(4)
+        recipe_lbl = QLabel("📋 現場レシピ:")
+        recipe_lbl.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
+        recipe_row.addWidget(recipe_lbl)
+
+        self.recipe_combo = QComboBox()
+        self.recipe_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.recipe_combo.addItems([
+            "▼ 現場シチュエーション別レシピを選択...",
+            "🟢 【スキャン直後】大まか粗取り (浮遊塊・大ゴミ一掃)",
+            "🟡 【通常現況】標準バランス (建築・土木向け標準)",
+            "🟠 【CAD製図】角シャープ・ヒゲ除去 (エッジ成形)",
+            "🛡️ 【安全第一】壁・薄板部材保護 (絶対に削らない)",
+            "🚶 【動態除去】通行人・看板・車両の一掃 (大クラスタ)",
+            "⚡ 【動作改善】CAD軽量化・均一間引き (3cmボクセル)",
+            "🌳 【土木外構】樹木・低木・植栽の粗取り (外構対応)",
+            "🏭 【設備配管】配管・細線構造物保護 (ヒゲ誤認防止)"
+        ])
+        self.recipe_combo.setToolTip("現場のシチュエーションや目的に応じた最適なパラメータセットを一発適用します")
+        self.recipe_combo.setStyleSheet("background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; padding: 3px 6px; border-radius: 4px; font-size: 11px;")
+        self.recipe_combo.currentIndexChanged.connect(self._on_recipe_combo_changed)
+        recipe_row.addWidget(self.recipe_combo, 1)
+        auto_layout.addLayout(recipe_row)
+
         tab_widget = QTabWidget()
         tab_widget.setUsesScrollButtons(True)
         self.filter_tab_widget = tab_widget
@@ -4491,8 +4517,42 @@ class MainWindow(QMainWindow):
             self.floating_sel_badge.setText("未選択 (ブラシ/矩形/円/多角形で点を囲むとここで即操作できます)")
             self.floating_sel_badge.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: bold;")
 
+    def _on_recipe_combo_changed(self, index: int):
+        """📋 現場シチュエーション別レシピのコンボボックス変更ハンドラ"""
+        if index <= 0:
+            return
+        keys = [
+            "",
+            "rough",
+            "standard",
+            "fine",
+            "safe_wall",
+            "pedestrian",
+            "cad_lightweight",
+            "landscape_tree",
+            "piping_protect"
+        ]
+        if index < len(keys):
+            self._apply_filter_preset(keys[index])
+
     def _apply_filter_preset(self, preset_key: str):
-        """🎚️ ワンクリック・プリセット (大まか粗取り / 標準バランス / 細かい精密仕上げ) を自動設定"""
+        """🎚️ ワンクリック・プリセット / 現場シチュエーション別レシピを自動設定"""
+        # コンボボックスの表示連動 (シグナル一時ブロックで再帰防止)
+        key_to_index = {
+            "rough": 1,
+            "standard": 2,
+            "fine": 3,
+            "safe_wall": 4,
+            "pedestrian": 5,
+            "cad_lightweight": 6,
+            "landscape_tree": 7,
+            "piping_protect": 8
+        }
+        if hasattr(self, "recipe_combo") and preset_key in key_to_index:
+            self.recipe_combo.blockSignals(True)
+            self.recipe_combo.setCurrentIndex(key_to_index[preset_key])
+            self.recipe_combo.blockSignals(False)
+
         if preset_key == "rough":
             # 🟢 大まか(粗取り): 浮遊塊・飛び石を一掃
             self.sor_chk.setChecked(True)
@@ -4503,9 +4563,11 @@ class MainWindow(QMainWindow):
             self.cluster_eps_spin.setValue(0.25)
             self.cluster_pts_spin.setValue(45)
             self.edge_veil_chk.setChecked(False)
+            self.voxel_chk.setChecked(False)
             if hasattr(self, "filter_tab_widget"):
-                self.filter_tab_widget.setCurrentIndex(2)
-            msg = "🟢 プリセット「大まか(粗取り)」を設定: 浮遊塊除去(eps=0.25m, 45点) + SOR(k=25, 倍率2.2)"
+                self.filter_tab_widget.setCurrentIndex(2)  # クラスタタブ
+            msg = "🟢 レシピ「大まか粗取り」を設定: 浮遊塊除去(eps=0.25m, 45点) + SOR(k=25, 倍率2.2)"
+
         elif preset_key == "fine":
             # 🟠 細かい(精密仕上げ): 表面微細ヒゲ & エッジ飛散ベールノイズを緻密除去
             self.sor_chk.setChecked(True)
@@ -4517,10 +4579,90 @@ class MainWindow(QMainWindow):
             self.cluster_chk.setChecked(False)
             self.edge_veil_chk.setChecked(True)
             self.edge_k_spin.setValue(16)
-            self.edge_lin_spin.setValue(0.70)
+            self.edge_lin_spin.setValue(0.68)
+            self.voxel_chk.setChecked(False)
             if hasattr(self, "filter_tab_widget"):
-                self.filter_tab_widget.setCurrentIndex(3)
-            msg = "🟠 プリセット「細かい(精密仕上げ)」を設定: エッジ飛散・ヒゲ除去 + 高感度SOR(1.3) + 狭半径ROR"
+                self.filter_tab_widget.setCurrentIndex(3)  # エッジ・ヒゲタブ
+            msg = "🟠 レシピ「角シャープ・ヒゲ除去」を設定: エッジ飛散・ヒゲ除去 + 高感度SOR(1.3) + 狭半径ROR"
+
+        elif preset_key == "safe_wall":
+            # 🛡️ 安全第一: 壁・薄板部材保護 (絶対に削らない)
+            self.sor_chk.setChecked(True)
+            self.sor_k_spin.setValue(30)
+            self.sor_r_spin.setValue(2.8)
+            self.ror_chk.setChecked(False)
+            self.cluster_chk.setChecked(True)
+            self.cluster_eps_spin.setValue(0.12)
+            self.cluster_pts_spin.setValue(15)
+            self.edge_veil_chk.setChecked(False)
+            self.voxel_chk.setChecked(False)
+            if hasattr(self, "filter_tab_widget"):
+                self.filter_tab_widget.setCurrentIndex(0)  # SORタブ
+            msg = "🛡️ レシピ「安全第一・壁保護」を設定: 構造物を守る安全SOR(k=30, 倍率2.8) + 極小塊除去(15点)"
+
+        elif preset_key == "pedestrian":
+            # 🚶 動態除去: 通行人・看板・車両の一掃
+            self.sor_chk.setChecked(True)
+            self.sor_k_spin.setValue(25)
+            self.sor_r_spin.setValue(2.0)
+            self.ror_chk.setChecked(False)
+            self.cluster_chk.setChecked(True)
+            self.cluster_eps_spin.setValue(0.22)
+            self.cluster_pts_spin.setValue(120)
+            self.edge_veil_chk.setChecked(False)
+            self.voxel_chk.setChecked(False)
+            if hasattr(self, "filter_tab_widget"):
+                self.filter_tab_widget.setCurrentIndex(2)  # クラスタタブ
+            msg = "🚶 レシピ「通行人・看板一掃」を設定: 強力クラスタ除去(eps=0.22m, 120点未満一括) + SOR(k=25, 倍率2.0)"
+
+        elif preset_key == "cad_lightweight":
+            # ⚡ 動作改善: CAD軽量化・均一間引き (3cm)
+            self.sor_chk.setChecked(True)
+            self.sor_k_spin.setValue(20)
+            self.sor_r_spin.setValue(2.0)
+            self.ror_chk.setChecked(False)
+            self.cluster_chk.setChecked(True)
+            self.cluster_eps_spin.setValue(0.15)
+            self.cluster_pts_spin.setValue(30)
+            self.edge_veil_chk.setChecked(False)
+            self.voxel_chk.setChecked(True)
+            self.voxel_spin.setValue(0.03)
+            if hasattr(self, "filter_tab_widget"):
+                self.filter_tab_widget.setCurrentIndex(5)  # 間引きタブ
+            msg = "⚡ レシピ「CAD軽量化・均一間引き」を設定: 3cmボクセル間引き + SOR(k=20, 倍率2.0) + クラスタ(30点)"
+
+        elif preset_key == "landscape_tree":
+            # 🌳 土木外構: 樹木・低木・植栽の粗取り
+            self.sor_chk.setChecked(True)
+            self.sor_k_spin.setValue(25)
+            self.sor_r_spin.setValue(2.0)
+            self.ror_chk.setChecked(False)
+            self.cluster_chk.setChecked(True)
+            self.cluster_eps_spin.setValue(0.28)
+            self.cluster_pts_spin.setValue(80)
+            self.edge_veil_chk.setChecked(False)
+            self.voxel_chk.setChecked(False)
+            if hasattr(self, "filter_tab_widget"):
+                self.filter_tab_widget.setCurrentIndex(2)  # クラスタタブ
+            msg = "🌳 レシピ「土木外構・樹木植栽」を設定: 広域クラスタ除去(eps=0.28m, 80点) + SOR(k=25, 倍率2.0)"
+
+        elif preset_key == "piping_protect":
+            # 🏭 設備配管: 配管・細線構造物保護
+            self.sor_chk.setChecked(True)
+            self.sor_k_spin.setValue(30)
+            self.sor_r_spin.setValue(2.5)
+            self.ror_chk.setChecked(False)
+            self.cluster_chk.setChecked(True)
+            self.cluster_eps_spin.setValue(0.10)
+            self.cluster_pts_spin.setValue(12)
+            self.edge_veil_chk.setChecked(True)
+            self.edge_k_spin.setValue(16)
+            self.edge_lin_spin.setValue(0.88)
+            self.voxel_chk.setChecked(False)
+            if hasattr(self, "filter_tab_widget"):
+                self.filter_tab_widget.setCurrentIndex(3)  # エッジ・ヒゲタブ
+            msg = "🏭 レシピ「設備配管保護」を設定: 配管保護SOR(k=30, 倍率2.5) + 近接クラスタ(12点) + 安全ヒゲ感度(0.88)"
+
         else:
             # 🟡 標準バランス
             self.sor_chk.setChecked(True)
@@ -4531,9 +4673,10 @@ class MainWindow(QMainWindow):
             self.cluster_eps_spin.setValue(0.15)
             self.cluster_pts_spin.setValue(25)
             self.edge_veil_chk.setChecked(False)
+            self.voxel_chk.setChecked(False)
             if hasattr(self, "filter_tab_widget"):
-                self.filter_tab_widget.setCurrentIndex(0)
-            msg = "🟡 プリセット「標準バランス」を設定: SOR(k=20, 倍率1.8) + 孤立クラスタ(eps=0.15m, 25点)"
+                self.filter_tab_widget.setCurrentIndex(0)  # SORタブ
+            msg = "🟡 レシピ「標準バランス」を設定: SOR(k=20, 倍率1.8) + 孤立クラスタ(eps=0.15m, 25点)"
 
         self.log_text.append(msg)
         self.status_label.setText(msg)

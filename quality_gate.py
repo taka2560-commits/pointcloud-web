@@ -529,6 +529,20 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert win.sor_chk.isChecked() and win.edge_veil_chk.isChecked()
     win._apply_filter_preset("standard")
     assert win.sor_chk.isChecked() and win.cluster_chk.isChecked()
+    # 現場シチュエーション別レシピ全8種の検証
+    win._apply_filter_preset("safe_wall")
+    assert win.sor_chk.isChecked() and win.sor_r_spin.value() == 2.8 and win.cluster_pts_spin.value() == 15
+    win._apply_filter_preset("pedestrian")
+    assert win.cluster_chk.isChecked() and win.cluster_pts_spin.value() == 120
+    win._apply_filter_preset("cad_lightweight")
+    assert win.voxel_chk.isChecked() and win.voxel_spin.value() == 0.03
+    win._apply_filter_preset("landscape_tree")
+    assert win.cluster_eps_spin.value() == 0.28 and win.cluster_pts_spin.value() == 80
+    win._apply_filter_preset("piping_protect")
+    assert win.edge_veil_chk.isChecked() and win.edge_lin_spin.value() == 0.88
+    # コンボボックス経由の切り替え検証
+    win._on_recipe_combo_changed(1)  # rough
+    assert win.cluster_eps_spin.value() == 0.25
 
     # 3. パン平行移動モード (H / V) & ブラシ選択モード (B) & 即時削除モード & ノイズ処理専用モードの検証
     win._set_interaction_mode("pan")

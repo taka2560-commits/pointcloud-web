@@ -114,7 +114,9 @@
     }
     .badge-green { background: rgba(16, 185, 129, 0.2); color: var(--success); border: 1px solid var(--success); }
     .badge-yellow { background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning); }
-    .badge-red { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
+    .badge-blue { background: rgba(59, 130, 246, 0.2); color: var(--primary); border: 1px solid var(--primary); }
+    .badge-orange { background: rgba(234, 88, 12, 0.2); color: #ea580c; border: 1px solid #ea580c; }
+    .badge-purple { background: rgba(168, 85, 247, 0.2); color: #a855f7; border: 1px solid #a855f7; }
     .card-box {
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -169,14 +171,14 @@
 
 <div class="container">
   <h1>📘 E57 点群ノイズフィルター設定 完全マニュアル（初心者対応版）</h1>
-  <p>本マニュアルは、3D点群処理ツール「E57 Point Cloud Tool」に搭載されている各種ノイズ除去フィルターおよび間引き処理の仕組み、パラメータ変更時の挙動（数値を上げるとどうなるか／下げるとどうなるか）、現場ごとの最適な設定方法をわかりやすく解説したガイドです。</p>
+  <p>本マニュアルは、3D点群処理ツール「E57 Point Cloud Tool」に搭載されている各種ノイズ除去フィルターおよび間引き処理の仕組み、パラメータ変更時の挙動（数値を上げるとどうなるか／下げるとどうなるか）、そして<strong>現場シチュエーションに応じた実践レシピセット（全8種類）</strong>のワンクリック活用法を解説したガイドです。</p>
 
   <div class="nav-box">
     <strong>📑 目次</strong>
     <ol style="margin-top: 8px; margin-bottom: 0;">
-      <li><a href="#concept">本ツールのノイズ処理コンセプト（安心の完全ロスレス）</a></li>
-      <li><a href="#preset">ワンクリック・プリセットの選び方</a></li>
-      <li><a href="#filters">各フィルターの詳細解説（数値を上げたら／下げたら）</a>
+      <li><a href="#concept">1. 本ツールのノイズ処理コンセプト（安心の完全ロスレス）</a></li>
+      <li><a href="#preset">2. 現場シチュエーション別 実践レシピセット（全8種・ワンクリック適用）</a></li>
+      <li><a href="#filters">3. 各フィルターの詳細解説（数値を上げたら／下げたら）</a>
         <ul>
           <li><a href="#sor">3.1 統計的外れ値除去 (SOR)</a></li>
           <li><a href="#cluster">3.2 孤立クラスタ（塊ノイズ）除去</a></li>
@@ -185,8 +187,8 @@
           <li><a href="#dist_int">3.5 距離・反射強度フィルター</a></li>
         </ul>
       </li>
-      <li><a href="#recipes">現場シチュエーション別 実践レシピ</a></li>
-      <li><a href="#safety">消しすぎた時の安全対策・復元テクニック</a></li>
+      <li><a href="#recipes">4. 各現場レシピの詳細解説と設定値一覧</a></li>
+      <li><a href="#safety">5. 消しすぎた時の安全対策・復元テクニック</a></li>
     </ol>
   </div>
 
@@ -201,32 +203,57 @@
     <li><strong>安心の非破壊保存</strong>: E57ファイルへの保存時も、ノイズを除外した点群だけを座標精度ロスゼロで安全に出力できます。</li>
   </ul>
 
-  <h2 id="preset">2. ワンクリック・プリセットの選び方</h2>
-  <p>画面上部にある3つのボタンを使えば、専門的な数値を細かく調整しなくても、ワンクリックで最適な組み合わせを瞬時に適用できます。</p>
+  <h2 id="preset">2. 現場シチュエーション別 実践レシピセット（全8種）</h2>
+  <p>画面上部のボタン、または <strong>「📋 現場レシピ」プルダウンメニュー</strong> を選ぶだけで、現場の目的や対象物に合わせた最適なパラメータが一発で自動セットされます。</p>
 
   <table>
     <thead>
       <tr>
-        <th>プリセット名</th>
-        <th>推奨シーン</th>
-        <th>処理内容の概要</th>
+        <th>レシピ名</th>
+        <th>推奨シーン・対象</th>
+        <th>パラメータの組み合わせ概要</th>
       </tr>
     </thead>
     <tbody>
       <tr>
-        <td><span class="badge badge-green">🟢 大まか (粗取り)</span></td>
-        <td>スキャン直後、まずは大きな浮遊ゴミを一掃したい時</td>
-        <td>浮遊塊除去 (<code>eps=0.25m</code>, <code>45点</code>) ＋ 安全寄りのSOR (<code>k=25</code>, <code>倍率2.2</code>)</td>
+        <td><span class="badge badge-green">🟢 【スキャン直後】大まか粗取り</span></td>
+        <td>計測直後、まずは大きな浮遊物や飛び石を一掃したい時</td>
+        <td>浮遊塊 (<code>eps=0.25m</code>, <code>45点</code>) ＋ 安全SOR (<code>k=25</code>, <code>σ=2.2</code>)</td>
       </tr>
       <tr>
-        <td><span class="badge badge-yellow">🟡 標準バランス</span></td>
-        <td>一般的な室内・外構のバランス良いノイズ掃除</td>
-        <td>標準SOR (<code>k=20</code>, <code>倍率1.8</code>) ＋ 孤立クラスタ (<code>eps=0.15m</code>, <code>25点</code>)</td>
+        <td><span class="badge badge-yellow">🟡 【通常現況】標準バランス</span></td>
+        <td>一般的な室内・外構の標準的なノイズ掃除</td>
+        <td>標準SOR (<code>k=20</code>, <code>σ=1.8</code>) ＋ クラスタ (<code>eps=0.15m</code>, <code>25点</code>)</td>
       </tr>
       <tr>
-        <td><span class="badge badge-red">🟠 細かい (精密仕上げ)</span></td>
-        <td>柱・梁・壁の角をシャープにしてCAD図面を引きたい時</td>
-        <td>エッジ飛散・ヒゲ精密除去 ＋ 高感度SOR (<code>倍率1.3</code>) ＋ 狭半径ROR</td>
+        <td><span class="badge badge-orange">🟠 【CAD製図】角シャープ・ヒゲ除去</span></td>
+        <td>柱・梁・壁の角から飛び出るヒゲを削り壁芯を出したい時</td>
+        <td>ヒゲ除去 (<code>感度0.68</code>) ＋ 高感度SOR (<code>σ=1.3</code>) ＋ 狭半径ROR</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-blue">🛡️ 【安全第一】壁・薄板部材保護</span></td>
+        <td>薄い間仕切り壁、ガラス、手すりを絶対に削りたくない時</td>
+        <td>超安全SOR (<code>k=30</code>, <code>σ=2.8</code>) ＋ 極小塊のみ (<code>15点</code>)</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-purple">🚶 【動態除去】通行人・看板・車両</span></td>
+        <td>スキャン時に写り込んだ歩行者、立て看板、車を一掃したい時</td>
+        <td>強力クラスタ (<code>eps=0.22m</code>, <code>120点未満一括除去</code>) ＋ SOR</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-yellow">⚡ 【動作改善】CAD軽量化・均一間引き</span></td>
+        <td>2,000万点規模の巨大点群でCADやPCが重い・動かない時</td>
+        <td>3cmボクセル間引き (<code>0.03m</code>) ＋ SOR ＋ クラスタ</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-green">🌳 【土木外構】樹木・低木・植栽粗取り</span></td>
+        <td>屋外敷地、盛土、法面、風で揺れた木の葉の塊を除去したい時</td>
+        <td>広域クラスタ (<code>eps=0.28m</code>, <code>80点</code>) ＋ SOR (<code>k=25</code>)</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-blue">🏭 【設備配管】配管・細線構造物保護</span></td>
+        <td>プラント、天井裏ダクト、ケーブルラックの誤消去を防ぎたい時</td>
+        <td>配管保護SOR (<code>k=30</code>, <code>σ=2.5</code>) ＋ 慎重ヒゲ感度 (<code>0.88</code>)</td>
       </tr>
     </tbody>
   </table>
@@ -374,49 +401,62 @@
     </li>
   </ul>
 
-  <h2 id="recipes">4. 現場シチュエーション別 実践レシピ</h2>
+  <h2 id="recipes">4. 各現場レシピの詳細解説と設定値一覧</h2>
   
   <div class="card-box">
-    <h4>🍳 レシピA: 「まずは全体のゴミをサクッと掃除したい」</h4>
-    <ol>
-      <li>画面上部の <strong>「🟢 大まか (粗取り)」</strong> ボタンをクリック。</li>
-      <li>自動的に浮遊塊除去と安全寄りのSORが実行され、大きな浮遊物が一掃されます。</li>
-    </ol>
+    <h4>🍳 レシピ1: 🟢 【スキャン直後】大まか粗取り</h4>
+    <p><strong>目的:</strong> 計測直後、空間全体に散らばる大きなゴミを一掃する。<br>
+    <strong>設定値:</strong> SOR (<code>k=25</code>, <code>σ=2.2</code>) ＋ 孤立クラスタ (<code>eps=0.25m</code>, <code>45点</code>)<br>
+    <strong>解説:</strong> 建物の骨格を削らないようSOR倍率を少し緩めに保ちつつ、0.25m以内の浮遊塊を一網打尽にします。</p>
   </div>
 
   <div class="card-box">
-    <h4>🍳 レシピB: 「建物の壁や細部を絶対に削りたくない（安全第一）」</h4>
-    <ol>
-      <li>「SOR」タブを開く。</li>
-      <li><strong>標準偏差倍率 (σ) を <code>2.5 〜 3.0</code></strong> に引き上げる。</li>
-      <li>「クラスタ」タブの「最小塊点数」を <code>15 〜 20点</code> 程度の小さめにして実行。</li>
-    </ol>
+    <h4>🍳 レシピ2: 🟡 【通常現況】標準バランス</h4>
+    <p><strong>目的:</strong> 一般的な建築物・土木現況の標準的な定期クリーニング。<br>
+    <strong>設定値:</strong> SOR (<code>k=20</code>, <code>σ=1.8</code>) ＋ 孤立クラスタ (<code>eps=0.15m</code>, <code>25点</code>)<br>
+    <strong>解説:</strong> 最もバランスが取れた万能設定です。浮遊チリと25点未満の小ゴミを確実に除去します。</p>
   </div>
 
   <div class="card-box">
-    <h4>🍳 レシピC: 「通行人や看板、仮設物を根こそぎ消したい」</h4>
-    <ol>
-      <li>「クラスタ」タブを開く。</li>
-      <li><strong>最小塊点数を <code>100 〜 300点</code></strong> に大きく引き上げる。</li>
-      <li><strong>連結距離 (eps) を <code>0.20m 〜 0.25m</code></strong> に少し広げて実行。</li>
-    </ol>
+    <h4>🍳 レシピ3: 🟠 【CAD製図】角シャープ・ヒゲ除去</h4>
+    <p><strong>目的:</strong> 柱・梁・壁・天井の交差部から外側に飛び出たヒゲを除去し、CADで壁芯を取りやすくする。<br>
+    <strong>設定値:</strong> エッジ飛散除去 (<code>k=16</code>, <code>線状感度0.68</code>) ＋ 高感度SOR (<code>k=16</code>, <code>σ=1.3</code>) ＋ 狭半径ROR (<code>0.03m</code>, <code>8点</code>)<br>
+    <strong>解説:</strong> 輪郭エッジの直線性解析を行い、角から突き出た線状ノイズをピンポイント消去して角をパキッと仕上げます。</p>
   </div>
 
   <div class="card-box">
-    <h4>🍳 レシピD: 「柱や梁の角をシャープにして、CADで壁芯を取りやすくしたい」</h4>
-    <ol>
-      <li>画面上部の <strong>「🟠 細かい (精密仕上げ)」</strong> ボタンをクリック。</li>
-      <li>または「エッジ・ヒゲ」タブを開き、<strong>線状ヒゲ感度を <code>0.65 〜 0.70</code></strong> に設定して実行。</li>
-    </ol>
+    <h4>🍳 レシピ4: 🛡️ 【安全第一】壁・薄板部材保護</h4>
+    <p><strong>目的:</strong> 薄い間仕切り壁、石膏ボード、ガラス窓、手すりなど、繊細な部材を1点も欠損させたくない。<br>
+    <strong>設定値:</strong> SOR (<code>k=30</code>, <code>σ=2.8</code>) ＋ 孤立クラスタ (<code>eps=0.12m</code>, <code>15点</code>)<br>
+    <strong>解説:</strong> SOR倍率を2.8まで引き上げ、クラスタも15点以下の極小浮遊点のみに絞ることで、建物のあらゆる細部を100%安全に保護します。</p>
   </div>
 
   <div class="card-box">
-    <h4>🍳 レシピE: 「巨大点群でCADやPCが重い、動かない」</h4>
-    <ol>
-      <li>「間引き」タブを開く。</li>
-      <li><strong>ボクセルサイズを <code>0.03m (3cm)</code> または <code>0.05m (5cm)</code></strong> に設定してチェックを入れて実行。</li>
-      <li>2,000万点規模の点群でも、形状を保ったまま数百万点〜数十万点へ瞬時に均一圧縮されます。</li>
-    </ol>
+    <h4>🍳 レシピ5: 🚶 【動態除去】通行人・看板・車両の一掃</h4>
+    <p><strong>目的:</strong> 道路や店舗、駅構内スキャンなどで、歩行者の人影や仮設コーン、看板が写り込んでしまった時。<br>
+    <strong>設定値:</strong> 孤立クラスタ (<code>eps=0.22m</code>, <code>120点未満一括除去</code>) ＋ SOR (<code>k=25</code>, <code>σ=2.0</code>)<br>
+    <strong>解説:</strong> 最小塊点数を120点まで大幅に拡大し、人が歩いた跡のバラバラな点群や立て看板などの塊ゴミをごっそり消去します。</p>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピ6: ⚡ 【動作改善】CAD軽量化・均一間引き</h4>
+    <p><strong>目的:</strong> 2,000万点を超える超大規模点群で、CADやPCの描画が重くて動かない時。<br>
+    <strong>設定値:</strong> ボクセル間引き (<code>0.03m = 3cm</code>) ＋ SOR (<code>k=20</code>, <code>σ=2.0</code>) ＋ クラスタ (<code>30点</code>)<br>
+    <strong>解説:</strong> 空間全体を3cm四方のマスに区切って均一化し、形状の精度を保ったまま点数を大幅圧縮して動作を劇的に軽くします。</p>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピ7: 🌳 【土木外構】樹木・低木・植栽の粗取り</h4>
+    <p><strong>目的:</strong> 敷地造成、法面、道路スキャンで、風で揺れた樹木・低木・雑草の点群を効率よく除去する。<br>
+    <strong>設定値:</strong> 孤立クラスタ (<code>eps=0.28m</code>, <code>80点</code>) ＋ SOR (<code>k=25</code>, <code>σ=2.0</code>)<br>
+    <strong>解説:</strong> 屋外の広い空間スキャンに合わせて連結距離を0.28mに拡張し、地面から浮いた植栽の塊を効率よくキャッチします。「地面自動抽出」機能と併用するとさらに強力です。</p>
+  </div>
+
+  <div class="card-box">
+    <h4>🍳 レシピ8: 🏭 【設備配管】配管・細線構造物保護</h4>
+    <p><strong>目的:</strong> 工場・プラント・天井裏で、複雑に入り組んだ細い配管やダクト、ケーブルラックを誤消去から守る。<br>
+    <strong>設定値:</strong> SOR (<code>k=30</code>, <code>σ=2.5</code>) ＋ 孤立クラスタ (<code>eps=0.10m</code>, <code>12点</code>) ＋ エッジ飛散感度 (<code>0.88</code>)<br>
+    <strong>解説:</strong> 細い配管を「ヒゲ」や「浮遊ゴミ」と誤認しないよう、近傍探索点数を増やし、ヒゲ感度を0.88と極めて慎重に設定しています。</p>
   </div>
 
   <h2 id="safety">5. 消しすぎた時の安全対策・復元テクニック</h2>
