@@ -41,11 +41,6 @@
   - ワーカーの停止は `cancel()` → `wait()` の協調的中断が原則です。`QThread.terminate()` は最後の手段に限ります。
 - フィルタの結果が「全点除去」になる場合は、パラメータ設定ミスとみなして**全点保持＋警告ログ**に倒してください（`filter_isolated_clusters` の `allow_remove_all=False` が既定）。
 
-### ⑤ 【座標系変換と保存】保存は常に元の座標系・元のスケールで
-- 取り込み時の座標系変換（測量X/Y入替・Y-up・Z反転）は**表示・編集のための変換**です。`E57ScanData.coord_mode` に適用モードが記録されます。
-- 保存時は `FileSaveWorker` が `restore_scan_original_coordinates()` で元の座標系へ逆変換してから書き出し、終了後に表示用座標系へ再適用します。これにより ScaledInteger の生整数・スケール定義がそのまま使われ、**ビット完全一致**で書き戻せます（`tests/test_coord_roundtrip.py`）。
-- `core.processor.transform_scan_coordinate_system()` は points だけでなく `raw_unscaled_fields` と `field_schemas` も軸ごとに付け替えるため、変換後も `points == raw × scale + offset` が厳密に成り立ちます。この整合を壊す変更をしないでください。
-
 ### ④ 【座標系】数学座標系準拠と測量座標系の違い
 - 内部の3Dビューア（`gui/gl_viewer.py`）は、**厳密な「数学座標系（デカルト右手系・Z-up）」**で実装されています：
   - **画面右**: $+X$ 軸（横）
@@ -53,6 +48,15 @@
   - **画面手前**: $+Z$ 軸（高さ・上空）
 - 一方、日本の公共測量（平面直角座標系）は **「$X$＝北（縦）、$Y$＝東（横）」** のため、数学系とは縦横が逆です。
 - ビューアの軸方向を勝手に改造してはなりません。公共測量データに対応するため、インポート時に座標を入れ替える **「取り込み座標系セレクター（`transform_coordinate_system`）」** が実装されています。
+
+### ⑤ 【座標系変換と保存】保存は常に元の座標系・元のスケールで
+- 取り込み時の座標系変換（測量X/Y入替・Y-up・Z反転）は**表示・編集のための変換**です。`E57ScanData.coord_mode` に適用モードが記録されます。
+- 保存時は `FileSaveWorker` が `restore_scan_original_coordinates()` で元の座標系へ逆変換してから書き出し、終了後に表示用座標系へ再適用します。これにより ScaledInteger の生整数・スケール定義がそのまま使われ、**ビット完全一致**で書き戻せます（`tests/test_coord_roundtrip.py`）。
+- `core.processor.transform_scan_coordinate_system()` は points だけでなく `raw_unscaled_fields` と `field_schemas` も軸ごとに付け替えるため、変換後も `points == raw × scale + offset` が厳密に成り立ちます。この整合を壊す変更をしないでください。
+
+### ⑥ 【UI スタイル】セレクタ無しのインライン QSS を書かない
+- `widget.setStyleSheet("background: transparent;")` のようにセレクタを付けない宣言は**その子孫すべてに伝播**し、グローバル QSS（`QPushButton#execute_button` 等）を打ち消します（2026-10-31 に主要ボタンが文字だけに見える不具合として顕在化）。
+- 必ず `QWidget#name { ... }` のように objectName / クラスで限定するか、`setProperty("role", ...)` ＋ `gui/styles.py` のグローバル QSS で表現してください。デザイン改修の方針は `docs/DESIGN_STYLE_PLAN.md` を参照。
 
 ---
 
@@ -88,6 +92,8 @@
 ├── requirements-lock.txt       # 動作確認済みの固定バージョン
 ├── AGENTS.md / CLAUDE.md       # 複数AI並行開発の共通ルール（作業場所・担当ファイル・マージ手順）
 ├── QA_REPORT_2026-10-31.md     # 総合品質管理チェック報告書（欠陥一覧・修正状況・backlog）
+├── docs/                       # UI/UX レビュー（UI_UX_REVIEW_*.md）、デザイン改修計画（DESIGN_STYLE_PLAN.md）、画面証跡 ui_review/*.png
+├── tools/                      # 開発補助: capture_ui_screens.py（実画面スクリーンショット）、check_contrast.py（コントラスト比）
 ├── .gitattributes              # 改行コード固定（.py/.md 等は LF、.bat は CRLF、.e57 はバイナリ）
 │
 ├── core/                       # コアロジック（UI非依存）

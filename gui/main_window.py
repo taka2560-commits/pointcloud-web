@@ -135,7 +135,11 @@ class CollapsibleGroupBox(QGroupBox):
 
         # コンテンツウィジェット (実際のコントロール群を格納)
         self.content_widget = QWidget(self)
-        self.content_widget.setStyleSheet("background: transparent;")
+        # ★ セレクタ無しの "background: transparent;" は子孫ウィジェット全体に伝播し、
+        #    グローバル QSS（例: QPushButton#execute_button の緑背景）を打ち消して
+        #    主要ボタンが文字だけに見える不具合の原因になっていた。objectName で自分自身に限定する。
+        self.content_widget.setObjectName("collapsible_content")
+        self.content_widget.setStyleSheet("QWidget#collapsible_content { background: transparent; }")
         self._root_layout.addWidget(self.content_widget)
 
         # クリックイベント接続
