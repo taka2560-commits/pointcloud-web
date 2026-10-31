@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QKeyEvent,
 )
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
+from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
 
 
 @dataclass
@@ -281,6 +282,8 @@ class PointCloudViewer(QOpenGLWidget):
         self.measure_mode = False
         self.measure_points: List[Tuple[np.ndarray, np.ndarray]] = []
         self.measure_result_text = ""
+        self.measure_coord_lines: List[str] = []   # HUD に出す座標・距離の行（gui/measure_text.py）
+        self.coord_mode: str = "cartesian"         # 読み込み時の座標系変換（計測座標をファイル系でも表示するため）
 
         # 🧭 2点ピック斜め壁アライン視点・直交スライス
         self.wall_align_mode = False
@@ -990,29 +993,35 @@ class PointCloudViewer(QOpenGLWidget):
             painter.setPen(QColor(203, 213, 225))
             painter.setFont(QFont("Segoe UI", 9, QFont.Normal))
             painter.drawText(24, 54, "※2点ピック後、[━横][┃縦][🧱正面][🔪断面]で壁沿いノイズを簡単に除去できます")
-        elif self.measure_result_text:
+        elif self.measure_mode or self.measure_result_text:
+            # 計測 HUD: 1点目で座標（座標系変換して読み込んだときはファイル系も）、2点目で距離と ΔX/ΔY/ΔZ
+            n_pts = len(self.measure_points)
+            lines = list(self.measure_coord_lines) or ["計測点 1 をクリックすると座標を表示します"]
+            if n_pts == 0:
+                title = "📐 計測モード: 座標の読み取り"
+            elif n_pts == 1:
+                title = "📐 計測: 2点目をクリックで距離"
+            else:
+                title = "📐 2点間寸法計測結果"
+            hint = "Ctrl+C: 座標をコピー / 右クリック: クリア / M: 終了" if n_pts else "※右クリックでキャンセル / M: 終了"
+            box_h = 30 + 18 * len(lines) + 22
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
-            painter.drawRoundedRect(QRect(14, 14, 380, 75), 8, 8)
+            painter.drawRoundedRect(QRect(14, 14, 560, box_h), 8, 8)
 
-            painter.setPen(QColor(56, 189, 248))
+            painter.setPen(QColor(56, 189, 248) if n_pts >= 2 else QColor(250, 204, 21))
             painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
-            painter.drawText(26, 36, "📐 2点間寸法計測結果")
+            painter.drawText(26, 36, title)
 
-            painter.setPen(QColor(241, 245, 249))
             painter.setFont(QFont("Consolas", 10, QFont.Normal))
-            painter.drawText(26, 56, self.measure_result_text)
-            painter.drawText(26, 74, "※右クリックでクリア / Mキーで終了")
-        elif self.measure_mode:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(15, 23, 42, 200)))
-            painter.drawRoundedRect(QRect(14, 14, 320, 50), 8, 8)
-
-            painter.setPen(QColor(250, 204, 21))
-            painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
-            msg = "計測点 1 をクリック" if len(self.measure_points) == 0 else "計測点 2 をクリック"
-            painter.drawText(24, 34, f"📐 計測モード: {msg}")
-            painter.drawText(24, 52, "※右クリックでキャンセル")
+            y = 56
+            for line in lines:
+                painter.setPen(QColor(148, 163, 184) if line.startswith("   ") else QColor(241, 245, 249))
+                painter.drawText(26, y, line)
+                y += 18
+            painter.setPen(QColor(148, 163, 184))
+            painter.setFont(QFont("Segoe UI", 9, QFont.Normal))
+            painter.drawText(26, y + 2, hint)
 
         painter.end()
 
@@ -2846,8 +2855,7 @@ class PointCloudViewer(QOpenGLWidget):
             return
 
         if event.button() == Qt.RightButton and self.measure_mode:
-            self.measure_points.clear()
-            self.measure_result_text = ""
+            self.clear_measure_points()
             self._right_click_consumed = True
             self.update()
             return
@@ -2893,23 +2901,7 @@ class PointCloudViewer(QOpenGLWidget):
         if self.measure_mode and event.button() == Qt.LeftButton:
             hit = self._pick_nearest_point(event.pos())
             if hit is not None:
-                centered_pt, world_pt = hit
-                self.measure_points.append((centered_pt, world_pt))
-                if len(self.measure_points) == 2:
-                    p1 = self.measure_points[0][1]
-                    p2 = self.measure_points[1][1]
-                    dist_3d = np.linalg.norm(p2 - p1)
-                    dist_xy = np.linalg.norm(p2[:2] - p1[:2])
-                    dist_z = abs(p2[2] - p1[2])
-                    self.measure_result_text = (
-                        f"直線距離: {dist_3d:.3f}m | 水平: {dist_xy:.3f}m | 高低差: {dist_z:.3f}m"
-                    )
-                    self.measure_updated.emit(self.measure_result_text)
-                    self.status_changed.emit(f"計測完了: 直線距離 {dist_3d:.3f} m")
-                elif len(self.measure_points) > 2:
-                    self.measure_points = [(centered_pt, world_pt)]
-                    self.measure_result_text = ""
-                self.update()
+                self._on_measure_pick(hit[0], hit[1])
             return
 
         if self.selection_mode and event.button() == Qt.LeftButton:
@@ -3115,11 +3107,13 @@ class PointCloudViewer(QOpenGLWidget):
             self.space_pan_active = True
             self.setCursor(Qt.OpenHandCursor)
             self.update()
+        elif key == Qt.Key_C and (event.modifiers() & Qt.ControlModifier) and self.measure_mode:
+            # 計測中の Ctrl+C: 座標（と距離）をタブ区切りでコピー
+            self.copy_measure_to_clipboard()
         elif key == Qt.Key_M:
             self.measure_mode = not self.measure_mode
             if not self.measure_mode:
-                self.measure_points.clear()
-                self.measure_result_text = ""
+                self.clear_measure_points()
             self.update()
             mode_s = "ON" if self.measure_mode else "OFF"
             self.status_changed.emit(f"寸法計測ツール: {mode_s} (M)")
@@ -3137,6 +3131,41 @@ class PointCloudViewer(QOpenGLWidget):
             self.update()
         else:
             super().keyReleaseEvent(event)
+
+    # ------------------------------------------------------------------ 計測（座標の読み取り・コピー）
+    def _on_measure_pick(self, centered_pt: np.ndarray, world_pt: np.ndarray) -> None:
+        """計測モードで点をピック: 1点目で座標を表示、2点目で距離と差分、3点目以降は新しい計測を始める"""
+        if len(self.measure_points) >= 2:
+            self.measure_points = []
+        self.measure_points.append((np.asarray(centered_pt), np.asarray(world_pt, dtype=np.float64)))
+        self._refresh_measure_text()
+        self.measure_updated.emit(measure_status_text([p[1] for p in self.measure_points], self.coord_mode))
+        self.update()
+
+    def _refresh_measure_text(self) -> None:
+        """measure_points と coord_mode から HUD の行と距離テキストを作り直す"""
+        world = [p[1] for p in self.measure_points]
+        self.measure_coord_lines = measure_hud_lines(world, self.coord_mode)
+        self.measure_result_text = measure_distance_text(world)
+
+    def clear_measure_points(self) -> None:
+        """計測点・HUD の行・距離テキストをまとめて消す（右クリック / Esc / M で終了）"""
+        self.measure_points.clear()
+        self.measure_result_text = ""
+        self.measure_coord_lines = []
+
+    def copy_measure_to_clipboard(self) -> bool:
+        """計測中の座標（と距離）をタブ区切りでクリップボードへ。Excel / CAD にそのまま貼れる"""
+        if not self.measure_points:
+            self.status_changed.emit("コピーする計測点がありません。計測モード(M)で点をクリックしてください")
+            return False
+        text = measure_clipboard_text([p[1] for p in self.measure_points], self.coord_mode)
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            return False
+        clipboard.setText(text)
+        self.status_changed.emit(f"計測座標 {len(self.measure_points)} 点をクリップボードにコピーしました（タブ区切り）")
+        return True
 
     def _pick_nearest_point(self, click_pos: QPoint) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         if self.display_points is None or len(self.display_points) == 0:
@@ -3254,8 +3283,7 @@ class PointCloudViewer(QOpenGLWidget):
         self.brush_stroke_points.clear()
         self.is_selecting = False
         if self.measure_mode and (len(self.measure_points) > 0 or self.measure_result_text):
-            self.measure_points.clear()
-            self.measure_result_text = ""
+            self.clear_measure_points()
         self._update_active_colors()
         self._update_display_colors_only()
         self.update()
