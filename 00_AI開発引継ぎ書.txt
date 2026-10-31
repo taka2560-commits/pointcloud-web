@@ -71,7 +71,8 @@ core/processor.py     : FilterConfig、座標系変換関数、パイプライ�
 core/logger.py        : システム履歴ロガー（日別UTF-8出力、クラッシュダンプ）
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）
 gui/main_window.py    : メイン画面UI、リボンバー、レイヤー管理、レシピセレクター
-gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread）
+gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread、汎用 FunctionWorker）
+gui/layer_history.py  : 差分ベースのレイヤー Undo/Redo 履歴（全点コピーをしない）
 gui/progress_dialog.py: キャンセル対応モーダル進捗ダイアログ
 
 --------------------------------------------------------------------------------
@@ -82,7 +83,7 @@ gui/progress_dialog.py: キャンセル対応モーダル進捗ダイアログ
       python -X utf8 quality_gate.py          （全5ゲート。コミット時にも pre-commit フックで自動実行）
       python -X utf8 quality_gate.py --quick  （Gate 1/3/5 のみ。GUIを開かない作業中の確認用）
   ・全5ゲート（構文/DOM整合、ビューア不変条件、境界値ファジング、実機GUIシナリオ、
-    unittest スイート 49件）がすべてPASSすることを確認してください。
+    unittest スイート 55件）がすべてPASSすることを確認してください。
 
 【スタンドアロンEXEのビルド】
   ・「EXE配布パッケージ作成.bat」 をダブルクリックしてください。
