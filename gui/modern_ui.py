@@ -671,7 +671,7 @@ def _install_behaviors(win) -> None:
     """トーストの種類付け・選択バッジの状態・最近使ったファイル・空状態カードの表示制御・モーション"""
     from gui.design_tokens import get_tokens
     from gui.motion import (
-        bounce, cascade_in, expand_animated, fade_in, fade_out_then_hide, fade_slide_in, focus_pulse,
+        bounce, cancel_fade_out, cascade_in, expand_animated, fade_in, fade_out_then_hide, fade_slide_in, focus_pulse,
         install_button_motion, install_number_ticker, set_motion_enabled, shake,
     )
     from gui.ui_mode import get_saved_motion_enabled
@@ -703,6 +703,7 @@ def _install_behaviors(win) -> None:
         return "info"
 
     def show_toast(message: str, duration_ms: int = 2600):
+        cancel_fade_out(win.toast_label)  # 前の通知の退場中でも、新しい通知を巻き込んで消さない
         kind = classify(message)
         win.toast_label.setProperty("kind", kind)
         _repolish(win.toast_label)

@@ -53,6 +53,8 @@ class PointCloudViewer(QOpenGLWidget):
     point_selected = Signal(list)       # 選択された点インデックスリスト
     status_changed = Signal(str)        # ステータスメッセージ
     measure_updated = Signal(str)       # 計測結果メッセージ
+    MEASURE_PICK_MAX_PX = 12.0          # 計測で点を拾うときのクリック位置からの許容距離 [px]
+    MEASURE_SNAP_NOTICE_PX = 3.0        # これより離れた点を拾ったらステータスで知らせる [px]
     projection_changed = Signal(bool)   # 投影モード変更通知 (True: 正射影, False: 透視投影)
     bounds_ready = Signal(object, object)  # 点群のワールド範囲 (min_xyz, max_xyz)
     layers_updated = Signal(int, int)      # レイヤー点数更新 (有効レイヤー点数, ノイズ点数)
@@ -284,6 +286,7 @@ class PointCloudViewer(QOpenGLWidget):
         self.measure_result_text = ""
         self.measure_coord_lines: List[str] = []   # HUD に出す座標・距離の行（gui/measure_text.py）
         self.coord_mode: str = "cartesian"         # 読み込み時の座標系変換（計測座標をファイル系でも表示するため）
+        self.last_pick_px: Optional[float] = None  # 直近のピックのクリック位置からの距離 [px]
 
         # 🧭 2点ピック斜め壁アライン視点・直交スライス
         self.wall_align_mode = False
@@ -1158,7 +1161,9 @@ class PointCloudViewer(QOpenGLWidget):
     ):
         """点群データを設定する"""
         self._clear_color_cache()
+        self.clear_measure_points()  # 前の点群の計測点は新しい点群では無効
         if points is None or len(points) == 0:
+            self.coord_mode = "cartesian"
             self.points_raw = None
             self.points_centered = None
             self.active_colors = None
@@ -1246,6 +1251,11 @@ class PointCloudViewer(QOpenGLWidget):
         if preloaded is None or preloaded.points_raw is None or len(preloaded.points_raw) == 0:
             self.set_point_cloud(None)
             return
+
+        self.clear_measure_points()  # 前の点群の計測点は新しい点群では無効
+        # 読み込み時の座標系変換を計測ツールへ伝える（ピックした座標をファイル系でも表示するため）
+        scans = getattr(preloaded, "scans", None)
+        self.coord_mode = (getattr(scans[0], "coord_mode", "cartesian") or "cartesian") if scans else "cartesian"
 
         self.points_raw = preloaded.points_raw
         self.points_centered = preloaded.points_centered
@@ -2899,9 +2909,11 @@ class PointCloudViewer(QOpenGLWidget):
             return
 
         if self.measure_mode and event.button() == Qt.LeftButton:
-            hit = self._pick_nearest_point(event.pos())
+            hit = self._pick_nearest_point(event.pos(), max_px=self.MEASURE_PICK_MAX_PX)
             if hit is not None:
-                self._on_measure_pick(hit[0], hit[1])
+                self._on_measure_pick(hit[0], hit[1], snap_px=self.last_pick_px)
+            else:
+                self.status_changed.emit("クリック位置の近くに点がありません。拡大するか、点の上をクリックしてください")
             return
 
         if self.selection_mode and event.button() == Qt.LeftButton:
@@ -3133,13 +3145,16 @@ class PointCloudViewer(QOpenGLWidget):
             super().keyReleaseEvent(event)
 
     # ------------------------------------------------------------------ 計測（座標の読み取り・コピー）
-    def _on_measure_pick(self, centered_pt: np.ndarray, world_pt: np.ndarray) -> None:
+    def _on_measure_pick(self, centered_pt: np.ndarray, world_pt: np.ndarray, snap_px: Optional[float] = None) -> None:
         """計測モードで点をピック: 1点目で座標を表示、2点目で距離と差分、3点目以降は新しい計測を始める"""
         if len(self.measure_points) >= 2:
             self.measure_points = []
         self.measure_points.append((np.asarray(centered_pt), np.asarray(world_pt, dtype=np.float64)))
         self._refresh_measure_text()
-        self.measure_updated.emit(measure_status_text([p[1] for p in self.measure_points], self.coord_mode))
+        msg = measure_status_text([p[1] for p in self.measure_points], self.coord_mode)
+        if snap_px is not None and snap_px > self.MEASURE_SNAP_NOTICE_PX:
+            msg += f"  ※クリック位置から {snap_px:.0f}px 離れた点を拾いました。拡大すると正確に拾えます"
+        self.measure_updated.emit(msg)
         self.update()
 
     def _refresh_measure_text(self) -> None:
@@ -3167,27 +3182,61 @@ class PointCloudViewer(QOpenGLWidget):
         self.status_changed.emit(f"計測座標 {len(self.measure_points)} 点をクリップボードにコピーしました（タブ区切り）")
         return True
 
-    def _pick_nearest_point(self, click_pos: QPoint) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    def _pick_nearest_point(self, click_pos: QPoint, max_px: float = 30.0) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        クリック位置に見えている点を拾い、(中心化座標, ワールド座標) を返す。max_px 以内に点が無ければ None。
+        - 表示中の全点を対象にする（間引くとクリックした点と別の点を拾うため）
+        - カーソル付近で最も手前の面に絞ってから、画面上で最も近い点を選ぶ（奥の点を拾わない）
+        - ワールド座標は float32 の表示用配列ではなく points_raw の原本値を返す
+        - クリック位置からの距離 [px] を self.last_pick_px に残す
+        """
+        self.last_pick_px = None
         if self.display_points is None or len(self.display_points) == 0:
             return None
 
         pts = self.display_points
-        step = max(1, len(pts) // 50000)
-        sub_pts = pts[::step]
+        scr_x, scr_y, valid_z = self._project_to_screen(pts)
+        dists_sq = (scr_x - click_pos.x()) ** 2 + (scr_y - click_pos.y()) ** 2
+        cand = np.where(valid_z & (dists_sq <= float(max_px) ** 2))[0]
+        if len(cand) == 0:
+            return None
 
-        scr_x, scr_y, valid_z = self._project_to_screen(sub_pts)
+        cand_d = np.sqrt(dists_sq[cand])
+        depth = self._view_depth(pts[cand])
+        front = float(depth[cand_d <= float(cand_d.min()) + 1.5].min())
+        on_front = depth <= front + self._world_per_pixel(front) * 8.0
+        best_pos = int(np.argmin(np.where(on_front, cand_d, np.inf)))
 
-        cx, cy = click_pos.x(), click_pos.y()
-        dists_sq = (scr_x - cx) ** 2 + (scr_y - cy) ** 2
-        dists_sq[~valid_z] = 1e9
+        best_idx = int(cand[best_pos])
+        self.last_pick_px = float(cand_d[best_pos])
+        best_centered = pts[best_idx]
+        return best_centered, self._display_point_world(best_idx, best_centered)
 
-        min_idx = np.argmin(dists_sq)
-        if dists_sq[min_idx] < (30.0 ** 2):
-            best_centered = sub_pts[min_idx]
-            best_world = best_centered.astype(np.float64) + self.center_offset
-            return best_centered, best_world
+    def _view_depth(self, pts_centered: np.ndarray) -> np.ndarray:
+        """視点からの奥行き（カメラ座標系。大きいほど奥）"""
+        view_np = np.array(self._get_view_matrix().data(), dtype=np.float32).reshape((4, 4))
+        ones = np.ones((len(pts_centered), 1), dtype=np.float32)
+        return -(np.hstack([pts_centered, ones]) @ view_np)[:, 2]
 
-        return None
+    def _world_per_pixel(self, depth: float) -> float:
+        """奥行き depth の位置で画面 1px が何メートルに当たるか"""
+        height = max(1, self.height())
+        if self.is_orthographic:
+            return 2.0 * max(0.5, self.camera_distance * 0.35) / height
+        return 2.0 * math.tan(math.radians(self.fov) * 0.5) * max(depth, 1e-6) / height
+
+    def _display_point_world(self, display_idx: int, centered_pt: np.ndarray) -> np.ndarray:
+        """
+        表示点のワールド座標を原本 points_raw から返す。
+        断面スライダーの高速プレビュー中は display_orig_indices と対応しないので、
+        中心化座標が一致するときだけ原本を使い、それ以外は表示用の値から復元する。
+        """
+        orig = self.display_orig_indices
+        if orig is not None and self.points_raw is not None and len(orig) == len(self.display_points):
+            orig_idx = int(orig[display_idx])
+            if np.array_equal(self.points_centered[orig_idx], centered_pt):
+                return np.array(self.points_raw[orig_idx], dtype=np.float64)
+        return np.asarray(centered_pt, dtype=np.float64) + self.center_offset
 
     def _project_to_screen(self, pts_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         aspect = self.width() / max(1, self.height())

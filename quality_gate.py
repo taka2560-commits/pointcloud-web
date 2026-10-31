@@ -899,6 +899,14 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         win_k.show_toast("テーマ検査: 保存しました")
         win_k.show_toast("テーマ検査: エラー")
         app.processEvents()
+        # 前の通知の退場中に出した通知が消えないこと
+        QTest.qWait(400)
+        win_k._toast_timer.stop()
+        win_k._toast_timer.timeout.emit()
+        QTest.qWait(30)
+        win_k.show_toast("テーマ検査: 次の通知")
+        QTest.qWait(300)
+        assert win_k.toast_label.isVisible() and "次の通知" in win_k.toast_label.text(), "退場中に出した通知が消えました"
         win_k._update_floating_selection_bar(1234)
         win_k._update_floating_selection_bar(0)
         for grp in win_k.findChildren(QWidget):

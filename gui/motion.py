@@ -163,6 +163,7 @@ def animate_opacity(
     remove_effect_when_done: bool = False,
 ) -> Optional[QVariantAnimation]:
     """不透明度を start→end へアニメーション。終了後に効果を外すと通常描画に戻る（描画コストゼロ）"""
+    w._motion_fading_out = False  # type: ignore[attr-defined]  # 新しい不透明度アニメーションは退場を上書きする
     if not _enabled:
         if remove_effect_when_done or abs(float(end) - 1.0) < 1e-6:
             try:
@@ -276,13 +277,28 @@ def fade_out_then_hide(w: QWidget, duration_ms: Optional[int] = None) -> None:
         return
 
     def _hide():
+        w._motion_fading_out = False  # type: ignore[attr-defined]
         w.hide()
         try:
             w.setGraphicsEffect(None)
         except Exception:
             pass
 
-    animate_opacity(w, 1.0, 0.0, duration_ms or MOTION.duration_base_ms, _EASE_IN, on_finished=_hide)
+    anim = animate_opacity(w, 1.0, 0.0, duration_ms or MOTION.duration_base_ms, _EASE_IN, on_finished=_hide)
+    w._motion_fading_out = anim is not None  # type: ignore[attr-defined]
+
+
+def cancel_fade_out(w: QWidget) -> bool:
+    """進行中の fade_out_then_hide を取り消し、不透明のまま表示を保つ。取り消したら True"""
+    if not getattr(w, "_motion_fading_out", False):
+        return False
+    _stop_anim(w, "_motion_opacity_anim")
+    w._motion_fading_out = False  # type: ignore[attr-defined]
+    try:
+        w.setGraphicsEffect(None)
+    except Exception:
+        pass
+    return True
 
 
 def cascade_in(widgets: Sequence[QWidget], each_ms: Optional[int] = None) -> None:
