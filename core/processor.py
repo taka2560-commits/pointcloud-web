@@ -14,6 +14,8 @@ from core.filters import (
     filter_distance,
     filter_intensity,
     voxel_downsample_indices,
+    filter_isolated_clusters,
+    filter_edge_veil_noise,
 )
 
 
@@ -30,6 +32,17 @@ class FilterConfig:
     use_ror: bool = False
     ror_radius: float = 0.05
     ror_min_points: int = 16
+
+    # 孤立クラスタ（浮遊小塊ノイズ）除去
+    use_cluster_filter: bool = False
+    cluster_eps: float = 0.15
+    cluster_min_points: int = 30
+
+    # エッジ飛散・ヒゲ（ベールノイズ）精密除去
+    use_edge_veil_filter: bool = False
+    edge_neighbors: int = 16
+    edge_linearity_thresh: float = 0.72
+    edge_sor_std_ratio: float = 1.25
 
     # 距離フィルタ
     use_distance_filter: bool = False
@@ -164,6 +177,35 @@ class PointCloudProcessor:
                 keep_mask &= ror_mask
                 log(f"RORノイズ除去適用 (半径{self.config.ror_radius}m, 最小点数{self.config.ror_min_points}): 残り {np.sum(keep_mask):,} 点")
 
+        # 6. 孤立クラスタ（浮遊小塊ノイズ）除去
+        if self.config.use_cluster_filter:
+            current_indices = np.where(keep_mask)[0]
+            if len(current_indices) > 0:
+                cluster_local_indices = filter_isolated_clusters(
+                    points[current_indices],
+                    eps=self.config.cluster_eps,
+                    min_cluster_points=self.config.cluster_min_points,
+                )
+                cluster_mask = np.zeros(total_points, dtype=bool)
+                cluster_mask[current_indices[cluster_local_indices]] = True
+                keep_mask &= cluster_mask
+                log(f"孤立クラスタ除去適用 (距離{self.config.cluster_eps}m, 最小塊{self.config.cluster_min_points}点): 残り {np.sum(keep_mask):,} 点")
+
+        # 7. エッジ飛散・ヒゲ（ベールノイズ）精密除去
+        if self.config.use_edge_veil_filter:
+            current_indices = np.where(keep_mask)[0]
+            if len(current_indices) > 0:
+                edge_local_indices = filter_edge_veil_noise(
+                    points[current_indices],
+                    nb_neighbors=self.config.edge_neighbors,
+                    linearity_threshold=self.config.edge_linearity_thresh,
+                    sor_std_ratio=self.config.edge_sor_std_ratio,
+                )
+                edge_mask = np.zeros(total_points, dtype=bool)
+                edge_mask[current_indices[edge_local_indices]] = True
+                keep_mask &= edge_mask
+                log(f"エッジ飛散・ヒゲ精密除去適用: 残り {np.sum(keep_mask):,} 点")
+
         keep_indices = np.where(keep_mask)[0]
         removed_indices = np.where(~keep_mask)[0]
 
@@ -256,6 +298,35 @@ class PointCloudProcessor:
                 keep_mask &= m
                 log(f"RORノイズ除去適用: 残り {np.sum(keep_mask):,} 点")
 
+        # 5. 孤立クラスタ（浮遊小塊ノイズ）除去
+        if self.config.use_cluster_filter:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                c_idx = filter_isolated_clusters(
+                    points[current],
+                    eps=self.config.cluster_eps,
+                    min_cluster_points=self.config.cluster_min_points,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[c_idx]] = True
+                keep_mask &= m
+                log(f"孤立クラスタ除去適用: 残り {np.sum(keep_mask):,} 点")
+
+        # 6. エッジ飛散・ヒゲ（ベールノイズ）精密除去
+        if self.config.use_edge_veil_filter:
+            current = np.where(keep_mask)[0]
+            if len(current) > 0:
+                e_idx = filter_edge_veil_noise(
+                    points[current],
+                    nb_neighbors=self.config.edge_neighbors,
+                    linearity_threshold=self.config.edge_linearity_thresh,
+                    sor_std_ratio=self.config.edge_sor_std_ratio,
+                )
+                m = np.zeros(total, dtype=bool)
+                m[current[e_idx]] = True
+                keep_mask &= m
+                log(f"エッジ飛散・ヒゲ精密除去適用: 残り {np.sum(keep_mask):,} 点")
+
         keep_indices = np.where(keep_mask)[0]
         removed_indices = np.where(~keep_mask)[0]
         return keep_indices, removed_indices
@@ -339,3 +410,63 @@ class PointCloudProcessor:
             total_removal_ratio=total_ratio,
             total_time_taken_sec=total_time,
         )
+
+
+def transform_coordinate_system(points: np.ndarray, coord_mode: str) -> np.ndarray:
+    """
+    点群の3次元座標配列を取り込み設定に応じて変換する。
+
+    Parameters:
+    - points: (N, 3) float64 座標配列
+    - coord_mode:
+        - "cartesian": 数学座標系 (X, Y, Z そのまま)
+        - "survey_swap": 測量座標系 → 数学座標系 (X=Y, Y=X, Z=Z: 測量X=北, Y=東を数学X=東, Y=北へ入替)
+        - "survey_swap_inv": 測量系反転 (X=Y, Y=-X, Z=Z)
+        - "y_up_to_z_up": Y-up → Z-up 変換 (X=X, Y=-Z, Z=Y)
+        - "z_invert": Z軸反転 (X=X, Y=Y, Z=-Z)
+    """
+    if points is None or len(points) == 0 or coord_mode in ("cartesian", "", None):
+        return points
+
+    new_pts = np.empty_like(points)
+    x = points[:, 0]
+    y = points[:, 1]
+    z = points[:, 2]
+
+    if coord_mode == "survey_swap":
+        # 測量X(北) -> 数学Y, 測量Y(東) -> 数学X
+        new_pts[:, 0] = y
+        new_pts[:, 1] = x
+        new_pts[:, 2] = z
+    elif coord_mode == "survey_swap_inv":
+        new_pts[:, 0] = y
+        new_pts[:, 1] = -x
+        new_pts[:, 2] = z
+    elif coord_mode == "y_up_to_z_up":
+        new_pts[:, 0] = x
+        new_pts[:, 1] = -z
+        new_pts[:, 2] = y
+    elif coord_mode == "z_invert":
+        new_pts[:, 0] = x
+        new_pts[:, 1] = y
+        new_pts[:, 2] = -z
+    else:
+        return points
+
+    return new_pts
+
+
+def transform_scan_coordinate_system(scan, coord_mode: str) -> None:
+    """
+    単一のE57ScanDataの内部座標 (points および raw_fields) を指定の座標系へ一括インプレース変換する。
+    """
+    if scan is None or getattr(scan, "points", None) is None or len(scan.points) == 0 or coord_mode in ("cartesian", "", None):
+        return
+
+    scan.points = transform_coordinate_system(scan.points, coord_mode)
+    if hasattr(scan, "raw_fields") and isinstance(scan.raw_fields, dict):
+        if "cartesianX" in scan.raw_fields and "cartesianY" in scan.raw_fields and "cartesianZ" in scan.raw_fields:
+            scan.raw_fields["cartesianX"] = scan.points[:, 0]
+            scan.raw_fields["cartesianY"] = scan.points[:, 1]
+            scan.raw_fields["cartesianZ"] = scan.points[:, 2]
+

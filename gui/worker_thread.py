@@ -12,7 +12,12 @@ from typing import Optional, List, Dict, Any
 from PySide6.QtCore import QThread, Signal
 import numpy as np
 
-from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
+from core.processor import (
+    FilterConfig,
+    PointCloudProcessor,
+    ProcessSummary,
+    transform_scan_coordinate_system,
+)
 from core.filters import keep_largest_clusters
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 
@@ -117,6 +122,7 @@ class FileLoadWorker(QThread):
         file_path: str,
         point_budget: int = 2000000,
         max_load_points: Optional[int] = None,
+        coord_mode: str = "cartesian",
         parent=None,
     ):
         super().__init__(parent)
@@ -125,6 +131,7 @@ class FileLoadWorker(QThread):
         # 実務でのデータ欠損を防ぐため、デフォルト(None)では全点ロスレス読み込みを行う
         # （point_budget は3D描画用の表示間引きのみに使用し、元データは1点も減らさない）
         self.max_load_points = max_load_points
+        self.coord_mode = coord_mode
         self._is_cancelled = False
 
     def run(self):
@@ -166,6 +173,8 @@ class FileLoadWorker(QThread):
                         else:
                             s.name = f"{base} / {s.name}"
                     s.scan_index = len(scans)
+                    if self.coord_mode and self.coord_mode != "cartesian":
+                        transform_scan_coordinate_system(s, self.coord_mode)
                     scans.append(s)
 
             if not scans:

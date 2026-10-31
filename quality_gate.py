@@ -160,7 +160,7 @@ def gate_3_boundary_and_fuzzing_check() -> None:
     print_banner("Gate 3: 境界値・カオス入力ファジング検査 (Edge-Case Fuzzing)")
 
     from PySide6.QtWidgets import QApplication
-    from core.processor import FilterConfig, PointCloudProcessor
+    from core.processor import FilterConfig, PointCloudProcessor, transform_coordinate_system
     from core.filters import segment_ground_points, segment_largest_plane
     from gui.gl_viewer import PointCloudViewer
 
@@ -405,7 +405,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
                 os.remove(sf)
 
     # 自動フィルタのフィルタ別レイヤー分離 & 1つ戻る/進む の検証
-    from core.processor import FilterConfig
+    from core.processor import FilterConfig, transform_coordinate_system
     from gui.worker_thread import MemoryFilterWorker
 
     win._on_toggle_layer_lock(custom_lid, False)
@@ -543,6 +543,23 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     # コンボボックス経由の切り替え検証
     win._on_recipe_combo_changed(1)  # rough
     assert win.cluster_eps_spin.value() == 0.25
+
+    # 🌐 取り込み・表示座標系 (数学座標系 / 測量座標系X-Y入替 / Y-up / Z反転) の検証
+    assert hasattr(win, "coord_system_combo")
+    assert win.coord_system_combo.count() == 5
+    win.coord_system_combo.setCurrentIndex(1)  # survey_swap
+    assert win.coord_system_combo.currentData() == "survey_swap"
+    win.coord_system_combo.setCurrentIndex(0)  # cartesian
+    assert win.coord_system_combo.currentData() == "cartesian"
+
+    # transform_coordinate_system の数学的正当性テスト
+    dummy_pts = np.array([[10.0, 20.0, 30.0], [1.0, 2.0, 3.0]], dtype=np.float64)
+    swapped = transform_coordinate_system(dummy_pts, "survey_swap")
+    assert np.allclose(swapped[:, 0], dummy_pts[:, 1]) and np.allclose(swapped[:, 1], dummy_pts[:, 0]) and np.allclose(swapped[:, 2], dummy_pts[:, 2])
+    y_up = transform_coordinate_system(dummy_pts, "y_up_to_z_up")
+    assert np.allclose(y_up[:, 0], dummy_pts[:, 0]) and np.allclose(y_up[:, 1], -dummy_pts[:, 2]) and np.allclose(y_up[:, 2], dummy_pts[:, 1])
+    z_inv = transform_coordinate_system(dummy_pts, "z_invert")
+    assert np.allclose(z_inv[:, 2], -dummy_pts[:, 2])
 
     # 3. パン平行移動モード (H / V) & ブラシ選択モード (B) & 即時削除モード & ノイズ処理専用モードの検証
     win._set_interaction_mode("pan")

@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, QColor
 
-from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary
+from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary, transform_coordinate_system, transform_scan_coordinate_system
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 from core.logger import log_info, log_warning, log_error, log_exception, open_log_folder
 from core.filters import (
@@ -287,6 +287,24 @@ class MainWindow(QMainWindow):
         self.output_browse_btn.clicked.connect(self._browse_output_file)
         file_layout.addWidget(self.output_browse_btn, 1, 3)
 
+        # ② 取り込み・表示座標系設定 (数学座標系 / 測量座標系X-Y入替 / Y-up / Z反転)
+        self.coord_system_combo = QComboBox()
+        self.coord_system_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.coord_system_combo.addItem("📐 数学座標系 (X, Y, Z そのまま)", "cartesian")
+        self.coord_system_combo.addItem("🗺️ 測量座標系 → 数学系 (X/Y入替)", "survey_swap")
+        self.coord_system_combo.addItem("🔄 測量系反転 (X=Y, Y=-X)", "survey_swap_inv")
+        self.coord_system_combo.addItem("📐 Y-up → Z-up (X=X, Y=-Z, Z=Y)", "y_up_to_z_up")
+        self.coord_system_combo.addItem("↕️ Z軸反転 (Z = -Z)", "z_invert")
+        self.coord_system_combo.setToolTip(
+            "【取り込み座標系設定】\n"
+            "・📐 数学座標系: E57のXYZをそのまま数学座標系 (X:右, Y:奥, Z:上) として扱います(標準)\n"
+            "・🗺️ 測量座標系: 日本の公共測量・平面直角座標系 (X:北, Y:東) を数学座標系 (X:東, Y:北) へX/Y自動入替変換します\n"
+            "※点群読み込み前でも、読み込み後でもいつでも切り替え可能です"
+        )
+        self.coord_system_combo.currentIndexChanged.connect(self._on_coord_system_changed)
+        file_layout.addWidget(QLabel("座標系:"), 2, 0)
+        file_layout.addWidget(self.coord_system_combo, 2, 1, 1, 3)
+
         # ④ 保存対象モード選択 & E57保存 (どのタブを開いていても常に保存できるようファイル欄に集約)
         self.export_mode_combo = QComboBox()
         self.export_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -297,15 +315,15 @@ class MainWindow(QMainWindow):
         self.export_mode_combo.addItem("選択中の移動先レイヤー単体のみ", "single_layer")
         self.export_mode_combo.addItem("ノイズレイヤーのみ (除去点の確認出力)", "noise_only")
         self.export_mode_combo.addItem("全レイヤーを別々のE57へ一括分割保存", "split_all")
-        file_layout.addWidget(QLabel("保存対象:"), 2, 0)
-        file_layout.addWidget(self.export_mode_combo, 2, 1, 1, 2)
+        file_layout.addWidget(QLabel("保存対象:"), 3, 0)
+        file_layout.addWidget(self.export_mode_combo, 3, 1, 1, 2)
 
         self.save_manual_btn = QPushButton("💾 保存")
         self.save_manual_btn.setProperty("role", "primary")
         self.save_manual_btn.setToolTip("左の『保存対象』の内容で点群をE57ファイルへ保存します")
         self.save_manual_btn.setMaximumWidth(72)
         self.save_manual_btn.clicked.connect(self._save_current_scans)
-        file_layout.addWidget(self.save_manual_btn, 2, 3)
+        file_layout.addWidget(self.save_manual_btn, 3, 3)
         file_layout.setVerticalSpacing(4)
         file_layout.setContentsMargins(6, 4, 6, 4)
 
@@ -4196,6 +4214,31 @@ class MainWindow(QMainWindow):
     def _on_bg_color_changed(self, index: int):
         self.viewer.set_bg_color(self.bg_combo.currentData())
 
+    def _on_coord_system_changed(self, index: int):
+        """🌐 取り込み・表示座標系の変更ハンドラ (読み込み後でも即座に変換・反映)"""
+        if not hasattr(self, "coord_system_combo"):
+            return
+        coord_mode = self.coord_system_combo.currentData()
+        mode_text = self.coord_system_combo.currentText()
+        if not self.current_scans or self.viewer.points_raw is None or len(self.viewer.points_raw) == 0:
+            msg = f"🌐 取り込み座標系を「{mode_text}」に設定しました (次回ファイル読み込み時に適用されます)"
+            self.status_label.setText(msg)
+            self.log_text.append(msg)
+            return
+
+        # 既に点群が読み込まれている場合は現在点群をリロードして新座標系を即時適用
+        in_path = self.input_edit.text().strip()
+        if in_path and (os.path.isfile(in_path) or os.path.isdir(in_path)):
+            msg = f"🌐 座標系「{mode_text}」を適用して再読込中..."
+            self.status_label.setText(msg)
+            self.log_text.append(msg)
+            self.show_toast(f"🌐 座標系「{mode_text}」を適用します")
+            self._load_file_to_viewer(in_path)
+        else:
+            msg = f"🌐 座標系を「{mode_text}」に設定しました"
+            self.status_label.setText(msg)
+            self.show_toast(msg)
+
     def _on_input_file_changed(self, text: str):
         path = text.strip()
         if not path or not os.path.exists(path):
@@ -4307,7 +4350,8 @@ class MainWindow(QMainWindow):
         else:
             eff_max_load = None  # 無制限全点ロード
 
-        self.load_worker = FileLoadWorker(file_path, point_budget=budget, max_load_points=eff_max_load)
+        coord_mode = self.coord_system_combo.currentData() if hasattr(self, "coord_system_combo") else "cartesian"
+        self.load_worker = FileLoadWorker(file_path, point_budget=budget, max_load_points=eff_max_load, coord_mode=coord_mode)
 
         def on_progress(percent: int, msg: str, sub_msg: str):
             if self.progress_dialog:
