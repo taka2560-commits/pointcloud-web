@@ -50,7 +50,9 @@ echo [1/3] Ensuring PyInstaller is installed...
 
 echo.
 echo [2/3] Building EXE package (This takes about 2-4 minutes, please wait)...
-"!PY_EXE!" !PY_ARG! -m PyInstaller --noconfirm --onedir --windowed --name "E57_PointCloud_Tool" --collect-all pye57 --collect-submodules OpenGL main.py
+rem Build from the checked-in spec file (manual files, hidden imports and open3d data are declared there).
+rem Do NOT pass main.py here: PyInstaller would regenerate and overwrite E57_PointCloud_Tool.spec.
+"!PY_EXE!" !PY_ARG! -m PyInstaller --noconfirm E57_PointCloud_Tool.spec
 
 if !ERRORLEVEL! NEQ 0 (
     echo.
@@ -60,7 +62,20 @@ if !ERRORLEVEL! NEQ 0 (
 )
 
 echo.
-echo [3/3] Creating ZIP distribution package...
+echo [2.5/3] Copying manuals and README next to the EXE (PyInstaller 6 puts data files under _internal)...
+rem File names contain Japanese, so the selection is done in Python to keep this .bat pure ASCII.
+"!PY_EXE!" !PY_ARG! -c "import glob, shutil; dst = 'dist/E57_PointCloud_Tool/'; skip = ('index.html', 'AGENTS.md', 'CLAUDE.md'); skip_prefix = ('requirements', 'QA_REPORT', 'AI_HANDOVER', '00_AI'); files = [f for f in glob.glob('*') if f.endswith(('.html', '.md', '.txt')) and f not in skip and not f.startswith(skip_prefix)]; [shutil.copy(f, dst) for f in files]; print('  Copied:', len(files), 'document(s)')"
+
+echo.
+echo [3/3] Archiving previous ZIP and creating new ZIP distribution package...
+if exist "dist\E57_PointCloud_Tool_Dist.zip" (
+    if not exist "dist\archive" mkdir "dist\archive"
+    for /f "tokens=1-3 delims=/ " %%a in ("%DATE%") do set "DSTAMP=%%a%%b%%c"
+    for /f "tokens=1-2 delims=:." %%a in ("%TIME%") do set "TSTAMP=%%a%%b"
+    set "TSTAMP=!TSTAMP: =0!"
+    move /y "dist\E57_PointCloud_Tool_Dist.zip" "dist\archive\E57_PointCloud_Tool_Dist_!DSTAMP!_!TSTAMP!.zip" >nul
+    echo   Previous package moved to dist\archive\E57_PointCloud_Tool_Dist_!DSTAMP!_!TSTAMP!.zip
+)
 "!PY_EXE!" !PY_ARG! -c "import os, shutil; shutil.make_archive(os.path.join('dist', 'E57_PointCloud_Tool_Dist'), 'zip', root_dir='dist', base_dir='E57_PointCloud_Tool'); print('Created: dist\\E57_PointCloud_Tool_Dist.zip')"
 
 echo.

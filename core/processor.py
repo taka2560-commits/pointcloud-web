@@ -412,61 +412,186 @@ class PointCloudProcessor:
         )
 
 
+# 座標系変換の定義表: 新しい軸 i の値 = sign[i] * 元の軸 src[i] の値
+# （軸の入替と符号反転のみで構成されるため、浮動小数点でも完全に可逆・ロスレス）
+#   - "cartesian":       数学座標系 (X, Y, Z そのまま)
+#   - "survey_swap":     測量座標系 → 数学座標系 (X=Y, Y=X, Z=Z: 測量X=北, Y=東を数学X=東, Y=北へ入替)
+#   - "survey_swap_inv": 測量系反転 (X=Y, Y=-X, Z=Z)
+#   - "y_up_to_z_up":    Y-up → Z-up 変換 (X=X, Y=-Z, Z=Y)
+#   - "z_invert":        Z軸反転 (X=X, Y=Y, Z=-Z)
+_COORD_MODE_TABLE: Dict[str, Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {
+    "cartesian": ((0, 1, 2), (1, 1, 1)),
+    "survey_swap": ((1, 0, 2), (1, 1, 1)),
+    "survey_swap_inv": ((1, 0, 2), (1, -1, 1)),
+    "y_up_to_z_up": ((0, 2, 1), (1, -1, 1)),
+    "z_invert": ((0, 1, 2), (1, 1, -1)),
+}
+
+_CARTESIAN_FIELDS = ("cartesianX", "cartesianY", "cartesianZ")
+
+
+def _coord_mode_axes(coord_mode: Optional[str]) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    """座標系モード名から (src, sign) を返す。未知のモードは恒等変換として扱う。"""
+    if coord_mode in ("", None):
+        coord_mode = "cartesian"
+    return _COORD_MODE_TABLE.get(coord_mode, _COORD_MODE_TABLE["cartesian"])
+
+
+def is_identity_coord_mode(coord_mode: Optional[str]) -> bool:
+    """座標を変化させないモード（cartesian / 未指定 / 未知）なら True"""
+    return _coord_mode_axes(coord_mode) == _COORD_MODE_TABLE["cartesian"]
+
+
+def inverse_coord_axes(coord_mode: Optional[str]) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    """
+    coord_mode の逆変換を (src, sign) 形式で返す。
+    new[i] = sign[i] * old[src[i]]  ⇔  old[src[i]] = sign[i] * new[i]
+    """
+    src, sign = _coord_mode_axes(coord_mode)
+    inv_src = [0, 0, 0]
+    inv_sign = [1, 1, 1]
+    for i in range(3):
+        inv_src[src[i]] = i
+        inv_sign[src[i]] = sign[i]
+    return (inv_src[0], inv_src[1], inv_src[2]), (inv_sign[0], inv_sign[1], inv_sign[2])
+
+
+def _apply_axes(points: np.ndarray, axes: Tuple[Tuple[int, int, int], Tuple[int, int, int]]) -> np.ndarray:
+    """(src, sign) に従って (N, 3) 配列を変換した新しい配列を返す"""
+    src, sign = axes
+    new_pts = np.empty_like(points)
+    for i in range(3):
+        if sign[i] >= 0:
+            new_pts[:, i] = points[:, src[i]]
+        else:
+            np.negative(points[:, src[i]], out=new_pts[:, i])
+    return new_pts
+
+
 def transform_coordinate_system(points: np.ndarray, coord_mode: str) -> np.ndarray:
     """
-    点群の3次元座標配列を取り込み設定に応じて変換する。
+    点群の3次元座標配列を取り込み設定に応じて変換する（モード一覧は _COORD_MODE_TABLE を参照）。
 
     Parameters:
     - points: (N, 3) float64 座標配列
-    - coord_mode:
-        - "cartesian": 数学座標系 (X, Y, Z そのまま)
-        - "survey_swap": 測量座標系 → 数学座標系 (X=Y, Y=X, Z=Z: 測量X=北, Y=東を数学X=東, Y=北へ入替)
-        - "survey_swap_inv": 測量系反転 (X=Y, Y=-X, Z=Z)
-        - "y_up_to_z_up": Y-up → Z-up 変換 (X=X, Y=-Z, Z=Y)
-        - "z_invert": Z軸反転 (X=X, Y=Y, Z=-Z)
+    - coord_mode: "cartesian" / "survey_swap" / "survey_swap_inv" / "y_up_to_z_up" / "z_invert"
     """
-    if points is None or len(points) == 0 or coord_mode in ("cartesian", "", None):
+    if points is None or len(points) == 0 or is_identity_coord_mode(coord_mode):
         return points
+    return _apply_axes(points, _coord_mode_axes(coord_mode))
 
-    new_pts = np.empty_like(points)
-    x = points[:, 0]
-    y = points[:, 1]
-    z = points[:, 2]
 
-    if coord_mode == "survey_swap":
-        # 測量X(北) -> 数学Y, 測量Y(東) -> 数学X
-        new_pts[:, 0] = y
-        new_pts[:, 1] = x
-        new_pts[:, 2] = z
-    elif coord_mode == "survey_swap_inv":
-        new_pts[:, 0] = y
-        new_pts[:, 1] = -x
-        new_pts[:, 2] = z
-    elif coord_mode == "y_up_to_z_up":
-        new_pts[:, 0] = x
-        new_pts[:, 1] = -z
-        new_pts[:, 2] = y
-    elif coord_mode == "z_invert":
-        new_pts[:, 0] = x
-        new_pts[:, 1] = y
-        new_pts[:, 2] = -z
-    else:
+def inverse_transform_coordinate_system(points: np.ndarray, coord_mode: str) -> np.ndarray:
+    """transform_coordinate_system(points, coord_mode) の逆変換（元の座標系へ戻す）"""
+    if points is None or len(points) == 0 or is_identity_coord_mode(coord_mode):
         return points
+    return _apply_axes(points, inverse_coord_axes(coord_mode))
 
-    return new_pts
+
+def _negate_schema(schema):
+    """
+    ScaledInteger / Float の FieldSchema を「値の符号を反転した軸」用に変換した複製を返す。
+    v = raw * scale + offset  →  -v = (-raw) * scale + (-offset)
+    （raw 整数は呼び出し側で符号反転する。scale は変えないため量子化幅は完全に保たれる）
+    """
+    import copy
+
+    s = copy.copy(schema)
+    if schema.node_type == "ScaledInteger":
+        s.offset = -float(schema.offset)
+        if schema.minimum is not None and schema.maximum is not None:
+            s.minimum, s.maximum = -int(schema.maximum), -int(schema.minimum)
+        if schema.default_value is not None:
+            s.default_value = -int(schema.default_value)
+    elif schema.node_type == "Float":
+        if schema.minimum is not None and schema.maximum is not None:
+            s.minimum, s.maximum = -float(schema.maximum), -float(schema.minimum)
+    return s
+
+
+def _apply_axes_to_scan(scan, axes: Tuple[Tuple[int, int, int], Tuple[int, int, int]]) -> None:
+    """
+    E57ScanData の座標 (points / raw_fields / raw_unscaled_fields / field_schemas の cartesianX,Y,Z) を
+    (src, sign) に従って一貫してインプレース変換する。
+    ScaledInteger の生整数とスケール定義も軸ごとに付け替えるため、変換後も
+    「points == raw_unscaled * scale + offset」が厳密に成り立ち、ロスレス性が保たれる。
+    """
+    src, sign = axes
+    scan.points = _apply_axes(scan.points, axes)
+
+    raw_fields = getattr(scan, "raw_fields", None)
+    if isinstance(raw_fields, dict) and all(k in raw_fields for k in _CARTESIAN_FIELDS):
+        # float64 の座標フィールドは points の列ビューに差し替える（元実装と同じメモリ節約方針）。
+        # E57_SINGLE (float32) は単精度配列のまま軸を付け替える。
+        old_fields = {k: raw_fields[k] for k in _CARTESIAN_FIELDS}
+        for i, key in enumerate(_CARTESIAN_FIELDS):
+            old = old_fields[_CARTESIAN_FIELDS[src[i]]]
+            if isinstance(old, np.ndarray) and old.dtype == np.float32:
+                raw_fields[key] = (-old) if sign[i] < 0 else old
+            else:
+                raw_fields[key] = scan.points[:, i]
+
+    raw_unscaled = getattr(scan, "raw_unscaled_fields", None)
+    schemas = getattr(scan, "field_schemas", None)
+    if isinstance(schemas, dict):
+        old_schemas = {k: schemas.get(k) for k in _CARTESIAN_FIELDS}
+        old_unscaled = {k: (raw_unscaled.get(k) if isinstance(raw_unscaled, dict) else None) for k in _CARTESIAN_FIELDS}
+        for i, key in enumerate(_CARTESIAN_FIELDS):
+            src_key = _CARTESIAN_FIELDS[src[i]]
+            sch = old_schemas[src_key]
+            if sch is not None:
+                schemas[key] = _negate_schema(sch) if sign[i] < 0 else sch
+            elif key in schemas:
+                del schemas[key]
+            if isinstance(raw_unscaled, dict):
+                arr = old_unscaled[src_key]
+                if arr is not None:
+                    raw_unscaled[key] = (-arr) if sign[i] < 0 else arr
+                elif key in raw_unscaled:
+                    del raw_unscaled[key]
 
 
 def transform_scan_coordinate_system(scan, coord_mode: str) -> None:
     """
-    単一のE57ScanDataの内部座標 (points および raw_fields) を指定の座標系へ一括インプレース変換する。
+    単一の E57ScanData の内部座標を指定の座標系へ一括インプレース変換する（取り込み時用）。
+    変換後は scan.coord_mode に適用モードを記録し、保存時に restore_scan_original_coordinates() で
+    元の座標系へ厳密に戻せるようにする。座標系変換は表示・編集用であり、E57 への保存は元の座標系で行う。
     """
-    if scan is None or getattr(scan, "points", None) is None or len(scan.points) == 0 or coord_mode in ("cartesian", "", None):
+    if scan is None or getattr(scan, "points", None) is None or len(scan.points) == 0:
         return
+    if is_identity_coord_mode(coord_mode):
+        return
+    current = getattr(scan, "coord_mode", "cartesian")
+    if not is_identity_coord_mode(current):
+        # 二重変換を防ぐため、いったん元の座標系へ戻してから適用する
+        restore_scan_original_coordinates(scan)
 
-    scan.points = transform_coordinate_system(scan.points, coord_mode)
-    if hasattr(scan, "raw_fields") and isinstance(scan.raw_fields, dict):
-        if "cartesianX" in scan.raw_fields and "cartesianY" in scan.raw_fields and "cartesianZ" in scan.raw_fields:
-            scan.raw_fields["cartesianX"] = scan.points[:, 0]
-            scan.raw_fields["cartesianY"] = scan.points[:, 1]
-            scan.raw_fields["cartesianZ"] = scan.points[:, 2]
+    _apply_axes_to_scan(scan, _coord_mode_axes(coord_mode))
+    scan.coord_mode = coord_mode
+    # 軸入替はシグネチャ（和・最小・最大）では検知できないため、変更済みであることを明示する
+    if hasattr(scan, "mark_coordinates_modified"):
+        scan.mark_coordinates_modified()
+
+
+def restore_scan_original_coordinates(scan) -> str:
+    """
+    transform_scan_coordinate_system() で変換した E57ScanData を元の座標系へインプレースで戻す。
+    戻り値は戻す前に適用されていた coord_mode（再変換に使う。未変換なら "cartesian"）。
+    復元後は読み込み時の生データ（ScaledInteger の生整数・スキーマ）と完全に一致するため、
+    E57 書き出しはビット完全一致のロスレスとなる。
+    """
+    if scan is None:
+        return "cartesian"
+    mode = getattr(scan, "coord_mode", "cartesian")
+    if is_identity_coord_mode(mode):
+        return "cartesian"
+    if getattr(scan, "points", None) is not None and len(scan.points) > 0:
+        _apply_axes_to_scan(scan, inverse_coord_axes(mode))
+    scan.coord_mode = "cartesian"
+    # 元の座標に戻ったので、読み込み時シグネチャとの比較を再び有効化する
+    if hasattr(scan, "_initial_points_signature") and scan._initial_points_signature is None:
+        from core.e57_io import _compute_points_signature
+
+        scan._initial_points_signature = _compute_points_signature(scan.points)
+    return mode
 

@@ -1,0 +1,17 @@
+# 動作確認済みの正確なバージョン（2026-10-31, Windows 11 / Python 3.14.6, AMD Radeon 890M）
+# 通常は requirements-desktop.txt を使う。環境差異で問題が出た場合はこのファイルで同一環境を再現する:
+#   python -m pip install -r requirements-lock.txt
+numpy==2.5.3
+scipy==1.18.1
+pye57==0.4.19
+pyquaternion==0.9.9
+open3d==0.20.0
+PySide6==6.11.1
+PySide6_Addons==6.11.1
+PySide6_Essentials==6.11.1
+shiboken6==6.11.1
+PyOpenGL==3.1.10
+PyOpenGL-accelerate==3.1.10
+# ビルド専用（配布EXE作成時のみ必要）
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8

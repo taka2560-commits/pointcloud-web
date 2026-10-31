@@ -7,10 +7,16 @@ echo ========================================================
 echo  Starting E57 Point Cloud Tool...
 echo ========================================================
 
+rem Development checkout (core\ + main.py present): ALWAYS run from source so that
+rem code changes are reflected. The prebuilt EXE is used only in a distributed package
+rem (where main.py / core\ do not exist).
+if exist "%~dp0main.py" if exist "%~dp0core\filters.py" goto :run_from_source
 if exist "%~dp0dist\E57_PointCloud_Tool\E57_PointCloud_Tool.exe" (
     start "" "%~dp0dist\E57_PointCloud_Tool\E57_PointCloud_Tool.exe"
     exit /b 0
 )
+
+:run_from_source
 
 set "PY_EXE="
 set "PY_ARG="
@@ -64,10 +70,10 @@ if not defined PY_EXE (
 
 echo [OK] Python: "!PY_EXE!" !PY_ARG!
 
-"!PY_EXE!" !PY_ARG! -c "import numpy, scipy, pye57, PySide6, OpenGL" >nul 2>nul
+"!PY_EXE!" !PY_ARG! -c "import numpy, scipy, pye57, PySide6, OpenGL, open3d, pyquaternion" >nul 2>nul
 if !ERRORLEVEL! NEQ 0 (
     echo.
-    echo [SETUP] Installing required packages ^(numpy, scipy, pye57, PySide6, PyOpenGL^)...
+    echo [SETUP] Installing required packages ^(numpy, scipy, pye57, PySide6, PyOpenGL, open3d, pyquaternion^)...
     "!PY_EXE!" !PY_ARG! -m pip install --upgrade pip
     "!PY_EXE!" !PY_ARG! -m pip install -r requirements-desktop.txt
     if !ERRORLEVEL! NEQ 0 (

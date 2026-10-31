@@ -1,0 +1,15 @@
+# 改行コードの固定（Windows/他OS・複数AIの並行開発で差分が膨らむのを防ぐ）
+* text=auto
+*.py    text eol=lf
+*.md    text eol=lf
+*.js    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.spec  text eol=lf
+*.bat   text eol=crlf
+*.e57   binary
+*.npz   binary
+*.png   binary
+*.zip   binary

@@ -149,5 +149,14 @@ def run_tests():
     print("===============================")
 
 
+# unittest / pytest のどちらの収集でも拾われるように、既存の run_tests() を TestCase で包む
+import unittest  # noqa: E402
+
+
+class TestLayerIntegration(unittest.TestCase):
+    def test_layer_integration_scenario(self):
+        run_tests()
+
+
 if __name__ == "__main__":
     run_tests()

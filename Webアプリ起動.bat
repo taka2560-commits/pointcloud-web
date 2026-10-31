@@ -20,5 +20,7 @@ if not defined PY_EXE (
 )
 if not defined PY_EXE set "PY_EXE=python"
 
-"!PY_EXE!" -m http.server 8080
+rem Bind to localhost only: the server exposes this whole folder, so never listen on all interfaces.
+start "" http://127.0.0.1:8080/
+"!PY_EXE!" -m http.server 8080 --bind 127.0.0.1
 pause

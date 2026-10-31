@@ -34,14 +34,27 @@
 
 ## 起動方法
 
+### 0. 必要な環境（デスクトップ版）
+- Windows 64bit、Python 3.10 以上（3.14 で動作確認）
+- 依存パッケージ: `pip install -r requirements-desktop.txt`
+  （numpy / scipy / pye57 / PySide6 / PyOpenGL / **open3d** / **pyquaternion**。open3d と pyquaternion は必須です）
+- 動作確認済みの固定バージョンで揃える場合は `pip install -r requirements-lock.txt`
+
 ### 1. デスクトップ GUI アプリケーションの起動
 ```bash
 python main.py
 ```
-（または `起動.bat` をダブルクリック）
+（または `起動.bat` をダブルクリック。`main.py` と `core/` がある開発フォルダではソースから起動し、配布ZIP内では `E57_PointCloud_Tool.exe` を起動します）
 
 ### 2. Webブラウザ版の起動
 `Webアプリ起動.bat` を実行するか、ローカルHTTPサーバーから `index.html` を開きます（PLY, XYZ, PTS, CSV対応）。
+バッチは `127.0.0.1:8080` にのみ待ち受けます（同一PCからのみアクセス可）。
+
+### 開発者・AI向け
+- 設計憲章・アーキテクチャ・過去の教訓: `AI_HANDOVER.md`
+- 複数AI・複数開発者での並行開発ルール（作業場所・担当ファイル・マージ手順）: `AGENTS.md`
+- 総合品質管理チェック報告書（欠陥一覧・修正状況・backlog）: `QA_REPORT_2026-10-31.md`
+- 品質ゲート: `python -X utf8 quality_gate.py`（全5ゲート）／`--quick`（GUIを開かない軽量版）
 
 ### 3. コマンドライン (CLI) によるバッチ実行
 ```bash

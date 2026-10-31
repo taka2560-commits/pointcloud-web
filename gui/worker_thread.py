@@ -7,16 +7,21 @@ GUIの応答性を保つための非同期ワーカースレッドモジュー�
 import math
 import os
 import time
+import inspect
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from PySide6.QtCore import QThread, Signal
 import numpy as np
+
+from core.logger import log_exception
 
 from core.processor import (
     FilterConfig,
     PointCloudProcessor,
     ProcessSummary,
     transform_scan_coordinate_system,
+    restore_scan_original_coordinates,
+    is_identity_coord_mode,
 )
 from core.filters import keep_largest_clusters
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
@@ -104,6 +109,8 @@ class ProcessWorker(QThread):
             )
             self.finished_success.emit(summary)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -134,6 +141,10 @@ class FileLoadWorker(QThread):
         self.coord_mode = coord_mode
         self._is_cancelled = False
 
+    def cancel(self):
+        """読み込みの中断を要求（ファイル境界および E57 読み込みの進捗コールバックで反映される）"""
+        self._is_cancelled = True
+
     def run(self):
         try:
             # 1. E57スキャンの読み込み (フォルダ指定時はフォルダ内の全E57を統合)
@@ -151,11 +162,15 @@ class FileLoadWorker(QThread):
             )
 
             for f_i, fpath in enumerate(file_list):
+                if self._is_cancelled:
+                    raise InterruptedError("読み込みがユーザーによって中止されました。")
                 fname = os.path.basename(fpath)
                 sub = f"ファイル {f_i + 1}/{n_files}: {fname}"
                 self.progress_changed.emit(int(5 + 60 * f_i / n_files), "E57ヘッダー解析中...", sub)
 
                 def on_e57_progress(ratio: float, msg: str, _fi=f_i, _sub=sub):
+                    if self._is_cancelled:
+                        raise InterruptedError("読み込みがユーザーによって中止されました。")
                     pct = int(5 + 60 * (_fi + ratio) / n_files)  # 5% - 65%
                     self.progress_changed.emit(pct, msg, _sub)
 
@@ -318,6 +333,8 @@ class FileLoadWorker(QThread):
 
             self.finished_success.emit(preloaded)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -411,6 +428,8 @@ class MemoryFilterWorker(QThread):
             self.finished_stages.emit(stages)
             self.finished_success.emit(remaining, remove_idx)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -467,6 +486,8 @@ class KeepMainClusterWorker(QThread):
             self.progress_changed.emit(100, "解析完了！", f"浮遊ノイズ: {len(remove_local):,} 点")
             self.finished_success.emit(remove_local)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -493,6 +514,36 @@ class FileSaveWorker(QThread):
         self.scans = scans
         self.layer_mask = layer_mask.copy()
         self.split_masks = {k: v.copy() for k, v in split_masks.items()} if split_masks else None
+        self._is_cancelled = False
+
+    def cancel(self):
+        """
+        保存の中断を要求。単一ファイルは書き込み開始前、分割保存はファイル境界で反映される。
+        書き込み中のファイルは一時ファイル (.tmp) 経由のアトミック置換なので、中断しても既存ファイルは壊れない。
+        """
+        self._is_cancelled = True
+
+    def _check_cancelled(self):
+        if self._is_cancelled:
+            raise InterruptedError("保存がユーザーによって中止されました。")
+
+    def _restore_original_coordinates(self) -> List[str]:
+        """
+        取り込み時に座標系変換（測量X/Y入替・Y-up・Z反転）を適用したスキャンを、保存のために
+        元ファイルの座標系へインプレースで戻す。戻り値は各スキャンの変換前モード（再適用用）。
+        E57 は常に元の座標系・元のスケールで書き出す（ユーザー決定: ロスレス往復を優先）。
+        巨大点群のコピーを避けるためインプレースで行い、run() の finally で必ず再適用する。
+        """
+        modes: List[str] = []
+        for scan in self.scans:
+            modes.append(restore_scan_original_coordinates(scan))
+        return modes
+
+    def _reapply_coordinates(self, modes: List[str]) -> None:
+        """_restore_original_coordinates() で戻した座標を表示用の座標系へ再適用する"""
+        for scan, mode in zip(self.scans, modes):
+            if not is_identity_coord_mode(mode):
+                transform_scan_coordinate_system(scan, mode)
 
     def _extract_scans_by_mask(self, mask: np.ndarray) -> List[E57ScanData]:
         """全体マスクから各スキャンに対応する点群をロスレス抽出"""
@@ -516,70 +567,151 @@ class FileSaveWorker(QThread):
         return filtered_scans
 
     def run(self):
+        applied_modes: List[str] = []
         try:
-            # 複数レイヤーの一括分割保存モード
-            if self.split_masks:
-                base_path, ext = os.path.splitext(self.output_path)
-                if not ext:
-                    ext = ".e57"
-                non_empty_items = [(name, m) for name, m in self.split_masks.items() if int(np.sum(m)) > 0]
-                if not non_empty_items:
-                    raise ValueError("出力対象のレイヤーに有効な点がありません。")
-
-                total_saved_pts = 0
-                saved_files = []
-                used_out_files = set()
-                n_items = len(non_empty_items)
-
-                for idx, (layer_name, mask) in enumerate(non_empty_items):
-                    safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in layer_name).strip("_")
-                    if not safe_name:
-                        safe_name = f"layer_{idx}"
-                    out_file = f"{base_path}_{safe_name}{ext}"
-                    if out_file in used_out_files:
-                        out_file = f"{base_path}_{safe_name}_{idx}{ext}"
-                    used_out_files.add(out_file)
-                    pct = int(10 + (idx / max(1, n_items)) * 80)
-                    self.progress_changed.emit(
-                        pct,
-                        f"レイヤー「{layer_name}」をE57出力中 ({idx + 1}/{n_items})...",
-                        f"出力先: {os.path.basename(out_file)}",
-                    )
-                    sub_scans = self._extract_scans_by_mask(mask)
-                    if sub_scans:
-                        write_e57_scans(out_file, sub_scans)
-                        pts_cnt = sum(s.point_count for s in sub_scans)
-                        total_saved_pts += pts_cnt
-                        saved_files.append(f"{os.path.basename(out_file)} ({pts_cnt:,}点)")
-
-                total_excluded_pts = max(0, int(len(self.layer_mask) - total_saved_pts))
-                self.progress_changed.emit(100, "全レイヤー分割保存完了！", f"{len(saved_files)} ファイルを出力")
-                summary_path = f"{len(saved_files)} ファイル ({', '.join(saved_files)})"
-                self.finished_success.emit(total_saved_pts, total_excluded_pts, summary_path)
-                return
-
-            # 単一ファイル保存モード
-            fname = os.path.basename(self.output_path)
-            self.progress_changed.emit(15, "保存対象レイヤーの点群を抽出中...", f"出力先: {fname}")
-
-            filtered_scans = self._extract_scans_by_mask(self.layer_mask)
-            if not filtered_scans:
-                raise ValueError("保存対象レイヤーの点数が 0 点のため出力できません。")
-
-            total_clean_pts = sum(s.point_count for s in filtered_scans)
-            total_noise_pts = int(len(self.layer_mask) - total_clean_pts)
-
-            self.progress_changed.emit(
-                60,
-                "E57バイナリ書き込み中 (ロスレス・アトミック保存)...",
-                f"対象: {total_clean_pts:,} 点",
-            )
-            write_e57_scans(self.output_path, filtered_scans)
-
-            self.progress_changed.emit(100, "保存完了！", f"保存点数: {total_clean_pts:,} 点")
-            self.finished_success.emit(total_clean_pts, total_noise_pts, self.output_path)
+            # 保存は常に元ファイルの座標系で行う（取り込み時の座標系変換を一時的に戻す）
+            applied_modes = self._restore_original_coordinates()
+            self._run_save()
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
+        finally:
+            # 表示用の座標系へ必ず戻す（保存失敗時も含む）
+            try:
+                self._reapply_coordinates(applied_modes)
+            except Exception as re_exc:  # 再適用失敗は致命的ではないが記録する
+                from core.logger import log_error
+
+                log_error(f"保存後の座標系再適用に失敗しました: {re_exc}")
+
+    def _run_save(self):
+        # 複数レイヤーの一括分割保存モード
+        if self.split_masks:
+            base_path, ext = os.path.splitext(self.output_path)
+            if not ext:
+                ext = ".e57"
+            non_empty_items = [(name, m) for name, m in self.split_masks.items() if int(np.sum(m)) > 0]
+            if not non_empty_items:
+                raise ValueError("出力対象のレイヤーに有効な点がありません。")
+
+            total_saved_pts = 0
+            saved_files = []
+            used_out_files = set()
+            n_items = len(non_empty_items)
+
+            for idx, (layer_name, mask) in enumerate(non_empty_items):
+                self._check_cancelled()
+                safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in layer_name).strip("_")
+                if not safe_name:
+                    safe_name = f"layer_{idx}"
+                out_file = f"{base_path}_{safe_name}{ext}"
+                if out_file in used_out_files:
+                    out_file = f"{base_path}_{safe_name}_{idx}{ext}"
+                used_out_files.add(out_file)
+                pct = int(10 + (idx / max(1, n_items)) * 80)
+                self.progress_changed.emit(
+                    pct,
+                    f"レイヤー「{layer_name}」をE57出力中 ({idx + 1}/{n_items})...",
+                    f"出力先: {os.path.basename(out_file)}",
+                )
+                sub_scans = self._extract_scans_by_mask(mask)
+                if sub_scans:
+                    write_e57_scans(out_file, sub_scans)
+                    pts_cnt = sum(s.point_count for s in sub_scans)
+                    total_saved_pts += pts_cnt
+                    saved_files.append(f"{os.path.basename(out_file)} ({pts_cnt:,}点)")
+
+            total_excluded_pts = max(0, int(len(self.layer_mask) - total_saved_pts))
+            self.progress_changed.emit(100, "全レイヤー分割保存完了！", f"{len(saved_files)} ファイルを出力")
+            summary_path = f"{len(saved_files)} ファイル ({', '.join(saved_files)})"
+            self.finished_success.emit(total_saved_pts, total_excluded_pts, summary_path)
+            return
+
+        # 単一ファイル保存モード
+        fname = os.path.basename(self.output_path)
+        self.progress_changed.emit(15, "保存対象レイヤーの点群を抽出中...", f"出力先: {fname}")
+
+        self._check_cancelled()
+        filtered_scans = self._extract_scans_by_mask(self.layer_mask)
+        if not filtered_scans:
+            raise ValueError("保存対象レイヤーの点数が 0 点のため出力できません。")
+        self._check_cancelled()
+
+        total_clean_pts = sum(s.point_count for s in filtered_scans)
+        total_noise_pts = int(len(self.layer_mask) - total_clean_pts)
+
+        self.progress_changed.emit(
+            60,
+            "E57バイナリ書き込み中 (ロスレス・アトミック保存)...",
+            f"対象: {total_clean_pts:,} 点",
+        )
+        write_e57_scans(self.output_path, filtered_scans)
+
+        self.progress_changed.emit(100, "保存完了！", f"保存点数: {total_clean_pts:,} 点")
+        self.finished_success.emit(total_clean_pts, total_noise_pts, self.output_path)
 
 
 
+
+
+class FunctionWorker(QThread):
+    """
+    任意の重い関数をバックグラウンドで実行する汎用ワーカー（設計憲章③: 重い処理をメインスレッドで実行しない）。
+
+    使い方:
+        worker = FunctionWorker(segment_ground_points, pts, grid_size=1.0)
+        worker.finished_success.connect(on_done)   # fn の戻り値がそのまま渡る
+        worker.finished_error.connect(on_error)
+        worker.start()
+
+    fn が `is_cancelled` キーワード引数を受け取れる場合は、中断判定用の callable を自動で渡す。
+    fn が `progress_callback(ratio: float, message: str)` を受け取れる場合も同様に渡す。
+    """
+
+    progress_changed = Signal(int, str, str)  # (0-100%, メインメッセージ, サブメッセージ)
+    finished_success = Signal(object)         # fn の戻り値
+    finished_error = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, fn: Callable, *args, parent=None, **kwargs):
+        super().__init__(parent)
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+        self._is_cancelled = False
+
+    def cancel(self):
+        """処理の中断を要求（fn が is_cancelled を確認する場合のみ途中中断できる）"""
+        self._is_cancelled = True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
+
+    def run(self):
+        try:
+            kwargs = dict(self._kwargs)
+            try:
+                params = inspect.signature(self._fn).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "is_cancelled" in params:
+                kwargs["is_cancelled"] = lambda: self._is_cancelled
+            if "progress_callback" in params:
+                def _cb(ratio: float, message: str = ""):
+                    if self._is_cancelled:
+                        raise InterruptedError("処理がユーザーによって中止されました。")
+                    self.progress_changed.emit(int(max(0.0, min(1.0, ratio)) * 100), message, "")
+                kwargs["progress_callback"] = _cb
+
+            result = self._fn(*self._args, **kwargs)
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+            self.finished_success.emit(result)
+        except InterruptedError:
+            self.cancelled.emit()
+        except Exception as e:
+            log_exception(f"FunctionWorker({getattr(self._fn, '__name__', 'fn')}) でエラー: {e}")
+            self.finished_error.emit(str(e))

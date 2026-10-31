@@ -3544,8 +3544,12 @@ function updateContextMenuLayersSubmenu() {
     const lid = Number(lidStr);
     const item = document.createElement("div");
     item.className = "ctx-item";
-    const dot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${lcfg.color};margin-right:6px;"></span>`;
-    item.innerHTML = `${dot}${lcfg.name}`;
+    // レイヤー名・色はユーザー入力や読み込んだプロジェクトJSON由来のため innerHTML には入れない（XSS防止）
+    const dot = document.createElement("span");
+    dot.style.cssText = "display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;";
+    dot.style.background = String(lcfg.color || "#888");
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(String(lcfg.name ?? "")));
     item.addEventListener("click", () => {
       hideContextMenu();
       const selTarget = document.getElementById("select-target-layer");
