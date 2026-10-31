@@ -472,6 +472,11 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert len(win.layer_undo_stack) == n_steps - 1, "1つ戻るがフィルタ1段階分になっていません"
     win.auto_redo_btn.click()
     assert np.array_equal(win.viewer.layer_ids, after_all), "1つ進むで元の状態に復元されませんでした"
+    # 差分 Undo 履歴: 履歴メモリが「全点コピー × ステップ数」ではなく、shadow 1 本＋変化点の差分に収まっていること
+    hist_bytes = win.layer_history.memory_bytes()
+    assert hist_bytes <= win.viewer.layer_ids.nbytes + 64 * 1024, (
+        f"Undo 履歴のメモリ ({hist_bytes:,} B) が差分方式の想定 (全点 int32 1本 + 差分) を超えています"
+    )
     # 自動除去ノイズレイヤーが確実にノイズ判定(is_noise=True, layer_mask=False)されており出力から除外されることを検証
     for lid, linfo in win.viewer.layers.items():
         if linfo.name.startswith("自動除去:"):

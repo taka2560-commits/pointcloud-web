@@ -65,6 +65,7 @@ from gui.worker_thread import (
     collect_e57_files,
 )
 from gui.progress_dialog import ModernProgressDialog
+from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS
 
@@ -200,8 +201,11 @@ class MainWindow(QMainWindow):
 
         self.current_scans: List[E57ScanData] = []
         self.undo_stack: List[List[E57ScanData]] = []
-        self.layer_undo_stack: list = []
-        self.layer_redo_stack: list = []
+        # レイヤー Undo/Redo は差分履歴 (gui/layer_history.py)。layer_undo_stack / layer_redo_stack は
+        # 互換のため履歴オブジェクト内の list をそのまま公開する（len / bool / clear が従来どおり使える）
+        self.layer_history = LayerUndoHistory()
+        self.layer_undo_stack: list = self.layer_history.undo_stack
+        self.layer_redo_stack: list = self.layer_history.redo_stack
         self.undo_max_steps: int = 50          # 操作履歴(Undo)の最大保持数 (0で無制限)
         self._sidebar_user_width: int = 380     # 左パネル幅 (コマンド選択時等の画面揺れ防止固定用)
         self.worker: Optional[ProcessWorker] = None
@@ -2112,27 +2116,43 @@ class MainWindow(QMainWindow):
         self.viewer.update()
         self.viewer._emit_layer_counts()
 
+    def _current_layer_state(self) -> LayerState:
+        """差分履歴に渡す現在のレイヤー状態（layer_ids は参照渡し）"""
+        self.viewer._ensure_layer_sync()
+        return LayerState(self.viewer.layer_ids, self.viewer.layers)
+
+    def _apply_layer_state(self, state: LayerState):
+        """差分履歴が戻した状態（layer_ids はインプレース更新済み）をビューアへ反映"""
+        self.viewer.layers = state.layers
+        self.viewer._sync_mask_from_ids()
+        self.viewer._update_active_colors()
+        self.viewer._update_display_arrays()
+        self.viewer.update()
+        self.viewer._emit_layer_counts()
+
     def _push_layer_undo_state(self):
-        """レイヤー変更前の状態をUndoスタックに保存し、Redoスタックをクリア（大規模点群向け自動メモリ保護付き）"""
+        """
+        レイヤー変更前の状態を差分 Undo 履歴に記録し、Redo をクリアする。
+        履歴は「変化した点のインデックス＋変化前の layer_id」だけを保持するため、
+        巨大点群でも 1 ステップあたりのメモリは変化点数に比例する（全点コピーはしない）。
+        """
         if self.viewer.layer_mask is not None:
-            self.layer_undo_stack.append(self._capture_layer_snapshot())
             n_pts = len(self.viewer.points_raw) if self.viewer.points_raw is not None else 0
+            # 差分化によりメモリは変化点数比例になったが、全点を動かす操作が連続した場合の上限として段階を残す
             if n_pts > 10_000_000:
-                max_steps = 5
+                max_steps = 20
             elif n_pts > 3_000_000:
-                max_steps = 10
+                max_steps = 30
             else:
                 max_steps = getattr(self, "undo_max_steps", 50)
             # max_steps <= 0 は「無制限」
-            while max_steps > 0 and len(self.layer_undo_stack) > max_steps:
-                self.layer_undo_stack.pop(0)
-            self.layer_redo_stack.clear()
+            self.layer_history.push(self._current_layer_state(), max_steps=max_steps)
             self._sync_undo_buttons()
 
     def _sync_undo_buttons(self):
         """戻す/やり直しボタン (手動編集パネル・自動フィルタパネル両方) の有効状態を履歴スタックと同期"""
-        can_undo = len(self.layer_undo_stack) > 0
-        can_redo = len(self.layer_redo_stack) > 0
+        can_undo = self.layer_history.can_undo()
+        can_redo = self.layer_history.can_redo()
         self.undo_btn.setEnabled(can_undo)
         self.redo_btn.setEnabled(can_redo)
         if hasattr(self, "auto_undo_btn"):
@@ -3363,9 +3383,9 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("🔍 全体フィット (F)", lambda: self.viewer.fit_to_screen())
         menu.addAction("🎥 透視 ⇄ 正射影切替 (P)", lambda: self.viewer.toggle_projection())
-        if self.layer_undo_stack:
+        if self.layer_history.can_undo():
             menu.addAction("↩ 元に戻す (Ctrl+Z)", self._undo_action)
-        if self.layer_redo_stack:
+        if self.layer_history.can_redo():
             menu.addAction("↪ やり直し (Ctrl+Y)", self._redo_action)
 
         menu.exec(global_pos)
@@ -4924,15 +4944,34 @@ class MainWindow(QMainWindow):
             )
             return
 
+        sel_orig = np.asarray(sel_orig, dtype=np.int64).copy()
         sub_pts = self.viewer.points_raw[sel_orig]
-        keep_edge = filter_edge_veil_noise(
-            sub_pts,
+        kwargs = dict(
             nb_neighbors=min(16, max(4, len(sub_pts) - 1)),
             linearity_threshold=float(self.edge_lin_spin.value()) if hasattr(self, "edge_lin_spin") else 0.70,
             sor_std_ratio=1.25,
         )
+
+        if len(sel_orig) > self.LOCAL_CLEAN_ASYNC_THRESHOLD:
+            # 大規模選択（既定 200 万点超）は近傍解析に数十秒かかるためバックグラウンド実行（中止可）
+            self._run_in_background(
+                "📦 選択範囲内の局所精密除去", f"対象: {len(sel_orig):,} 点",
+                filter_edge_veil_noise, sub_pts,
+                on_success=lambda keep_edge: self._apply_local_fine_clean_result(sel_orig, keep_edge),
+                **kwargs,
+            )
+            return
+
+        keep_edge = filter_edge_veil_noise(sub_pts, **kwargs)
+        self._apply_local_fine_clean_result(sel_orig, keep_edge)
+
+    # 選択範囲限定の局所精密除去をバックグラウンド実行に切り替える選択点数の閾値
+    LOCAL_CLEAN_ASYNC_THRESHOLD = 2_000_000
+
+    def _apply_local_fine_clean_result(self, sel_orig: np.ndarray, keep_edge: np.ndarray):
+        """局所精密除去の結果（選択内で残す点の局所インデックス）をノイズレイヤーへ反映する"""
         keep_mask_local = np.zeros(len(sel_orig), dtype=bool)
-        keep_mask_local[keep_edge] = True
+        keep_mask_local[np.asarray(keep_edge, dtype=np.int64)] = True
         noise_orig = sel_orig[~keep_mask_local]
 
         if len(noise_orig) == 0:
@@ -5122,15 +5161,18 @@ class MainWindow(QMainWindow):
 
     def _undo_action(self):
         """直前のレイヤー状態または編集を元に戻す (Ctrl+Z)"""
-        if not self.layer_undo_stack or self.viewer.layer_mask is None:
+        if self.viewer.layer_mask is None or not self.layer_history.can_undo():
             return
 
-        self.layer_redo_stack.append(self._capture_layer_snapshot())
-        prev_snapshot = self.layer_undo_stack.pop()
+        restored = self.layer_history.undo(self._current_layer_state())
+        if restored is not None:
+            # layer_ids はインプレースで戻っているが layer_mask はまだ古い。別の処理が _ensure_layer_sync() で
+            # 古い mask を正として ids を上書きしないよう、選択解除より先に mask を同期・反映する
+            self._apply_layer_state(restored)
         self._sync_undo_buttons()
+        if restored is None:
+            return
         self._clear_selection()
-
-        self._restore_layer_snapshot(prev_snapshot)
 
         self.log_text.append("元に戻す (Undo) を実行しました")
         self.status_label.setText("操作を取り消しました (Ctrl+Yでやり直し可能)")
@@ -5138,15 +5180,16 @@ class MainWindow(QMainWindow):
 
     def _redo_action(self):
         """取り消したレイヤー操作をやり直す (Ctrl+Y)"""
-        if not self.layer_redo_stack or self.viewer.layer_mask is None:
+        if self.viewer.layer_mask is None or not self.layer_history.can_redo():
             return
 
-        self.layer_undo_stack.append(self._capture_layer_snapshot())
-        next_snapshot = self.layer_redo_stack.pop()
+        restored = self.layer_history.redo(self._current_layer_state())
+        if restored is not None:
+            self._apply_layer_state(restored)  # Undo と同じ理由で選択解除より先に反映する
         self._sync_undo_buttons()
+        if restored is None:
+            return
         self._clear_selection()
-
-        self._restore_layer_snapshot(next_snapshot)
 
         self.log_text.append("やり直し (Redo) を実行しました")
         self.status_label.setText("操作をやり直しました")

@@ -99,8 +99,9 @@
 ├── gui/                        # デスクトップGUI層（PySide6）
 │   ├── main_window.py          # メインウィンドウ、UIリボン、レイヤー管理、レシピ、ステータス
 │   ├── gl_viewer.py            # OpenGL 3D点群ビューア（カメラ、VBO、色分け、ギズモ、手動選択）
-│   ├── worker_thread.py        # バックグラウンドワーカスレッド（非同期読み込み・処理・保存）
-│   ├── progress_dialog.py      # キャンセル対応モダン進捗ダイアログ
+│   ├── worker_thread.py        # バックグラウンドワーカスレッド（非同期読み込み・処理・保存、汎用 FunctionWorker）
+│   ├── layer_history.py        # 差分ベースのレイヤー Undo/Redo 履歴（メモリは変化点数に比例）
+│   ├── progress_dialog.py      # キャンセル対応モダン進捗ダイアログ（ApplicationModal）
 │   ├── styles.py               # モダンダークテーマQSSスタイルシート
 │   └── preview_dialog.py       # プレビュー用補助ダイアログ
 │
@@ -111,7 +112,8 @@
 │   ├── test_ui_and_settings_integrity.py # UIスモーク・設定永続化テスト
 │   ├── test_filters_safety.py  # 全点消失ガード・代表点安全リミッター
 │   ├── test_coord_roundtrip.py # 座標系変換のロスレス往復（ScaledInteger 軸別スケール・FileSaveWorker 経由）
-│   └── test_e57_read_consistency.py # 読み込み点数とヘッダー宣言点数の照合
+│   ├── test_e57_read_consistency.py # 読み込み点数とヘッダー宣言点数の照合
+│   └── test_undo_snapshot.py   # 差分 Undo 履歴（全点コピー方式との等価性・メモリ比例・外部 clear）
 │
 ├── dist/                       # ビルド成果物（配布用。Git 管理外）
 │   ├── E57_PointCloud_Tool/    # スタンドアロンEXE実行フォルダ
@@ -159,6 +161,12 @@
 - すべてのワーカーは `progress_changed(int, str, str)` シグナルと `cancel()` を持ち、進捗ダイアログの「中止」から協調的に中断できます（読込はファイル境界/進捗コールバック、保存はファイル境界で反映）。
 - `MainWindow._is_background_busy()` が True の間は新しい重い処理を開始しない（再入防止）。結果適用時は開始時点の点数と一致するか確認し、点群が入れ替わっていれば破棄する。
 
+### (5) `gui/layer_history.py`（差分 Undo / Redo 履歴）
+- レイヤー編集の Undo は **全点コピーではなく差分**で保持します。履歴が持つのは「直前の `_push_layer_undo_state()` 時点の `layer_ids` の写し（shadow）1 本」と、ステップごとの「変化した点のインデックス＋変化前の layer_id＋レイヤー定義辞書の複製」だけです。`layer_mask` は `layer_ids` とレイヤー定義（`is_noise`）から `_sync_mask_from_ids()` で再計算するため保存しません。
+- `push()` の時点では何が変わるか分からないため、差分は次の `push()` / `undo()` のときに shadow と現在値を比較して確定します。変更が無かった push（0 点移動）はステップとして数えません。
+- `MainWindow.layer_undo_stack` / `layer_redo_stack` は履歴オブジェクト内の list をそのまま公開しており、`len()` / `bool()` / `clear()` が従来どおり使えます（`clear()` は shadow もリセットします）。
+- **注意**: Undo/Redo で `layer_ids` を戻した直後は `layer_mask` が古いままです。`_ensure_layer_sync()` は古い mask を正として ids を上書きするため、必ず `_apply_layer_state()`（mask 同期）を先に呼んでから選択解除などの他処理を行ってください（この順序を誤ると Redo が復元できません）。
+
 ---
 
 ## 6. これまでに解決された重要バグ・トラブルの教訓
@@ -194,7 +202,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - `.git/hooks/pre-commit` に全ゲートが登録済みで、コミット時に自動実行されます（NG ならコミット不可）。hooks は全 worktree で共有されるため `--install-hook` を再実行する必要はありません。
 - ゲートはリポジトリ内にファイルを残しません（一時ファイルは OS の一時ディレクトリ）。
 
-### テスト内容（全5段階・単体テスト 49 件）
+### テスト内容（全5段階・単体テスト 55 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
