@@ -6,6 +6,43 @@ from typing import Optional, Tuple
 import numpy as np
 import open3d as o3d
 
+from core.logger import log_warning
+
+# 代表点安全リミッター: 大規模点群をボクセル代表点に縮約してクラスタリングする際の代表点数の上限。
+# これを超えると DBSCAN のメモリ・CPU 消費が急増し PC がフリーズするため、超過時はボクセルを粗くして再量子化する。
+# ※ AI_HANDOVER.md の設計憲章③に対応する実装値（旧資料の「50万点」は誤記。実装は 20万点）
+REPRESENTATIVE_POINT_LIMIT = 200_000
+
+
+def _voxelize_with_limit(points: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """
+    点数に応じた初期ボクセルサイズで量子化し、代表点数が REPRESENTATIVE_POINT_LIMIT を超える場合は
+    ボクセルを段階的に粗くして再量子化する（面状の点群では初期推定より代表点が増えるため）。
+    戻り値: (unique_coords, inverse_idx, counts, voxel_size)
+    """
+    n = len(points)
+    base_voxel = max(0.02, float(eps) * 0.45)
+    if n > REPRESENTATIVE_POINT_LIMIT:
+        scale = (n / REPRESENTATIVE_POINT_LIMIT) ** (1.0 / 3.0) * 1.05
+        voxel_size = max(base_voxel, base_voxel * scale)
+    else:
+        voxel_size = base_voxel
+
+    unique_coords, inverse_idx, counts = _voxelize_points_fast(points, voxel_size)
+    attempts = 0
+    while len(unique_coords) > REPRESENTATIVE_POINT_LIMIT and attempts < 5:
+        # 代表点数が上限を超過: 面状分布（代表点数 ∝ 1/ボクセル²）を仮定し、超過比率の平方根でボクセルを拡大して再量子化（最大5回）
+        grow = (len(unique_coords) / REPRESENTATIVE_POINT_LIMIT) ** 0.5 * 1.1
+        voxel_size *= max(1.25, grow)
+        unique_coords, inverse_idx, counts = _voxelize_points_fast(points, voxel_size)
+        attempts += 1
+    if len(unique_coords) > REPRESENTATIVE_POINT_LIMIT:
+        log_warning(
+            f"代表点リミッター: 再量子化後も代表点数 {len(unique_coords):,} が上限 {REPRESENTATIVE_POINT_LIMIT:,} を超えています"
+            f"（ボクセル {voxel_size:.3f}m）。処理は続行しますが時間がかかる可能性があります。"
+        )
+    return unique_coords, inverse_idx, counts, voxel_size
+
 
 def filter_statistical_outlier(
     points: np.ndarray,
@@ -176,10 +213,27 @@ def _voxelize_points_fast(
         return np.unique(coords, axis=0, return_inverse=True, return_counts=True)
 
 
+def _no_cluster_survives(n: int, eps: float, min_cluster_points: int, allow_remove_all: bool) -> np.ndarray:
+    """
+    孤立クラスタ除去で「条件を満たす塊が1つも無い」場合の安全弁。
+    全点が小塊と判定されるのは、ほぼ常に eps / min_cluster_points が点群密度に合っていない設定ミスであり、
+    黙って全点をノイズにすると点群が丸ごと消える（過去に全点消失が発生）。
+    既定では全点を保持し警告ログを残す。allow_remove_all=True のときのみ旧来どおり空集合を返す。
+    """
+    if allow_remove_all:
+        return np.array([], dtype=np.int64)
+    log_warning(
+        f"孤立クラスタ除去: 条件 (距離 {eps}m / 最小塊 {min_cluster_points} 点) を満たす塊が1つも無いため、"
+        f"全 {n:,} 点の除去を中止して全点を保持しました。パラメータが点群密度に合っていない可能性があります。"
+    )
+    return np.arange(n, dtype=np.int64)
+
+
 def filter_isolated_clusters(
     points: np.ndarray,
     eps: float = 0.15,
     min_cluster_points: int = 30,
+    allow_remove_all: bool = False,
 ) -> np.ndarray:
     """
     孤立クラスタ（浮遊する小塊ノイズ）除去フィルタ
@@ -191,6 +245,8 @@ def filter_isolated_clusters(
     :param points: (N, 3) 形状の点群座標配列
     :param eps: 同一クラスタとみなす近傍探索距離（メートル単位、デフォルト: 0.15）
     :param min_cluster_points: 保持するクラスタの最小構成点数（デフォルト: 30）
+    :param allow_remove_all: True の場合のみ「条件を満たす塊が無い」ときに全点除去（空集合）を許可する。
+                             既定 False では全点を保持して警告を記録する（全点消失事故の防止）。
     :return: 残存する点のインデックス配列 (np.ndarray)
     """
     if points is None or len(points) == 0:
@@ -213,29 +269,21 @@ def filter_isolated_clusters(
 
         valid_mask = labels >= 0
         if not np.any(valid_mask):
-            return np.array([], dtype=np.int64)
+            return _no_cluster_survives(n, eps, min_cluster_points, allow_remove_all)
 
         valid_labels = labels[valid_mask]
         counts = np.bincount(valid_labels)
         large_clusters = np.where(counts >= min_cluster_points)[0]
 
         if len(large_clusters) == 0:
-            return np.array([], dtype=np.int64)
+            return _no_cluster_survives(n, eps, min_cluster_points, allow_remove_all)
 
         keep_mask = np.isin(labels, large_clusters)
         return np.where(keep_mask)[0]
 
     # 2. 大規模点群 (10,000点超): 適応型ボクセル代表DBSCANによる超高速・安全処理
-    # 初期の目標代表点数を最大20万点に設定し、最初から適切なボクセルサイズで1回のみ高速量子化
-    max_safe_reps = 200000
-    base_voxel = max(0.02, float(eps) * 0.45)
-    if n > max_safe_reps:
-        scale = (n / max_safe_reps) ** (1.0 / 3.0) * 1.05
-        voxel_size = max(base_voxel, base_voxel * scale)
-    else:
-        voxel_size = base_voxel
-
-    unique_coords, inverse_idx, counts = _voxelize_points_fast(points, voxel_size)
+    # 代表点安全リミッター (REPRESENTATIVE_POINT_LIMIT) 付きで量子化
+    unique_coords, inverse_idx, counts, voxel_size = _voxelize_with_limit(points, eps)
 
     rep_points = (unique_coords.astype(np.float64) + 0.5) * voxel_size
 
@@ -251,7 +299,7 @@ def filter_isolated_clusters(
 
     valid_mask = rep_labels >= 0
     if not np.any(valid_mask):
-        return np.array([], dtype=np.int64)
+        return _no_cluster_survives(n, eps, min_cluster_points, allow_remove_all)
 
     # 元点群の正確な点数を各クラスタごとに重み付き集計
     cluster_point_counts = np.bincount(
@@ -261,7 +309,7 @@ def filter_isolated_clusters(
 
     large_clusters = np.where(cluster_point_counts >= min_cluster_points)[0]
     if len(large_clusters) == 0:
-        return np.array([], dtype=np.int64)
+        return _no_cluster_survives(n, eps, min_cluster_points, allow_remove_all)
 
     rep_keep_mask = np.isin(rep_labels, large_clusters)
     point_keep_mask = rep_keep_mask[inverse_idx]
@@ -396,16 +444,8 @@ def keep_largest_clusters(
         keep_mask = np.isin(labels, list(top_cluster_ids))
         return np.where(keep_mask)[0]
 
-    # 2. 大規模点群 (10,000点超): 適応型ボクセル代表DBSCAN
-    max_safe_reps = 200000
-    base_voxel = max(0.02, float(eps) * 0.45)
-    if n > max_safe_reps:
-        scale = (n / max_safe_reps) ** (1.0 / 3.0) * 1.05
-        voxel_size = max(base_voxel, base_voxel * scale)
-    else:
-        voxel_size = base_voxel
-
-    unique_coords, inverse_idx, counts = _voxelize_points_fast(points, voxel_size)
+    # 2. 大規模点群 (10,000点超): 適応型ボクセル代表DBSCAN（代表点安全リミッター付き）
+    unique_coords, inverse_idx, counts, voxel_size = _voxelize_with_limit(points, eps)
 
     rep_points = (unique_coords.astype(np.float64) + 0.5) * voxel_size
 

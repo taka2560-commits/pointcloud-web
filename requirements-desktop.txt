@@ -1,7 +1,14 @@
 # E57点群ノイズ処理ツール 依存パッケージ一覧 (デスクトップ版)
+# ※ 依存を追加・変更したら 起動.bat の import 検査行と AI_HANDOVER.md §3 も同時に更新すること
 numpy>=1.26.0
 scipy>=1.12.0
-pye57>=0.4.1
+# pye57 は内部API (pye57.libe57 / pye57.utils) を直接使用しているため動作実績のある版以上に固定
+pye57>=0.4.19
 PySide6>=6.6.0
 PyOpenGL>=3.1.7
-
+# 任意: OpenGL 描画の高速化 (無くても動作する)
+PyOpenGL_accelerate>=3.1.7
+# 必須: core/filters.py (SOR / ROR / DBSCAN) と gui/preview_dialog.py が無条件 import する
+open3d>=0.18.0
+# 必須: core/e57_io.py のスキャナーポーズ (クォータニオン) 処理
+pyquaternion>=0.9.9

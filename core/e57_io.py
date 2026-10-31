@@ -17,6 +17,8 @@ from pye57 import libe57
 from pye57.utils import get_fields, get_node
 from pyquaternion import Quaternion
 
+from core.logger import log_warning
+
 
 @dataclass
 class FieldSchema:
@@ -284,6 +286,17 @@ class E57ScanData:
         # 初期読み込み時の座標参照および軽量シグネチャ（座標値が外部でインプレース変更されたかの厳密判定用）
         self._initial_points_ref = self.points
         self._initial_points_signature = _compute_points_signature(self.points)
+        # 取り込み時に適用された座標系変換モード（"cartesian" = 元ファイルのまま）。
+        # core.processor.transform_scan_coordinate_system / restore_scan_original_coordinates が更新する。
+        # 軸の入替・反転はシグネチャ（和・最小・最大）では検知できないため、変換済みであることを明示的に保持する。
+        self.coord_mode: str = "cartesian"
+
+    def mark_coordinates_modified(self) -> None:
+        """
+        座標が変更済みであることを明示的に記録する（以後 is_coordinates_modified() は必ず True）。
+        軸入替のようにシグネチャが変わらない変換を行った直後に呼ぶこと。
+        """
+        self._initial_points_signature = None
 
     @property
     def name(self) -> str:
@@ -324,6 +337,12 @@ class E57ScanData:
         n_points = len(self.points)
         if n_points == 0 or self.is_spherical_only:
             return False
+
+        # 0. 取り込み時の座標系変換が未復元、または明示的に変更済みと記録されている場合は常に変更扱い
+        if getattr(self, "coord_mode", "cartesian") not in ("cartesian", "", None):
+            return True
+        if self._initial_points_signature is None:
+            return True
 
         # 1. 軽量シグネチャ比較（インプレース変更の高速・確実な検知）
         if _compute_points_signature(self.points) != self._initial_points_signature:
@@ -441,7 +460,45 @@ class E57ScanData:
             original_point_count=self.original_point_count,
             is_subsampled=self.is_subsampled,
         )
+        # 取り込み時の座標系変換状態を引き継ぐ（抽出後も「変換済み」であることを失わないため）
+        filtered.coord_mode = getattr(self, "coord_mode", "cartesian")
+        if self._initial_points_signature is None:
+            filtered.mark_coordinates_modified()
         return filtered
+
+
+def _reconcile_read_count(
+    scan_index: int,
+    n_declared: int,
+    n_read: int,
+    raw_data: Dict[str, np.ndarray],
+    raw_unscaled: Dict[str, np.ndarray],
+) -> None:
+    """
+    E57 ヘッダーの宣言点数 (n_declared) と実際に読み込めた点数 (n_read) を照合する。
+    - 一致: 何もしない
+    - 短い: 事前確保済み配列 (np.empty) を n_read 長に切り詰めて未初期化領域を排除し、警告を記録
+    - 0 点 (宣言 > 0): ファイル破損として例外
+    """
+    if n_declared <= 0 or n_read == n_declared:
+        return
+    if n_read <= 0:
+        raise ValueError(
+            f"スキャン #{scan_index}: ヘッダーでは {n_declared:,} 点が宣言されていますが 1 点も読み込めませんでした。"
+            "E57 ファイルが破損している可能性があります。"
+        )
+    if n_read > n_declared:
+        # libe57 はバッファ容量以上を返さないため通常は起こり得ないが、念のため宣言長に揃える
+        n_read = n_declared
+    log_warning(
+        f"スキャン #{scan_index}: ヘッダー宣言 {n_declared:,} 点に対し実際に読み込めたのは {n_read:,} 点でした。"
+        "読み込めた分だけを有効点として扱います（ファイル末尾が欠損している可能性があります）。"
+    )
+    for store in (raw_data, raw_unscaled):
+        for key in list(store.keys()):
+            arr = store[key]
+            if isinstance(arr, np.ndarray) and len(arr) == n_declared:
+                store[key] = arr[:n_read].copy()
 
 
 def _extract_pose_safely(scan_node: libe57.StructureNode) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray]]:
@@ -698,6 +755,10 @@ def read_e57_scans(
                             break
                         total_read += r_cnt
                     reader.close()
+
+                    # 読み込めた点数をヘッダー宣言値と照合（np.empty で確保したバッファの未初期化領域が
+                    # 座標として残らないよう、短く読めた場合は実読み込み長に切り詰める）
+                    _reconcile_read_count(i, n_points, total_read, raw_data, raw_unscaled)
 
             # ScaledIntegerフィールドから倍精度float64配列を算出（cartesianX/Y/Z は直接 points 配列へ書き込んで一時メモリを節約）
             has_cartesian_all = all(

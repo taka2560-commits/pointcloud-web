@@ -22,19 +22,30 @@
 
 使い方:
     python quality_gate.py                 # 全5段階ゲートを実行
+    python quality_gate.py --quick         # 軽量モード: GUI ウィンドウを開く Gate 2/4 を除く (Gate 1, 3, 5)
+    python quality_gate.py --fix-eol       # .bat の改行コードを CRLF へ修復（既定では検査のみで書き換えない）
     python quality_gate.py --install-hook  # Git pre-commit フックに自動登録
+                                           # （注意: .git/hooks は全 worktree で共有されるため、他の開発者/AIの
+                                           #   コミットにも適用される。並行開発中は手動実行を推奨）
+
+一時ファイルはすべて OS の一時ディレクトリ配下に作成し、リポジトリ内には残さない。
 """
 
 import ast
 import os
 import py_compile
 import re
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 from typing import List, Tuple
 
 import numpy as np
+
+# --fix-eol 指定時のみ .bat の改行コードを書き換える（既定は検査のみ）
+FIX_EOL = "--fix-eol" in sys.argv
 
 # Windows環境(cp932)でのUnicodeEncodeError(絵文字等)クラッシュ防止
 if hasattr(sys.stdout, "reconfigure"):
@@ -115,8 +126,16 @@ def gate_1_static_and_dom_cross_check() -> None:
             )
         normalized_crlf = text_ascii.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii")
         if raw_bytes != normalized_crlf:
-            with open(bf, "wb") as f_bat_out:
-                f_bat_out.write(normalized_crlf)
+            if FIX_EOL:
+                # 明示オプション (--fix-eol) 指定時のみ修復する（検査がファイルを書き換える副作用を持たないようにする）
+                with open(bf, "wb") as f_bat_out:
+                    f_bat_out.write(normalized_crlf)
+                print(f"  [FIX] {bf} の改行コードを CRLF に正規化しました")
+            else:
+                raise AssertionError(
+                    f"{bf} の改行コードが CRLF に統一されていません。"
+                    "`python quality_gate.py --fix-eol` で修復するか、エディタで CRLF 保存してください。"
+                )
     print(f"  [OK] Windows バッチファイル 全 {len(bat_files)} 個の純粋ASCII & CRLF改行検査合格")
 
 
@@ -373,8 +392,11 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     win.viewer.validate_invariants()
     assert len(win.viewer.get_layer_indices(PointCloudViewer.LAYER_PLANE)) > 0
 
+    # 一時ファイル置き場（リポジトリ内に残さないよう OS の一時ディレクトリ配下に作る）
+    qgate_tmp = tempfile.mkdtemp(prefix="e57_qgate_")
+
     # ⑤ レイヤー状態プロジェクト保存・再開 (.npz) の検証
-    temp_proj_npz = "test_qgate_layers.npz"
+    temp_proj_npz = os.path.join(qgate_tmp, "test_qgate_layers.npz")
     try:
         win._on_save_layer_project(temp_proj_npz)
         assert os.path.exists(temp_proj_npz), "レイヤー状態プロジェクトファイル (.npz) が生成されませんでした"
@@ -390,7 +412,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
             os.remove(temp_proj_npz)
 
     # ④ FileSaveWorker による単一保存 & 全レイヤー分割保存 (split_masks) の検証
-    temp_out = "test_qgate_temp_out.e57"
+    temp_out = os.path.join(qgate_tmp, "test_qgate_temp_out.e57")
     created_split_files: List[str] = []
     try:
         save_worker = FileSaveWorker(temp_out, win.current_scans, win.viewer.layer_mask)
@@ -401,9 +423,9 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         assert len(split_masks) >= 2, "分割保存対象のレイヤー数が不足しています"
         split_worker = FileSaveWorker(temp_out, win.current_scans, win.viewer.layer_mask, split_masks=split_masks)
         split_worker.run()
-        for f in os.listdir("."):
+        for f in os.listdir(qgate_tmp):
             if f.startswith("test_qgate_temp_out_") and f.endswith(".e57"):
-                created_split_files.append(f)
+                created_split_files.append(os.path.join(qgate_tmp, f))
         assert len(created_split_files) == len(split_masks), "レイヤー別分割E57ファイルの出力数が一致しません"
     finally:
         if os.path.exists(temp_out):
@@ -469,8 +491,8 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     from core.e57_io import read_e57_scans, write_e57_scans
     from gui.worker_thread import FileLoadWorker, collect_e57_files
 
-    temp_folder = "test_qgate_folder_in"
-    temp_merged_out = "test_qgate_folder_merged.e57"
+    temp_folder = os.path.join(qgate_tmp, "test_qgate_folder_in")
+    temp_merged_out = os.path.join(qgate_tmp, "test_qgate_folder_merged.e57")
     try:
         os.makedirs(temp_folder, exist_ok=True)
         write_e57_scans(os.path.join(temp_folder, "01_stationA.e57"), [scan0])
@@ -727,6 +749,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     print("  [OK] 🧭 2点ピック斜め壁アライン (横・縦・直交正面・壁真横・180°反転) & 斜め壁スライス検査合格")
 
     win.close()
+    shutil.rmtree(qgate_tmp, ignore_errors=True)
     print("  [OK] 実機 OpenGL VBO 描画 & MainWindow 全操作・レイヤー拡張①〜⑥シナリオ検査合格")
 
 
@@ -774,12 +797,17 @@ def main() -> int:
         install_git_pre_commit_hook()
         return 0
 
+    quick = "--quick" in sys.argv
     start_time = time.time()
     try:
         gate_1_static_and_dom_cross_check()
-        gate_2_state_invariants_check()
+        if quick:
+            print("\n  [SKIP] --quick 指定のため GUI ウィンドウを開く Gate 2 / Gate 4 を省略します（マージ前には全ゲートを実行すること）")
+        else:
+            gate_2_state_invariants_check()
         gate_3_boundary_and_fuzzing_check()
-        gate_4_gui_and_opengl_smoke_check()
+        if not quick:
+            gate_4_gui_and_opengl_smoke_check()
         gate_5_unit_and_integration_suites()
     except Exception as exc:
         print("\n" + "!" * 68)
@@ -792,7 +820,10 @@ def main() -> int:
 
     elapsed = time.time() - start_time
     print("\n" + "=" * 68)
-    print(f" 🎉 全 5 段階の品質管理ゲート (Gate 1〜Gate 5) に完全合格しました！ ({elapsed:.2f}秒)")
+    if quick:
+        print(f" ✅ 軽量モード (Gate 1, 3, 5) に合格しました ({elapsed:.2f}秒) ※ Gate 2/4 は未実行")
+    else:
+        print(f" 🎉 全 5 段階の品質管理ゲート (Gate 1〜Gate 5) に完全合格しました！ ({elapsed:.2f}秒)")
     print("=" * 68)
     return 0
 

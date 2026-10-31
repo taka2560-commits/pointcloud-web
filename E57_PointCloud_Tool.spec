@@ -2,12 +2,21 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+# 配布パッケージに同梱するドキュメント（EXEと同じ階層に配置）
+datas = [
+    ('ノイズフィルター設定ガイド_初心者向け完全マニュアル.html', '.'),
+    ('ノイズフィルター設定ガイド_初心者向け完全マニュアル.md', '.'),
+    ('ノイズフィルター設定ガイド_初心者向け完全マニュアル.txt', '.'),
+    ('README.md', '.'),
+]
 binaries = []
 hiddenimports = []
 hiddenimports += collect_submodules('OpenGL')
-tmp_ret = collect_all('pye57')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# pye57 / open3d はネイティブ DLL とデータを持つため明示的に全収集する
+for _pkg in ('pye57', 'open3d'):
+    tmp_ret = collect_all(_pkg)
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports += ['pyquaternion', 'scipy.spatial', 'scipy.spatial._ckdtree']
 
 
 a = Analysis(
