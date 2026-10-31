@@ -768,16 +768,13 @@ def gate_5_unit_and_integration_suites() -> None:
     """Gate 5: E57 ロスレス入出力・プロセッサ・レイヤー統合テストスイート実行"""
     print_banner("Gate 5: E57 完全ロスレス整合性 & 単体/統合テストスイート")
 
-    import runpy
-
+    # tests/test_layer_integration.py も unittest の TestCase を持つため discover で一括実行される
     suite = unittest.defaultTestLoader.discover("tests")
     runner = unittest.TextTestRunner(verbosity=1)
     result = runner.run(suite)
     if not result.wasSuccessful():
         raise AssertionError("unittest テストスイートに失敗したテストがあります")
-
-    runpy.run_path("tests/test_layer_integration.py", run_name="__main__")
-    print("  [OK] 全単体テスト・E57ロスレス整合性テスト・レイヤー統合テスト合格")
+    print(f"  [OK] 全単体テスト・E57ロスレス整合性テスト・レイヤー統合テスト合格 ({result.testsRun} 件)")
 
 
 def install_git_pre_commit_hook() -> None:

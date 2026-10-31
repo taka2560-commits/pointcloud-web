@@ -62,6 +62,11 @@ if !ERRORLEVEL! NEQ 0 (
 )
 
 echo.
+echo [2.5/3] Copying manuals and README next to the EXE (PyInstaller 6 puts data files under _internal)...
+rem File names contain Japanese, so the selection is done in Python to keep this .bat pure ASCII.
+"!PY_EXE!" !PY_ARG! -c "import glob, shutil; dst = 'dist/E57_PointCloud_Tool/'; skip = ('index.html', 'AGENTS.md', 'CLAUDE.md'); skip_prefix = ('requirements', 'QA_REPORT', 'AI_HANDOVER', '00_AI'); files = [f for f in glob.glob('*') if f.endswith(('.html', '.md', '.txt')) and f not in skip and not f.startswith(skip_prefix)]; [shutil.copy(f, dst) for f in files]; print('  Copied:', len(files), 'document(s)')"
+
+echo.
 echo [3/3] Archiving previous ZIP and creating new ZIP distribution package...
 if exist "dist\E57_PointCloud_Tool_Dist.zip" (
     if not exist "dist\archive" mkdir "dist\archive"
