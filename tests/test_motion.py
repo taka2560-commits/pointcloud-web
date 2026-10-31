@@ -22,6 +22,7 @@ from gui.motion import (
     MOTION,
     ButtonPressMotion,
     bounce,
+    cancel_fade_out,
     cascade_in,
     expand_animated,
     fade_in,
@@ -88,6 +89,24 @@ class TestMotion(unittest.TestCase):
         fade_out_then_hide(lbl, 60)
         QTest.qWait(200)
         self.assertFalse(lbl.isVisible())
+        host.close()
+
+    def test_cancel_fade_out_keeps_widget_visible(self):
+        host = QWidget()
+        lbl = QLabel("toast", host)
+        host.show()
+        QTest.qWait(30)
+        self.assertFalse(cancel_fade_out(lbl), "退場中でなければ何もしないこと")
+        fade_out_then_hide(lbl, 100)
+        QTest.qWait(30)
+        self.assertTrue(cancel_fade_out(lbl))
+        self.assertIsNone(lbl.graphicsEffect())
+        QTest.qWait(200)
+        self.assertTrue(lbl.isVisible(), "取り消した後に隠れないこと")
+        fade_out_then_hide(lbl, 40)  # 取り消した後も通常どおり退場できる
+        QTest.qWait(150)
+        self.assertFalse(lbl.isVisible())
+        self.assertFalse(cancel_fade_out(lbl))
         host.close()
 
     def test_fade_slide_in_restores_position(self):

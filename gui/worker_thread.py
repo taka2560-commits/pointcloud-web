@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any, Callable
 from PySide6.QtCore import QThread, Signal
 import numpy as np
 
-from core.logger import log_exception
+from core.logger import log_exception, log_info
 
 from core.processor import (
     FilterConfig,
@@ -22,6 +22,8 @@ from core.processor import (
     transform_scan_coordinate_system,
     restore_scan_original_coordinates,
     is_identity_coord_mode,
+    scan_display_points,
+    scan_pose_transform,
 )
 from core.filters import keep_largest_clusters
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
@@ -212,10 +214,15 @@ class FileLoadWorker(QThread):
             )
             has_any_int = any("intensity" in s.raw_fields for _, s in non_empty_scans)
 
+            # 表示・計測・断面には pose を適用した座標を使う。s.points は保存用の生座標として残す
+            n_posed = sum(1 for _, s in non_empty_scans if scan_pose_transform(s) is not None)
+            if n_posed:
+                log_info(f"E57 の pose を表示座標へ適用します: {n_posed} / {len(non_empty_scans)} スキャン")
+
             if len(non_empty_scans) == 1:
-                # 単一スキャン時は s.points をそのまま参照共有し、倍精度座標配列の二重コピーをゼロにする
+                # 単一スキャンで pose が恒等なら s.points を参照共有し、倍精度座標配列の二重コピーをゼロにする
                 only_idx, only_scan = non_empty_scans[0]
-                combined_pts = only_scan.points
+                combined_pts = scan_display_points(only_scan)
                 combined_scan_ids = np.full(total_pts, only_idx, dtype=np.int32)
             else:
                 combined_pts = np.empty((total_pts, 3), dtype=np.float64)
@@ -223,7 +230,7 @@ class FileLoadWorker(QThread):
                 offset_cursor = 0
                 for s_idx, s in non_empty_scans:
                     n_cur = len(s.points)
-                    combined_pts[offset_cursor : offset_cursor + n_cur] = s.points
+                    combined_pts[offset_cursor : offset_cursor + n_cur] = scan_display_points(s)
                     combined_scan_ids[offset_cursor : offset_cursor + n_cur] = s_idx
                     offset_cursor += n_cur
 
@@ -365,11 +372,13 @@ class MemoryFilterWorker(QThread):
         config: FilterConfig,
         intensities: Optional[np.ndarray] = None,
         parent=None,
+        distance_points: Optional[np.ndarray] = None,
     ):
         super().__init__(parent)
         self.points = points
         self.config = config
         self.intensities = intensities
+        self.distance_points = distance_points  # 距離フィルタ用のスキャン原点からの相対座標（省略可）
         self._is_cancelled = False
 
     def cancel(self):
@@ -411,6 +420,7 @@ class MemoryFilterWorker(QThread):
                     self.points[remaining],
                     log_callback=on_filter_log,
                     intensities=sub_int,
+                    distance_points=None if self.distance_points is None else self.distance_points[remaining],
                 )
                 removed_global = remaining[np.asarray(remove_local, dtype=np.int64)]
                 if len(removed_global) > 0:

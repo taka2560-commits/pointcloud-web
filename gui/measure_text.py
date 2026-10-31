@@ -3,8 +3,9 @@
 計測ツール（M）の座標読み取り: 表示・ステータス・クリップボード用テキストの生成
 
 GUI に依存しない純粋関数だけを置く（tests/test_measure_text.py で検証）。
-- 座標は「表示系」（読み込み時の座標系変換を適用した後の値）で出す
-- 座標系変換（測量 X/Y 入替など）をして読み込んだときは「ファイル系」（E57 に書かれている値）も併記する
+- 座標は「表示系」（pose と、読み込み時の座標系変換を適用した後の値）で出す
+- 座標系変換（測量 X/Y 入替など）をして読み込んだときは「ファイル系」（pose 適用後で、軸の入替をしていない値）も併記する
+- E57 に保存されているスキャンのローカル座標（pose 適用前）は表示しない
 - 小数 3 桁（mm 単位）。クリップボードはタブ区切りで Excel / CAD にそのまま貼れる
 """
 
@@ -24,7 +25,7 @@ COORD_MODE_LABELS = {
 
 
 def file_coords(world_pt: Sequence[float], coord_mode: Optional[str]) -> np.ndarray:
-    """表示系の 1 点をファイル（E57 に書かれている）座標系へ戻す"""
+    """表示系の 1 点から取り込み時の座標系変換を外し、ファイル系（pose 適用後）へ戻す"""
     pt = np.asarray(world_pt, dtype=np.float64).reshape(1, 3)
     if is_identity_coord_mode(coord_mode):
         return pt[0].copy()

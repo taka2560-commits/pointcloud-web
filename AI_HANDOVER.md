@@ -54,6 +54,13 @@
 - 保存時は `FileSaveWorker` が `restore_scan_original_coordinates()` で元の座標系へ逆変換してから書き出し、終了後に表示用座標系へ再適用します。これにより ScaledInteger の生整数・スケール定義がそのまま使われ、**ビット完全一致**で書き戻せます（`tests/test_coord_roundtrip.py`）。
 - `core.processor.transform_scan_coordinate_system()` は points だけでなく `raw_unscaled_fields` と `field_schemas` も軸ごとに付け替えるため、変換後も `points == raw × scale + offset` が厳密に成り立ちます。この整合を壊す変更をしないでください。
 
+### ⑧ 【pose】表示は pose 適用後の座標、保存は生座標と pose をそのまま使う
+- E57 の点はスキャンのローカル座標で記録され、`world = R @ local + t` で現場の座標になります。
+- `E57ScanData.points` と `raw_fields` は保存用の生座標です。pose を適用して書き換えないでください（ロスレス保存が壊れます）。
+- `PointCloudViewer.points_raw`（名前に反して pose 適用後の表示座標）と `scan.points` は点の順番だけが共通です。両者の座標を混ぜず、インデックスで対応させてください。表示座標は `core.processor.scan_display_points()` で作ります。
+- 距離フィルタの基準はスキャン原点です。表示座標で実行するときは `MainWindow._distance_reference_points()` を `distance_points` に渡してください。
+- 座標系変換（測量 X/Y 入替など）は pose の後に適用します。pose が恒等ならコピーせず `scan.points` を共有します。回転を含むファイルでは全点ぶん（2,200 万点で約 500MB）メモリが増えます。
+
 ### ⑦ 【UI モード】新UIと従来UIを両立させ、いつでも戻せるようにする
 - 2026-10-31 のデザイン改修は **「後付けアダプタ」方式**です。`MainWindow._init_ui()` が組み立てた従来UIに対し、`gui/modern_ui.py` の `apply_modern_ui()` が「作業順の並べ替え・メニュー/ステータスバー・重複ボタンの非表示・絵文字除去・インライン QSS 無効化・折り返しバー・空状態カード」を起動後に適用します。従来UIのコードは削除していません。
 - UI モードは `gui/ui_mode.py` が決めます（優先順: 起動引数 `--classic-ui`/`--modern-ui` ＞ 環境変数 `E57_UI_MODE` ＞ 設定「システム → UIスタイル」 ＞ 既定 modern）。**不具合時は `起動.bat` に `--classic-ui` を付けるか、設定で「従来UI」を選べば改修前に戻ります。**
