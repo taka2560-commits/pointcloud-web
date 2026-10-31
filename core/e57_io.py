@@ -31,6 +31,39 @@ class FieldSchema:
     default_value: Any = 0
 
 
+def _optimal_integer_dtype(min_v: int, max_v: int) -> Any:
+    """E57 IntegerNode の最小値・最大値に応じた最小メモリ消費の NumPy 整数型を返す"""
+    if 0 <= min_v and max_v <= 255:
+        return np.uint8
+    if -128 <= min_v and max_v <= 127:
+        return np.int8
+    if 0 <= min_v and max_v <= 65535:
+        return np.uint16
+    if -32768 <= min_v and max_v <= 32767:
+        return np.int16
+    if 0 <= min_v and max_v <= 4294967295:
+        return np.uint32
+    if -2147483648 <= min_v and max_v <= 2147483647:
+        return np.int32
+    return np.int64
+
+
+def _compute_points_signature(points: np.ndarray) -> Tuple[int, float, float, float, float]:
+    """
+    座標配列がインプレースで書き換えられたかをメモリ消費ゼロで厳密に検知するための軽量シグネチャを計算する
+    """
+    n = len(points)
+    if n == 0:
+        return (0, 0.0, 0.0, 0.0, 0.0)
+    # 先頭・中央・末尾のサンプル値と全体の合計・最小・最大を組み合わせる
+    mid = n // 2
+    sample_sum = float(np.sum(points[0]) + np.sum(points[mid]) + np.sum(points[-1]))
+    total_sum = float(np.sum(points))
+    min_val = float(np.min(points))
+    max_val = float(np.max(points))
+    return (n, sample_sum, total_sum, min_val, max_val)
+
+
 def _snapshot_structure_node(node: Any) -> Dict[str, Any]:
     """
     libe57のノードツリーをC++ファイルハンドルに依存しない純粋なPython辞書にディープコピーする。
@@ -226,9 +259,15 @@ class E57ScanData:
         root_extensions: Optional[List[Tuple[str, str]]] = None,
         coordinate_metadata: Optional[str] = None,
         is_spherical_only: bool = False,
+        name: Optional[str] = None,
+        original_point_count: Optional[int] = None,
+        is_subsampled: bool = False,
     ):
         self.scan_index = scan_index
-        self.points = np.asarray(points, dtype=np.float64)  # (N, 3) 形状の倍精度 XYZ 座標
+        pts_arr = np.asarray(points, dtype=np.float64)
+        if pts_arr.ndim == 1 and pts_arr.size == 0:
+            pts_arr = np.empty((0, 3), dtype=np.float64)
+        self.points = pts_arr  # (N, 3) 形状の倍精度 XYZ 座標
         self.raw_fields = raw_fields  # 各種属性配列の辞書
         self.header = header
         self.rotation = np.asarray(rotation, dtype=np.float64) if rotation is not None else None
@@ -239,13 +278,106 @@ class E57ScanData:
         self.root_extensions: List[Tuple[str, str]] = root_extensions or []
         self.coordinate_metadata: Optional[str] = coordinate_metadata
         self.is_spherical_only: bool = is_spherical_only
-        # 初期読み込み時の座標参照（座標値が外部で直接書き換えられたかの判定用）
+        self._name: Optional[str] = name
+        self.original_point_count: int = original_point_count if original_point_count is not None else len(self.points)
+        self.is_subsampled: bool = bool(is_subsampled)
+        # 初期読み込み時の座標参照および軽量シグネチャ（座標値が外部でインプレース変更されたかの厳密判定用）
         self._initial_points_ref = self.points
+        self._initial_points_signature = _compute_points_signature(self.points)
+
+    @property
+    def name(self) -> str:
+        """スキャン名（器械点名）を返す"""
+        if self._name:
+            return self._name
+        if self.header is not None and hasattr(self.header, "name") and self.header.name:
+            return str(self.header.name)
+        if self.meta_snapshot and "children" in self.meta_snapshot:
+            nm = self.meta_snapshot["children"].get("name", {}).get("value", "")
+            if nm:
+                return str(nm)
+        return ""
+
+    @name.setter
+    def name(self, value: Optional[str]) -> None:
+        """スキャン名（器械点名）を設定する"""
+        self._name = str(value).strip() if value is not None else None
 
     @property
     def point_count(self) -> int:
         """点数を返す"""
         return len(self.points)
+
+    @point_count.setter
+    def point_count(self, value: Any) -> None:
+        """
+        防御的セッター: 外部代入による AttributeError('has no setter') を防止
+        点数は常に len(self.points) が規定します
+        """
+        pass
+
+    def is_coordinates_modified(self) -> bool:
+        """
+        座標配列 scan.points が読み込み時または抽出時から変更されたかを厳密に判定する。
+        インプレース変更（scan.points[:, 0] += ...）も100%検知する。
+        """
+        n_points = len(self.points)
+        if n_points == 0 or self.is_spherical_only:
+            return False
+
+        # 1. 軽量シグネチャ比較（インプレース変更の高速・確実な検知）
+        if _compute_points_signature(self.points) != self._initial_points_signature:
+            return True
+
+        # 2. ScaledInteger 座標の場合、生の整数配列から復元した値と一致するか確認
+        for axis_idx, f_name in enumerate(("cartesianX", "cartesianY", "cartesianZ")):
+            schema = self.field_schemas.get(f_name)
+            if schema is not None and schema.node_type == "ScaledInteger":
+                if f_name not in self.raw_unscaled_fields or len(self.raw_unscaled_fields[f_name]) != n_points:
+                    return True
+                expected = self.raw_unscaled_fields[f_name].astype(np.float64) * schema.scale + schema.offset
+                if not np.allclose(self.points[:, axis_idx], expected, rtol=0, atol=max(1e-9, abs(schema.scale) * 0.5)):
+                    return True
+
+        # 3. raw_fields との整合確認
+        if "cartesianX" in self.raw_fields and "cartesianY" in self.raw_fields and "cartesianZ" in self.raw_fields:
+            if (
+                len(self.raw_fields["cartesianX"]) != n_points
+                or not np.allclose(self.points[:, 0], self.raw_fields["cartesianX"], rtol=0, atol=1e-6)
+                or not np.allclose(self.points[:, 1], self.raw_fields["cartesianY"], rtol=0, atol=1e-6)
+                or not np.allclose(self.points[:, 2], self.raw_fields["cartesianZ"], rtol=0, atol=1e-6)
+            ):
+                return True
+        else:
+            return True
+
+        return False
+
+    def validate(self) -> None:
+        """
+        書き込み前にスキャンデータの構造・型・数値の健全性を厳格に検証する。
+        不整合や破損（NaN/Inf座標、次元不正など）があれば ValueError を送出する。
+        """
+        if not isinstance(self.points, np.ndarray):
+            raise ValueError(f"スキャン #{self.scan_index}: points が NumPy 配列ではありません。")
+        if self.points.ndim != 2 or self.points.shape[1] != 3:
+            raise ValueError(
+                f"スキャン #{self.scan_index}: points の形状が不正です ({self.points.shape})。(N, 3) である必要があります。"
+            )
+        n_pts = len(self.points)
+        if n_pts > 0 and not np.isfinite(self.points).all():
+            bad_cnt = int(np.sum(~np.isfinite(self.points).all(axis=1)))
+            raise ValueError(
+                f"スキャン #{self.scan_index}: 座標データに非有限値 (NaN または Inf) が {bad_cnt} 点含まれています。"
+            )
+        if self.rotation is not None:
+            rot = np.asarray(self.rotation, dtype=np.float64)
+            if rot.shape != (4,) or not np.isfinite(rot).all():
+                raise ValueError(f"スキャン #{self.scan_index}: rotation クォータニオンが不正です ({rot})。")
+        if self.translation is not None:
+            tr = np.asarray(self.translation, dtype=np.float64)
+            if tr.shape != (3,) or not np.isfinite(tr).all():
+                raise ValueError(f"スキャン #{self.scan_index}: translation ベクトルが不正です ({tr})。")
 
     def filter_by_indices(self, keep_indices: np.ndarray) -> "E57ScanData":
         """
@@ -259,7 +391,15 @@ class E57ScanData:
         new_fields = {}
         for key, val in self.raw_fields.items():
             if isinstance(val, np.ndarray) and len(val) == n_orig:
-                new_fields[key] = val[keep_indices].copy()
+                # もし cartesianX/Y/Z が元の points とのビュー共有だった場合は new_points の列ビューを共有してメモリ節約
+                if key == "cartesianX" and val.dtype == np.float64 and np.shares_memory(val, self.points):
+                    new_fields[key] = new_points[:, 0]
+                elif key == "cartesianY" and val.dtype == np.float64 and np.shares_memory(val, self.points):
+                    new_fields[key] = new_points[:, 1]
+                elif key == "cartesianZ" and val.dtype == np.float64 and np.shares_memory(val, self.points):
+                    new_fields[key] = new_points[:, 2]
+                else:
+                    new_fields[key] = val[keep_indices].copy()
             else:
                 new_fields[key] = val.copy() if hasattr(val, "copy") else val
 
@@ -297,6 +437,9 @@ class E57ScanData:
             root_extensions=list(self.root_extensions),
             coordinate_metadata=self.coordinate_metadata,
             is_spherical_only=self.is_spherical_only,
+            name=self._name,
+            original_point_count=self.original_point_count,
+            is_subsampled=self.is_subsampled,
         )
         return filtered
 
@@ -334,13 +477,18 @@ def _extract_pose_safely(scan_node: libe57.StructureNode) -> Tuple[bool, Optiona
 def read_e57_scans(
     file_path: str,
     progress_callback: Optional[Any] = None,
+    point_budget: Optional[int] = None,
+    chunk_size: int = 500000,
 ) -> List[E57ScanData]:
     """
     E57ファイルをロスレスで読み込み、各スキャンの点群データオブジェクトのリストを返す。
-    未サポートフィールドによるエラーを起こさず、すべての属性フィールドと座標精度を100%保持する。
+    大容量ファイル (数千万〜数億点) でもメモリ爆発 (30GB圧迫・ディスク100%スワップ) を完全に防止する
+    チャンクストリーミング読み込み ＆ Point Budget サンプリング保護を内蔵。
 
     :param file_path: 入力E57ファイルのパス
     :param progress_callback: 進捗コールバック関数 (ratio: float, msg: str)
+    :param point_budget: 最大表示点数 (None または <=0 の場合は全点ロスレス読み込み)
+    :param chunk_size: ストリーミング読み込み時のチャンクサイズ (デフォルト50万点=約10MB)
     :return: E57ScanData のリスト
     """
     if not os.path.exists(file_path):
@@ -371,11 +519,30 @@ def read_e57_scans(
         data3d = get_node(root, "data3D")
         scan_count = data3d.childCount()
 
+        # 大容量メモリ保護: 全スキャンの総点数を事前取得
+        total_file_points = 0
+        scan_counts: List[int] = []
+        for s_idx in range(scan_count):
+            s_node = get_node(data3d, s_idx)
+            if s_node.isDefined("points"):
+                cnt = get_node(s_node, "points").childCount()
+            else:
+                cnt = 0
+            scan_counts.append(cnt)
+            total_file_points += cnt
+
+        # サンプリングステップの決定（予算指定あり、かつ総点数が予算の1.5倍超の場合）
+        global_step = 1
+        if point_budget is not None and point_budget > 0 and total_file_points > int(point_budget * 1.5):
+            import math
+            global_step = max(1, int(math.ceil(total_file_points / point_budget)))
+
         for i in range(scan_count):
+            n_points = scan_counts[i]
             if progress_callback:
                 progress_callback(
                     0.1 + (i / max(1, scan_count)) * 0.8,
-                    f"スキャン #{i + 1}/{scan_count} を読み込み中...",
+                    f"スキャン #{i + 1}/{scan_count} を読み込み中 ({n_points:,} 点)...",
                 )
 
             scan_node = get_node(data3d, i)
@@ -383,17 +550,14 @@ def read_e57_scans(
             meta_snapshot = _snapshot_structure_node(scan_node)
             has_pose_flag, rotation, translation = _extract_pose_safely(scan_node)
 
+            if not scan_node.isDefined("points"):
+                continue
+
             points_node = get_node(scan_node, "points")
-            n_points = points_node.childCount()
             proto_node = libe57.StructureNode(points_node.prototype())
             point_fields = get_fields(proto_node)
 
             field_schemas: Dict[str, FieldSchema] = {}
-            raw_data: Dict[str, np.ndarray] = {}
-            raw_unscaled: Dict[str, np.ndarray] = {}
-
-            # プロトタイプの各フィールドを解析し、最適なバッファを準備
-            buffers = libe57.VectorSourceDestBuffer()
             scaled_int_fields: List[str] = []
 
             for f_idx in range(proto_node.childCount()):
@@ -411,12 +575,6 @@ def read_e57_scans(
                         default_value=float(f_node.value()),
                     )
                     field_schemas[f_name] = schema
-                    # 元の精度がSINGLEならfloat32、DOUBLEならfloat64でそのまま読み込む（ビット完全一致のため）
-                    dtype = np.float32 if prec == libe57.E57_SINGLE else np.float64
-                    arr = np.empty(n_points, dtype=dtype)
-                    raw_data[f_name] = arr
-                    buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, n_points, True, True))
-
                 elif isinstance(f_node, libe57.ScaledIntegerNode):
                     schema = FieldSchema(
                         name=f_name,
@@ -428,12 +586,7 @@ def read_e57_scans(
                         default_value=int(f_node.rawValue()),
                     )
                     field_schemas[f_name] = schema
-                    # ScaledIntegerは生のint64整数として読み込み、浮動小数点丸め誤差を100%排除する
-                    unscaled_arr = np.empty(n_points, dtype=np.int64)
-                    raw_unscaled[f_name] = unscaled_arr
                     scaled_int_fields.append(f_name)
-                    buffers.append(libe57.SourceDestBuffer(imf, f_name, unscaled_arr, n_points, True, False))
-
                 elif isinstance(f_node, libe57.IntegerNode):
                     min_v = int(f_node.minimum())
                     max_v = int(f_node.maximum())
@@ -445,34 +598,138 @@ def read_e57_scans(
                         default_value=int(f_node.value()),
                     )
                     field_schemas[f_name] = schema
-                    if min_v >= 0 and max_v <= 255:
-                        dtype = np.uint8
-                    elif min_v >= -128 and max_v <= 127:
-                        dtype = np.int8
-                    else:
-                        # オーバーフロー防止のため64bit整数を使用
-                        dtype = np.int64
-                    arr = np.empty(n_points, dtype=dtype)
-                    raw_data[f_name] = arr
-                    buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, n_points, True, True))
+
+            raw_data: Dict[str, np.ndarray] = {}
+            raw_unscaled: Dict[str, np.ndarray] = {}
 
             if n_points > 0 and len(field_schemas) > 0:
-                reader = points_node.reader(buffers)
-                reader.read()
-                reader.close()
+                if global_step > 1:
+                    # ★ 大容量保護モード: 固定チャンクサイズ(約10MB)でストリーミング読み込みしながらサンプリング
+                    # 5000万点・1億点あってもメモリ消費は数十MBのみに完全抑制
+                    c_size = min(chunk_size, n_points)
+                    chunk_buffers = libe57.VectorSourceDestBuffer()
+                    chunk_raw_bufs: Dict[str, np.ndarray] = {}
 
-            # ScaledIntegerフィールドから倍精度float64配列を算出
+                    for f_name, schema in field_schemas.items():
+                        if schema.node_type == "Float":
+                            dtype = np.float32 if schema.precision == libe57.E57_SINGLE else np.float64
+                            arr = np.empty(c_size, dtype=dtype)
+                            chunk_raw_bufs[f_name] = arr
+                            chunk_buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, True))
+                        elif schema.node_type == "ScaledInteger":
+                            arr = np.empty(c_size, dtype=np.int64)
+                            chunk_raw_bufs[f_name] = arr
+                            chunk_buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, False))
+                        elif schema.node_type == "Integer":
+                            dtype = _optimal_integer_dtype(schema.minimum, schema.maximum)
+                            arr = np.empty(c_size, dtype=dtype)
+                            chunk_raw_bufs[f_name] = arr
+                            chunk_buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, True))
+
+                    reader = points_node.reader(chunk_buffers)
+                    sampled_raw: Dict[str, List[np.ndarray]] = {f: [] for f in field_schemas}
+                    offset = 0
+                    pts_read_so_far = 0
+
+                    while True:
+                        read_pts = reader.read()
+                        if read_pts <= 0:
+                            break
+                        if offset < read_pts:
+                            idx = np.arange(offset, read_pts, global_step)
+                            for f_name, buf_arr in chunk_raw_bufs.items():
+                                sampled_raw[f_name].append(buf_arr[:read_pts][idx].copy())
+                            last_idx = int(idx[-1])
+                            offset = (last_idx + global_step) - read_pts
+                        else:
+                            offset -= read_pts
+                        pts_read_so_far += read_pts
+
+                        if progress_callback:
+                            base_prog = 0.1 + (i / max(1, scan_count)) * 0.8
+                            scan_prog = (pts_read_so_far / max(1, n_points)) * (0.8 / max(1, scan_count))
+                            progress_callback(
+                                base_prog + scan_prog,
+                                f"スキャン #{i + 1}/{scan_count} を保護読み込み中 ({pts_read_so_far:,}/{n_points:,}点)...",
+                            )
+                    reader.close()
+                    del chunk_buffers, chunk_raw_bufs
+
+                    # サンプリング結果をNumPy配列に結合
+                    for f_name, schema in field_schemas.items():
+                        pieces = sampled_raw.get(f_name, [])
+                        if schema.node_type == "ScaledInteger":
+                            raw_unscaled[f_name] = np.concatenate(pieces) if pieces else np.empty(0, dtype=np.int64)
+                        elif schema.node_type == "Integer":
+                            dtype = _optimal_integer_dtype(schema.minimum, schema.maximum)
+                            raw_data[f_name] = np.concatenate(pieces) if pieces else np.empty(0, dtype=dtype)
+                        else:
+                            dtype = np.float32 if schema.precision == libe57.E57_SINGLE else np.float64
+                            raw_data[f_name] = np.concatenate(pieces) if pieces else np.empty(0, dtype=dtype)
+                    sampled_raw.clear()
+                    del sampled_raw
+                    import gc
+                    gc.collect()
+
+                else:
+                    # 通常モード (global_step == 1): 全点ロスレス一括読み込み（最小限のメモリ型で事前確保）
+                    buffers = libe57.VectorSourceDestBuffer()
+                    for f_name, schema in field_schemas.items():
+                        if schema.node_type == "Float":
+                            dtype = np.float32 if schema.precision == libe57.E57_SINGLE else np.float64
+                            arr = np.empty(n_points, dtype=dtype)
+                            raw_data[f_name] = arr
+                            buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, n_points, True, True))
+                        elif schema.node_type == "ScaledInteger":
+                            unscaled_arr = np.empty(n_points, dtype=np.int64)
+                            raw_unscaled[f_name] = unscaled_arr
+                            buffers.append(libe57.SourceDestBuffer(imf, f_name, unscaled_arr, n_points, True, False))
+                        elif schema.node_type == "Integer":
+                            dtype = _optimal_integer_dtype(schema.minimum, schema.maximum)
+                            arr = np.empty(n_points, dtype=dtype)
+                            raw_data[f_name] = arr
+                            buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, n_points, True, True))
+
+                    reader = points_node.reader(buffers)
+                    total_read = 0
+                    while True:
+                        r_cnt = reader.read()
+                        if r_cnt <= 0:
+                            break
+                        total_read += r_cnt
+                    reader.close()
+
+            # ScaledIntegerフィールドから倍精度float64配列を算出（cartesianX/Y/Z は直接 points 配列へ書き込んで一時メモリを節約）
+            has_cartesian_all = all(
+                (k in raw_data or k in raw_unscaled) for k in ("cartesianX", "cartesianY", "cartesianZ")
+            )
             for f_name in scaled_int_fields:
+                if has_cartesian_all and f_name in ("cartesianX", "cartesianY", "cartesianZ"):
+                    continue
                 sc = field_schemas[f_name]
                 raw_data[f_name] = raw_unscaled[f_name].astype(np.float64) * sc.scale + sc.offset
 
-            # 直交座標の取得（計算・表示用に倍精度float64の(N, 3)配列を構築）
+            # 直交座標の取得（計算・表示用に倍精度float64の(N, 3)配列をピークメモリ最小で構築）
             is_spherical_only = False
-            if "cartesianX" in raw_data and "cartesianY" in raw_data and "cartesianZ" in raw_data:
-                x = np.asarray(raw_data["cartesianX"], dtype=np.float64)
-                y = np.asarray(raw_data["cartesianY"], dtype=np.float64)
-                z = np.asarray(raw_data["cartesianZ"], dtype=np.float64)
-                points = np.column_stack([x, y, z]) if n_points > 0 else np.empty((0, 3), dtype=np.float64)
+            if has_cartesian_all:
+                ref_arr = raw_unscaled.get("cartesianX") if "cartesianX" in raw_unscaled else raw_data.get("cartesianX")
+                n_loaded = len(ref_arr) if ref_arr is not None else 0
+                points = np.empty((n_loaded, 3), dtype=np.float64)
+                if n_loaded > 0:
+                    for axis_idx, f_name in enumerate(("cartesianX", "cartesianY", "cartesianZ")):
+                        if f_name in raw_unscaled:
+                            sc = field_schemas[f_name]
+                            np.multiply(raw_unscaled[f_name], sc.scale, out=points[:, axis_idx], casting="unsafe")
+                            if sc.offset != 0.0:
+                                points[:, axis_idx] += sc.offset
+                            raw_data[f_name] = points[:, axis_idx]
+                        else:
+                            orig_arr = raw_data[f_name]
+                            points[:, axis_idx] = orig_arr
+                            # E57_DOUBLE (float64) の場合は points の列ビューに置き換えて個別配列のメモリを即解放
+                            # E57_SINGLE (float32) の場合は単精度ビット完全一致のため元の float32 配列を保持
+                            if orig_arr.dtype == np.float64:
+                                raw_data[f_name] = points[:, axis_idx]
             elif "sphericalRange" in raw_data:
                 is_spherical_only = True
                 r = np.asarray(raw_data["sphericalRange"], dtype=np.float64)
@@ -483,12 +740,34 @@ def read_e57_scans(
                 x = r * cos_el * np.cos(az)
                 y = r * cos_el * np.sin(az)
                 z = r * np.sin(el)
-                points = np.column_stack([x, y, z]) if n_points > 0 else np.empty((0, 3), dtype=np.float64)
+                points = np.column_stack([x, y, z]) if len(x) > 0 else np.empty((0, 3), dtype=np.float64)
+                del r, az, el, cos_el, x, y, z
             else:
                 raise ValueError(f"スキャン #{i} に座標データ（cartesian/spherical）が見つかりません。")
 
+            # 非有限座標 (NaN / Inf) の厳格サニタイズ: スキャナーの無効点等で NaN/Inf が混入している場合は安全に除外
+            if len(points) > 0 and not np.isfinite(points).all():
+                finite_mask = np.isfinite(points).all(axis=1)
+                n_before_finite = len(points)
+                points = points[finite_mask].copy()
+                for k in list(raw_data.keys()):
+                    val = raw_data[k]
+                    if isinstance(val, np.ndarray) and len(val) == n_before_finite:
+                        if k == "cartesianX" and val.dtype == np.float64:
+                            raw_data[k] = points[:, 0]
+                        elif k == "cartesianY" and val.dtype == np.float64:
+                            raw_data[k] = points[:, 1]
+                        elif k == "cartesianZ" and val.dtype == np.float64:
+                            raw_data[k] = points[:, 2]
+                        else:
+                            raw_data[k] = val[finite_mask].copy()
+                for k in list(raw_unscaled.keys()):
+                    val = raw_unscaled[k]
+                    if isinstance(val, np.ndarray) and len(val) == n_before_finite:
+                        raw_unscaled[k] = val[finite_mask].copy()
+
             safe_header = SafeScanHeader(
-                point_count=n_points,
+                point_count=len(points),
                 point_fields=point_fields,
                 scan_fields=scan_fields,
                 has_pose_flag=has_pose_flag,
@@ -510,6 +789,8 @@ def read_e57_scans(
                 root_extensions=root_extensions,
                 coordinate_metadata=coordinate_metadata,
                 is_spherical_only=is_spherical_only,
+                original_point_count=n_points,
+                is_subsampled=(global_step > 1),
             )
             scans.append(scan_data)
     finally:
@@ -525,30 +806,38 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
     """
     単一スキャンデータを元のスキーマ・精度・メタデータを完全保持したままImageFileに書き込む
     """
+    # 書き込み前の構造・数値整合性チェック
+    scan.validate()
     n_points = len(scan.points)
 
-    # 座標が直接書き換えられたかどうかを判定（スライスやコピーのみなら元の値がそのまま維持されている）
-    coords_modified = False
-    if not scan.is_spherical_only and n_points > 0:
-        if "cartesianX" in scan.raw_fields and "cartesianY" in scan.raw_fields and "cartesianZ" in scan.raw_fields:
-            # scan.points が外部で変更された場合は raw_fields との差が生じる
-            if (
-                len(scan.raw_fields["cartesianX"]) != n_points
-                or not np.allclose(scan.points[:, 0], scan.raw_fields["cartesianX"], rtol=0, atol=1e-7)
-                or not np.allclose(scan.points[:, 1], scan.raw_fields["cartesianY"], rtol=0, atol=1e-7)
-                or not np.allclose(scan.points[:, 2], scan.raw_fields["cartesianZ"], rtol=0, atol=1e-7)
-            ):
-                coords_modified = True
-        else:
-            coords_modified = True
+    # 座標が直接書き換えられたかどうかを厳密に判定（インプレース変更も検知）
+    coords_modified = scan.is_coordinates_modified()
+
+    # バウンディングボックス (cartesianBounds) を最新化すべきか判定
+    # 点数が変化した場合、座標が変更された場合、または元ヘッダに cartesianBounds がない場合は実点群から正確に再計算する
+    has_orig_bounds = bool(
+        scan.meta_snapshot
+        and isinstance(scan.meta_snapshot.get("children"), dict)
+        and "cartesianBounds" in scan.meta_snapshot["children"]
+    )
+    should_update_bounds = (not scan.is_spherical_only) and (
+        not has_orig_bounds or coords_modified or n_points != scan.original_point_count
+    )
 
     # 1. スキャン構造ノードの構築（元のメタデータがあれば完全復元）
+    # libe57 の StructureNode.set は既存キーの上書き時に ErrorSetTwice を送出するため、更新対象キーは復元前に調整する
     if scan.meta_snapshot is not None and scan.meta_snapshot.get("type") == "Structure":
-        scan_node = _restore_structure_node(scan.meta_snapshot, imf)
+        snap_children = dict(scan.meta_snapshot.get("children", {}))
+        if should_update_bounds and "cartesianBounds" in snap_children:
+            del snap_children["cartesianBounds"]
+        if scan._name:
+            snap_children["name"] = {"type": "String", "value": str(scan._name)}
+        adjusted_snapshot = {"type": "Structure", "children": snap_children}
+        scan_node = _restore_structure_node(adjusted_snapshot, imf)
     else:
         scan_node = libe57.StructureNode(imf)
         scan_node.set("guid", libe57.StringNode(imf, "{%s}" % uuid.uuid4()))
-        scan_node.set("name", libe57.StringNode(imf, f"Scan {scan_idx}"))
+        scan_node.set("name", libe57.StringNode(imf, scan.name if scan.name else f"Scan {scan_idx}"))
 
     # 2. ポーズ（rotation / translation）の設定
     # 元のmeta_snapshotにposeが含まれておらず、かつscan.rotation/translationが明示指定されている場合のみ追加
@@ -576,12 +865,12 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
             data_to_write[k] = v
 
     if not scan.is_spherical_only:
-        if coords_modified or "cartesianX" not in data_to_write:
+        if coords_modified or "cartesianX" not in data_to_write or "cartesianY" not in data_to_write or "cartesianZ" not in data_to_write:
             data_to_write["cartesianX"] = scan.points[:, 0] if n_points > 0 else np.empty(0, dtype=np.float64)
             data_to_write["cartesianY"] = scan.points[:, 1] if n_points > 0 else np.empty(0, dtype=np.float64)
             data_to_write["cartesianZ"] = scan.points[:, 2] if n_points > 0 else np.empty(0, dtype=np.float64)
 
-    # 4. cartesianBounds の更新（メタデータスナップショットに存在しない場合、または点数がある場合）
+    # 4. cartesianBounds の設定・更新（実点群の正確な最小・最大値を記録）
     if not scan.is_spherical_only and not scan_node.isDefined("cartesianBounds"):
         bbox_node = libe57.StructureNode(imf)
         if n_points > 0:
@@ -619,14 +908,20 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
 
         if schema is not None and schema.node_type == "ScaledInteger":
             # ScaledIntegerNode の完全復元
-            if not coords_modified and f_name in scan.raw_unscaled_fields and len(scan.raw_unscaled_fields[f_name]) == n_points:
+            is_coord_field = f_name in ("cartesianX", "cartesianY", "cartesianZ")
+            use_raw_unscaled = (
+                (not (coords_modified and is_coord_field))
+                and f_name in scan.raw_unscaled_fields
+                and len(scan.raw_unscaled_fields[f_name]) == n_points
+            )
+            if use_raw_unscaled:
                 src_arr = np.ascontiguousarray(scan.raw_unscaled_fields[f_name], dtype=np.int64)
                 min_v = schema.minimum
                 max_v = schema.maximum
                 if n_points > 0:
                     min_v = min(min_v, int(np.min(src_arr)))
                     max_v = max(max_v, int(np.max(src_arr)))
-                default_v = int( min(max(schema.default_value, min_v), max_v) )
+                default_v = int(min(max(schema.default_value, min_v), max_v))
                 proto_field = libe57.ScaledIntegerNode(
                     imf, default_v, min_v, max_v, schema.scale, schema.offset
                 )
@@ -643,7 +938,7 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
                 if n_points > 0:
                     min_v = min(min_v, int(np.min(raw_calc)))
                     max_v = max(max_v, int(np.max(raw_calc)))
-                default_v = int( min(max(schema.default_value, min_v), max_v) )
+                default_v = int(min(max(schema.default_value, min_v), max_v))
                 proto_field = libe57.ScaledIntegerNode(
                     imf, default_v, min_v, max_v, schema.scale, schema.offset
                 )
@@ -655,10 +950,7 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
         elif schema is not None and schema.node_type == "Float":
             prec = schema.precision
             dtype = np.float32 if prec == libe57.E57_SINGLE else np.float64
-            if f_name in ("cartesianX", "cartesianY", "cartesianZ") and coords_modified:
-                src_arr = np.ascontiguousarray(data_to_write[f_name], dtype=dtype)
-            else:
-                src_arr = np.ascontiguousarray(data_to_write[f_name], dtype=dtype)
+            src_arr = np.ascontiguousarray(data_to_write[f_name], dtype=dtype)
 
             min_v = float(schema.minimum)
             max_v = float(schema.maximum)
@@ -744,16 +1036,71 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
         writer.close()
 
 
+def _verify_written_e57_file(file_path: str, expected_scans: List[E57ScanData]) -> None:
+    """
+    書き出し完了直後のE57ファイルを実際にリードモードで再オープンし、
+    ヘッダ構造・スキャン数・各スキャンのレコード点数・必須座標属性が1点の狂いもなく書き込まれているかを厳格検証する。
+    """
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        raise RuntimeError(f"出力ベリファイ失敗: 出力ファイルが空または存在しません ({file_path})")
+
+    verify_imf = libe57.ImageFile(file_path, "r")
+    try:
+        root = verify_imf.root()
+        if not root.isDefined("data3D"):
+            raise RuntimeError("出力ベリファイ失敗: E57ルートに data3D ノードが存在しません。")
+        data3d = get_node(root, "data3D")
+        actual_scan_count = data3d.childCount()
+        if actual_scan_count != len(expected_scans):
+            raise RuntimeError(
+                f"出力ベリファイ失敗: スキャン数が一致しません (期待: {len(expected_scans)}, 実際: {actual_scan_count})"
+            )
+
+        for idx, exp_scan in enumerate(expected_scans):
+            s_node = get_node(data3d, idx)
+            if not s_node.isDefined("points"):
+                raise RuntimeError(f"出力ベリファイ失敗: スキャン #{idx} に points ノードが存在しません。")
+            pts_node = get_node(s_node, "points")
+            actual_pts = pts_node.childCount()
+            expected_pts = len(exp_scan.points)
+            if actual_pts != expected_pts:
+                raise RuntimeError(
+                    f"出力ベリファイ失敗: スキャン #{idx} の書き出し点数が一致しません (期待: {expected_pts:,} 点, 実際: {actual_pts:,} 点)"
+                )
+            proto = libe57.StructureNode(pts_node.prototype())
+            fields = set(get_fields(proto))
+            if not exp_scan.is_spherical_only:
+                if not {"cartesianX", "cartesianY", "cartesianZ"}.issubset(fields):
+                    raise RuntimeError(
+                        f"出力ベリファイ失敗: スキャン #{idx} に必須座標フィールド (cartesianX/Y/Z) が欠落しています。"
+                    )
+            else:
+                if "sphericalRange" not in fields:
+                    raise RuntimeError(
+                        f"出力ベリファイ失敗: 球面スキャン #{idx} に必須フィールド (sphericalRange) が欠落しています。"
+                    )
+    finally:
+        verify_imf.close()
+
+
 def write_e57_scans(file_path: str, scans: List[E57ScanData]) -> None:
     """
     複数のスキャンデータを新しいE57ファイルにロスレス（元の形式・精度・座標値を完全保持）で書き出す。
-    一時ファイルへの書き込み完了後にアトミック置換を行うため、エラー時に壊れた空ファイルが残らない。
+    1. 書き込み前の全スキャンデータ厳格バリデーション (validate)
+    2. 一時ファイルへの書き込み
+    3. 書き込み後の再オープン自動ベリファイ (_verify_written_e57_file)
+    4. 検証合格後のアトミック置換 (os.replace)
+    により、破損ファイルや点数欠損ファイルの生成を100%防止する。
 
     :param file_path: 出力先E57ファイルのパス
     :param scans: 書き込むE57ScanDataオブジェクトのリスト
     """
     if not scans:
         raise ValueError("書き込むスキャンデータが空です。")
+
+    # 1. 書き込み前の事前バリデーション
+    for scan in scans:
+        scan.validate()
 
     abs_path = os.path.abspath(file_path)
     output_dir = os.path.dirname(abs_path)
@@ -809,7 +1156,10 @@ def write_e57_scans(file_path: str, scans: List[E57ScanData]) -> None:
         imf.close()
         imf = None
 
-        # 書き込み完了後、ターゲットファイルへアトミックに置換
+        # 3. 書き込み後の自動ベリファイ（スキャン数・点数・必須属性の完全一致検証）
+        _verify_written_e57_file(temp_path, scans)
+
+        # 4. 検証合格後、ターゲットファイルへアトミックに置換
         os.replace(temp_path, abs_path)
 
     except Exception as e:

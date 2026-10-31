@@ -76,6 +76,39 @@ def main():
         help="原点からの最大許容距離 [m]",
     )
 
+    # 反射強度フィルタ
+    parser.add_argument(
+        "--min-intensity",
+        type=float,
+        default=None,
+        help="最小反射強度 (Intensity)",
+    )
+    parser.add_argument(
+        "--max-intensity",
+        type=float,
+        default=None,
+        help="最大反射強度 (Intensity)",
+    )
+
+    # 孤立クラスタ（浮遊小塊ノイズ）除去
+    parser.add_argument(
+        "--cluster",
+        action="store_true",
+        help="孤立クラスタ（浮遊小塊ノイズ）除去を有効化する",
+    )
+    parser.add_argument(
+        "--cluster-eps",
+        type=float,
+        default=0.15,
+        help="同一クラスタとみなす近傍距離 [m] (デフォルト: 0.15)",
+    )
+    parser.add_argument(
+        "--cluster-min-points",
+        type=int,
+        default=30,
+        help="保持するクラスタの最小構成点数 (デフォルト: 30)",
+    )
+
     args = parser.parse_args()
 
     input_path = os.path.abspath(args.input)
@@ -96,11 +129,17 @@ def main():
         use_ror=args.ror,
         ror_radius=args.ror_radius,
         ror_min_points=args.ror_min_points,
+        use_cluster_filter=args.cluster,
+        cluster_eps=args.cluster_eps,
+        cluster_min_points=args.cluster_min_points,
         use_voxel_downsample=(args.voxel_size > 0.0),
         voxel_size=args.voxel_size,
         use_distance_filter=(args.min_dist is not None or args.max_dist is not None),
         min_distance=args.min_dist,
         max_distance=args.max_dist,
+        use_intensity_filter=(args.min_intensity is not None or args.max_intensity is not None),
+        min_intensity=args.min_intensity,
+        max_intensity=args.max_intensity,
     )
 
     processor = PointCloudProcessor(config=config)

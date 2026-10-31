@@ -310,6 +310,195 @@ class TestE57IOIntegrity(unittest.TestCase):
         self.assertGreater(len(keep_idx), 0)
         self.assertEqual(len(keep_idx) + len(rem_idx), 200)
 
+    def test_5_inplace_coordinate_modification_and_bounds_update(self):
+        """
+        5. ScaledIntegerNode スキャンで既存の cartesianBounds がある状態から：
+           (A) 外れ値除去で範囲が縮小した際に cartesianBounds が ErrorSetTwice なく最新化されること
+           (B) scan.points をインプレース変更した際に変更後の座標値が正確に保存されること
+        """
+        in_path = os.path.join(self.temp_dir, "bounds_scaled_in.e57")
+        out_filtered_path = os.path.join(self.temp_dir, "bounds_scaled_filtered.e57")
+        out_modified_path = os.path.join(self.temp_dir, "bounds_scaled_modified.e57")
+
+        n = 100
+        scale = 0.001
+        raw_ix = np.arange(0, n, dtype=np.int64) * 1000  # 0.0m ~ 99.0m
+        raw_iy = np.arange(0, n, dtype=np.int64) * 500   # 0.0m ~ 49.5m
+        raw_iz = np.arange(0, n, dtype=np.int64) * 200   # 0.0m ~ 19.8m
+
+        imf = libe57.ImageFile(in_path, "w")
+        imf.extensionsAdd("", libe57.E57_V1_0_URI)
+        root = imf.root()
+        data3d = libe57.VectorNode(imf, True)
+        root.set("data3D", data3d)
+
+        scan = libe57.StructureNode(imf)
+        scan.set("guid", libe57.StringNode(imf, "{55555555-6666-7777-8888-999999999999}"))
+        bbox = libe57.StructureNode(imf)
+        bbox.set("xMinimum", libe57.FloatNode(imf, -999.0, libe57.E57_DOUBLE))
+        bbox.set("xMaximum", libe57.FloatNode(imf, 999.0, libe57.E57_DOUBLE))
+        bbox.set("yMinimum", libe57.FloatNode(imf, -999.0, libe57.E57_DOUBLE))
+        bbox.set("yMaximum", libe57.FloatNode(imf, 999.0, libe57.E57_DOUBLE))
+        bbox.set("zMinimum", libe57.FloatNode(imf, -999.0, libe57.E57_DOUBLE))
+        bbox.set("zMaximum", libe57.FloatNode(imf, 999.0, libe57.E57_DOUBLE))
+        scan.set("cartesianBounds", bbox)
+
+        proto = libe57.StructureNode(imf)
+        proto.set("cartesianX", libe57.ScaledIntegerNode(imf, 0, -10000000, 10000000, scale, 0.0))
+        proto.set("cartesianY", libe57.ScaledIntegerNode(imf, 0, -10000000, 10000000, scale, 0.0))
+        proto.set("cartesianZ", libe57.ScaledIntegerNode(imf, 0, -10000000, 10000000, scale, 0.0))
+
+        codecs = libe57.VectorNode(imf, True)
+        pts = libe57.CompressedVectorNode(imf, proto, codecs)
+        scan.set("points", pts)
+        data3d.append(scan)
+
+        bufs = libe57.VectorSourceDestBuffer()
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianX", raw_ix, n, True, False))
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianY", raw_iy, n, True, False))
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianZ", raw_iz, n, True, False))
+        w = pts.writer(bufs)
+        w.write(n)
+        w.close()
+        imf.close()
+
+        # (A) 先頭10点 (X: 0.0m ~ 9.0m) だけを抽出して書き出し -> cartesianBounds が 0.0~9.0 に更新されること
+        loaded = read_e57_scans(in_path)[0]
+        sub_scan = loaded.filter_by_indices(np.arange(0, 10))
+        write_e57_scans(out_filtered_path, [sub_scan])
+
+        re_filtered = read_e57_scans(out_filtered_path)[0]
+        b_children = re_filtered.meta_snapshot["children"]["cartesianBounds"]["children"]
+        self.assertAlmostEqual(b_children["xMinimum"]["value"], 0.0)
+        self.assertAlmostEqual(b_children["xMaximum"]["value"], 9.0)
+
+        # (B) インプレースで X 座標に +25.0m 加算して書き出し -> 変更後の座標が保存されていること
+        loaded.points[:, 0] += 25.0
+        self.assertTrue(loaded.is_coordinates_modified())
+        write_e57_scans(out_modified_path, [loaded])
+        re_mod = read_e57_scans(out_modified_path)[0]
+        np.testing.assert_allclose(re_mod.points[:, 0], (raw_ix * scale) + 25.0, atol=1e-6)
+
+    def test_6_non_finite_nan_inf_sanitization_and_strict_validation(self):
+        """
+        6. E57に NaN / Inf 座標が含まれている場合の安全な自動除外と、
+           メモリ上で NaN が混入した破損データの書き込み阻止 (validate) を検証
+        """
+        in_path = os.path.join(self.temp_dir, "nan_in.e57")
+        out_path = os.path.join(self.temp_dir, "nan_out.e57")
+
+        n = 50
+        x = np.linspace(0.0, 10.0, n, dtype=np.float64)
+        y = np.linspace(0.0, 10.0, n, dtype=np.float64)
+        z = np.linspace(0.0, 10.0, n, dtype=np.float64)
+        col_r = np.arange(n, dtype=np.uint8)
+        # 3点に NaN / Inf を混入
+        x[5] = np.nan
+        y[15] = np.inf
+        z[25] = -np.inf
+
+        imf = libe57.ImageFile(in_path, "w")
+        imf.extensionsAdd("", libe57.E57_V1_0_URI)
+        root = imf.root()
+        data3d = libe57.VectorNode(imf, True)
+        root.set("data3D", data3d)
+
+        scan = libe57.StructureNode(imf)
+        scan.set("guid", libe57.StringNode(imf, "{66666666-7777-8888-9999-aaaaaaaaaaaa}"))
+        proto = libe57.StructureNode(imf)
+        proto.set("cartesianX", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
+        proto.set("cartesianY", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
+        proto.set("cartesianZ", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
+        proto.set("colorRed", libe57.IntegerNode(imf, 0, 0, 255))
+
+        codecs = libe57.VectorNode(imf, True)
+        pts = libe57.CompressedVectorNode(imf, proto, codecs)
+        scan.set("points", pts)
+        data3d.append(scan)
+
+        bufs = libe57.VectorSourceDestBuffer()
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianX", x, n, True, True))
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianY", y, n, True, True))
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianZ", z, n, True, True))
+        bufs.append(libe57.SourceDestBuffer(imf, "colorRed", col_r, n, True, True))
+        w = pts.writer(bufs)
+        w.write(n)
+        w.close()
+        imf.close()
+
+        # 読み込み時に非有限値3点が安全に除外され、47点の有効データのみが揃うこと
+        scans = read_e57_scans(in_path)
+        self.assertEqual(scans[0].point_count, 47)
+        self.assertTrue(np.isfinite(scans[0].points).all())
+        self.assertEqual(len(scans[0].raw_fields["colorRed"]), 47)
+
+        # 故意に NaN を混入させて write_e57_scans を呼ぶと ValueError で拒否されること
+        scans[0].points[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            write_e57_scans(out_path, scans)
+        self.assertFalse(os.path.exists(out_path))
+
+    def test_7_file_load_worker_preserves_all_points_above_display_budget(self):
+        """
+        7. 表示用 Point Budget (例: 300点) より多い点数 (例: 1,200点) のE57ファイルを
+           FileLoadWorker で読み込んだ際、表示配列は間引かれるが原本データ (points_raw / scans) は
+           1,200点すべて無欠損で保持され、保存時に1,200点すべて出力されることを検証
+        """
+        from gui.worker_thread import FileLoadWorker, FileSaveWorker
+
+        in_path = os.path.join(self.temp_dir, "budget_full_in.e57")
+        out_path = os.path.join(self.temp_dir, "budget_full_out.e57")
+
+        n = 1200
+        pts_orig = np.random.uniform(-20.0, 20.0, (n, 3)).astype(np.float64)
+        orig_x = np.ascontiguousarray(pts_orig[:, 0])
+        orig_y = np.ascontiguousarray(pts_orig[:, 1])
+        orig_z = np.ascontiguousarray(pts_orig[:, 2])
+        imf = libe57.ImageFile(in_path, "w")
+        imf.extensionsAdd("", libe57.E57_V1_0_URI)
+        root = imf.root()
+        data3d = libe57.VectorNode(imf, True)
+        root.set("data3D", data3d)
+        scan = libe57.StructureNode(imf)
+        scan.set("guid", libe57.StringNode(imf, "{77777777-8888-9999-aaaa-bbbbbbbbbbbb}"))
+        proto = libe57.StructureNode(imf)
+        proto.set("cartesianX", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
+        proto.set("cartesianY", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
+        proto.set("cartesianZ", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
+        codecs = libe57.VectorNode(imf, True)
+        pts = libe57.CompressedVectorNode(imf, proto, codecs)
+        scan.set("points", pts)
+        data3d.append(scan)
+        bufs = libe57.VectorSourceDestBuffer()
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianX", orig_x, n, True, True))
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianY", orig_y, n, True, True))
+        bufs.append(libe57.SourceDestBuffer(imf, "cartesianZ", orig_z, n, True, True))
+        w = pts.writer(bufs)
+        w.write(n)
+        w.close()
+        imf.close()
+
+        holder = []
+        worker = FileLoadWorker(in_path, point_budget=300)
+        worker.finished_success.connect(lambda pre: holder.append(pre))
+        worker.run()
+        self.assertEqual(len(holder), 1)
+        preloaded = holder[0]
+
+        # 表示用配列は Point Budget (300点) にサンプリングされているが、原本は 1,200 点すべて保持されていること
+        self.assertLessEqual(len(preloaded.display_points), 300)
+        self.assertEqual(len(preloaded.points_raw), n)
+        self.assertEqual(preloaded.scans[0].point_count, n)
+        self.assertFalse(preloaded.is_downsampled)
+
+        # そのまま保存した際、1,200点すべてが1ビットの劣化もなく完全一致で出力されること
+        mask = np.ones(n, dtype=bool)
+        saver = FileSaveWorker(out_path, preloaded.scans, mask)
+        saver.run()
+        reloaded = read_e57_scans(out_path)[0]
+        self.assertEqual(reloaded.point_count, n)
+        np.testing.assert_array_equal(reloaded.points, pts_orig)
+
 
 if __name__ == "__main__":
     unittest.main()

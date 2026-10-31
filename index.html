@@ -22,25 +22,58 @@
   <!-- 矩形選択用のラバーバンド枠線 -->
   <div id="selection-box"></div>
 
-  <!-- 画面上部 ナビゲーションバー -->
+  <!-- 円形・多角形選択用のSVGオーバーレイ -->
+  <svg id="selection-svg" style="position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 99;"></svg>
+
+  <!-- 画面上部 ナビゲーションバー (1クリック操作モード切替搭載) -->
   <header class="top-nav">
+    <button class="btn btn-outline" id="btn-toggle-sidebar" style="padding: 4px 10px; font-size: 12px; margin-right: 4px;" title="サイドバーの表示/格納を切替">◀ パネル</button>
     <div class="nav-title">
       <span>🌐</span> 3D点群エディタ
     </div>
+
+    <!-- ★ 柱②: 1クリック操作モード・セグメントコントロール -->
+    <div class="nav-segment-group" id="nav-mode-segment">
+      <button class="nav-seg-btn active" id="seg-btn-orbit" title="視点回転モード: 左ドラッグで回転、右ドラッグでパン (ショートカット: V / 再押下でパンと交互切替)">🖐 回転(V)</button>
+      <button class="nav-seg-btn" id="seg-btn-pan" title="パン(平行移動)モード: 左ドラッグでそのまま画面を平行移動 (ショートカット: H または V / Space長押しでも一時パン可)">✋ パン(H)</button>
+      <button class="nav-seg-btn" id="seg-btn-brush" title="円形ブラシでなぞって直感的に選択・消去 (Bキー / [ ]でサイズ変更)">🧹 ブラシ(B)</button>
+      <button class="nav-seg-btn" id="seg-btn-rect" title="1クリックで四角(矩形)選択モードへ切替 (Rキー)">⬜ 矩形(R)</button>
+      <button class="nav-seg-btn" id="seg-btn-circle" title="1クリックで円形選択モードへ切替 (Cキー)">⭕ 円形(C)</button>
+      <button class="nav-seg-btn" id="seg-btn-poly" title="1クリックで多角形選択モードへ切替 (Lキー)">⬠ 多角形(L)</button>
+      <button class="nav-seg-btn" id="seg-btn-measure" title="2点クリックで寸法・距離計測 (Mキー)">📐 計測(M)</button>
+    </div>
+
+    <button class="btn btn-outline" id="btn-instant-del" style="padding: 4px 10px; font-size: 11px; font-weight: 700;" title="ONにすると囲んだ瞬間・なぞった瞬間にDeleteキー不要で即ノイズ消去します">⚡ 即削除</button>
+    <button class="btn" id="btn-clean-mode" style="padding: 4px 10px; font-size: 11px; font-weight: 700; background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8;" title="ノイズ処理に特化した高コントラスト・ブラシ即消去モードへワンタッチ切替 (Nキー)">🎯 ノイズ専用(N)</button>
+
     <div class="badge" id="point-count-badge">点数: 0 点</div>
     <div class="badge" id="status-badge" style="background: rgba(34, 197, 94, 0.15); color: #4ade80;">待機中</div>
     <button class="btn" id="btn-open-settings" style="padding: 4px 10px; font-size: 12px; margin-left: 6px;">⚙️ 設定</button>
   </header>
 
   <!-- 左側 操作サイドバー -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="main-sidebar">
+    <!-- ★ 柱①: ワークフロー切替セグメントバー (目的セクションへ即切り替え) -->
+    <div class="sidebar-workflow-tabs" id="sidebar-nav-tabs">
+      <button class="flow-tab-btn active" id="tab-flow-all" data-tab="all" title="全セクションを表示">🗂 全て</button>
+      <button class="flow-tab-btn" id="tab-flow-layer" data-tab="layer" title="レイヤー管理">📑 レイヤー</button>
+      <button class="flow-tab-btn" id="tab-flow-select" data-tab="select" title="手動選択・断面スライス">✂️ 選択・断面</button>
+      <button class="flow-tab-btn" id="tab-flow-auto" data-tab="auto" title="自動ノイズ除去">🪄 自動除去</button>
+      <button class="flow-tab-btn" id="tab-flow-view" data-tab="view" title="カメラ・表示設定">🎥 表示</button>
+    </div>
+
     <!-- 1. ファイル入力 & サンプル -->
-    <section class="panel-section">
+    <section class="panel-section sec-file">
       <div class="panel-title">点群データ読み込み</div>
       <div class="drop-zone" id="drop-zone">
-        <strong>📂 ファイルを選択 / ドロップ</strong>
-        <p>PLY, XYZ, PTS, CSV 対応</p>
-        <input type="file" id="file-input" accept=".ply,.xyz,.pts,.csv,.txt" style="display: none;">
+        <strong>📂 ファイル / フォルダをドロップ</strong>
+        <p>PLY, XYZ, PTS, CSV (複数可)</p>
+        <input type="file" id="file-input" accept=".ply,.xyz,.pts,.csv,.txt" multiple style="display: none;">
+        <input type="file" id="folder-input" webkitdirectory directory multiple style="display: none;">
+      </div>
+      <div style="display: flex; gap: 4px; margin-top: 4px;">
+        <button class="btn btn-outline" id="btn-open-file" style="flex: 1; font-size: 11px; padding: 5px 4px;">📄 ファイル選択</button>
+        <button class="btn btn-outline" id="btn-open-folder" style="flex: 1; font-size: 11px; padding: 5px 4px;">📁 フォルダ選択</button>
       </div>
       <div class="control-row" style="margin-top: 4px;">
         <div class="control-label">
@@ -59,7 +92,7 @@
     </section>
 
     <!-- 2. カメラ・視点操作 -->
-    <section class="panel-section">
+    <section class="panel-section sec-view">
       <div class="panel-title">カメラ・視点操作</div>
       <button class="btn btn-primary" id="btn-fit-view" style="width: 100%;">🎯 全体表示 (Fit to View / Fキー)</button>
       <div class="btn-group">
@@ -68,6 +101,15 @@
         <button class="btn" id="btn-view-front" title="正面から">正面</button>
         <button class="btn" id="btn-view-side" title="右側面から">側面</button>
       </div>
+      <!-- 🧭 2点ピック斜め壁アライン (横・縦・直交正面・壁真横・180°反転) -->
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 4px;">
+        <button class="btn" id="btn-wall-pick" style="font-size: 11px; padding: 5px 4px; font-weight: 700; border: 1px solid #38bdf8;" title="点群上の2点をクリックして斜め壁の向きを基準に設定 (Uキー)">🧭 2点ピック(U)</button>
+        <button class="btn" id="btn-wall-horiz" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="ピックした2点ラインが画面の真横(水平)になる上面視へ切替">━ 横(上面)</button>
+        <button class="btn" id="btn-wall-vert" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="ピックした2点ラインが画面の真縦(垂直)になる上面視へ切替">┃ 縦(上面)</button>
+        <button class="btn" id="btn-wall-ortho" style="font-size: 11px; padding: 5px 4px;" title="2点ラインに直交する方向から壁を真正面で見る">🧱 直交正面</button>
+        <button class="btn" id="btn-wall-edge" style="font-size: 11px; padding: 5px 4px;" title="2点ラインの延長方向から壁を真横(エッジ断面)で見る">🔪 壁真横</button>
+        <button class="btn" id="btn-wall-flip" style="font-size: 11px; padding: 5px 4px;" title="現在の斜め壁アライン向きを180°反転">🔄 180°反転</button>
+      </div>
       <!-- 投影方式切替ボタン -->
       <button class="btn" id="btn-toggle-projection" style="width: 100%; margin-top: 4px;" title="透視投影と平行投影を切り替えます (Pキー)">
         📐 投影: 透視投影 (パース)
@@ -75,7 +117,7 @@
     </section>
 
     <!-- 2.5 計測・寸法ツール -->
-    <section class="panel-section">
+    <section class="panel-section sec-select">
       <div class="panel-title">寸法計測ツール</div>
       <div class="btn-group-2">
         <button class="btn" id="btn-toggle-measure" title="2点クリックで距離を計測 (Mキー)">📏 距離計測: OFF</button>
@@ -88,13 +130,15 @@
     </section>
 
     <!-- 3. 表示設定 -->
-    <section class="panel-section">
+    <section class="panel-section sec-view">
       <div class="panel-title">表示・配色設定</div>
       <div class="control-row">
         <label class="control-label">配色モード</label>
         <select id="select-color-mode">
-          <option value="height">高さ (Z座標) グラデーション</option>
+          <option value="height">高さ (Z座標: Turbo)</option>
+          <option value="viridis">高さ (Z座標: Viridis)</option>
           <option value="rgb">元のRGBカラー</option>
+          <option value="layer">レイヤー別色分け</option>
           <option value="solid">単色 (シアン)</option>
         </select>
       </div>
@@ -115,28 +159,120 @@
       </div>
     </section>
 
-    <!-- 4. 手動ノイズ除去 -->
-    <section class="panel-section">
-      <div class="panel-title">手動ノイズ除去</div>
+    <!-- 3.5 レイヤー管理 (マルチレイヤー / 🔒ロック / 自動分類 / 状態保存) -->
+    <section class="panel-section sec-layer">
+      <div class="panel-title">📑 レイヤー管理 (マルチ / 🔒ロック / 自動分類)</div>
+      <label class="setting-item-toggle" style="padding: 2px 0;">
+        <span><input type="checkbox" id="chk-layer-normal" checked style="margin-right: 6px;">有効点群レイヤー全体</span>
+        <strong id="lbl-layer-normal" style="color: #38bdf8; font-size: 12px;">0 点</strong>
+      </label>
+      <label class="setting-item-toggle" style="padding: 2px 0;">
+        <span><input type="checkbox" id="chk-layer-noise" style="margin-right: 6px;">ノイズレイヤー (赤色)</span>
+        <strong id="lbl-layer-noise" style="color: #f87171; font-size: 12px;">0 点</strong>
+      </label>
+
+      <!-- マルチレイヤー一覧 (表示ON/OFF, 色変更, 🔒ロック切替) -->
+      <div id="custom-layers-list" style="display: flex; flex-direction: column; gap: 4px; margin: 4px 0; padding: 4px; background: rgba(15, 23, 42, 0.5); border-radius: 6px;"></div>
+
+      <!-- ① カスタムレイヤー追加 & 選択点の移動 -->
+      <div style="display: flex; gap: 4px; margin-top: 4px;">
+        <input type="text" id="input-custom-layer-name" placeholder="新規レイヤー名 (例: 構造物)" style="flex: 1; padding: 4px 8px; border-radius: 5px; border: 1px solid #334155; background: #0f172a; color: #f8fafc; font-size: 11px;">
+        <button class="btn" id="btn-add-custom-layer" style="padding: 4px 8px; font-size: 11px; background: #0f766e; white-space: nowrap;">＋追加</button>
+      </div>
+      <div style="display: flex; gap: 4px; margin-top: 4px;">
+        <select id="select-target-layer" style="flex: 1; padding: 4px 6px; font-size: 11px;"></select>
+        <button class="btn btn-primary" id="btn-move-to-layer" style="padding: 4px 8px; font-size: 11px; white-space: nowrap;">選択点を移動</button>
+      </div>
+
+      <!-- ⑥ 自動レイヤー振り分け (地面抽出 / 主平面検出) -->
+      <div class="btn-group-2" style="margin-top: 4px;">
+        <button class="btn" id="btn-auto-ground" style="font-size: 11px; padding: 5px 6px; background: #78350f;" title="局所最低標高グリッド法により地面を自動抽出して地面レイヤーへ分離">🏞️ 地面自動抽出</button>
+        <button class="btn" id="btn-auto-plane" style="font-size: 11px; padding: 5px 6px; background: #065f46;" title="RANSAC法により壁・床などの主平面を自動検出して平面レイヤーへ分離">🧱 主平面自動検出</button>
+      </div>
+
+      <div class="btn-group-2" style="margin-top: 4px;">
+        <button class="btn btn-primary" id="btn-restore-selected-noise" style="font-size: 11px; padding: 6px 8px;" title="選択したノイズ点のみ通常レイヤーへ戻します">選択ノイズ復元</button>
+        <button class="btn" id="btn-restore-all-noise" style="font-size: 11px; padding: 6px 8px;" title="すべてのノイズ点を通常レイヤーへ戻します">全ノイズ復元</button>
+      </div>
+
+      <!-- ⑤ レイヤー状態プロジェクト保存・再開 -->
+      <div class="btn-group-2" style="margin-top: 4px;">
+        <button class="btn" id="btn-save-layer-proj" style="font-size: 11px; padding: 5px 6px;" title="作業途中のレイヤー分け・ロック状態をJSON保存">💾 状態保存 (JSON)</button>
+        <button class="btn" id="btn-load-layer-proj" style="font-size: 11px; padding: 5px 6px;" title="保存したレイヤー状態JSONを読み込んで再開">📂 状態読込</button>
+        <input type="file" id="input-layer-proj-file" accept=".json" style="display: none;">
+      </div>
+    </section>
+
+    <!-- 4. 手動選択・直感ノイズ消去ツール -->
+    <section class="panel-section sec-select">
+      <div class="panel-title">🧹 直感ノイズ消去・選択 (ブラシ / 矩形 / 塊)</div>
+      <div class="btn-group-2" style="margin-bottom: 6px;">
+        <button class="btn" id="btn-clean-mode-side" style="font-size: 11px; padding: 6px 6px; background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; font-weight: 700;" title="ノイズ処理専用モードへワンタッチ切替 (Nキー)">🎯 ノイズ専用(N)</button>
+        <button class="btn" id="chk-instant-del" style="font-size: 11px; padding: 6px 6px; font-weight: 700;" title="ONにすると囲んだ瞬間にDelete不要で即ノイズ消去">⚡ 囲み即削除: OFF</button>
+      </div>
+      <!-- 操作モード・ワンクリック切替ショートカットボタン群 -->
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 6px;">
+        <button class="btn btn-active" id="side-btn-orbit" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="左ドラッグで視点回転 (Vキー)">🖐 回転(V)</button>
+        <button class="btn" id="side-btn-pan" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="左ドラッグで平行移動パン (Hキー / Vキー再押下)">✋ パン(H)</button>
+        <button class="btn" id="side-btn-brush" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="円形ブラシなぞり選択/消去 (Bキー)">🧹 ブラシ(B)</button>
+        <button class="btn" id="side-btn-rect" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="四角形ドラッグ選択 (Rキー)">⬜ 矩形(R)</button>
+        <button class="btn" id="side-btn-circle" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="円形ドラッグ選択 (Cキー)">⭕ 円形(C)</button>
+        <button class="btn" id="side-btn-poly" style="font-size: 11px; padding: 5px 4px; font-weight: 700;" title="多角形クリック選択 (Lキー)">⬠ 多角形(L)</button>
+      </div>
+      <div class="control-row">
+        <label class="control-label">選択形状</label>
+        <select id="select-shape-mode">
+          <option value="brush">🧹 ブラシ (円形なぞり選択/消去)</option>
+          <option value="rect" selected>🔲 矩形 (四角ドラッグ)</option>
+          <option value="circle">⭕ 円形 (中心からドラッグ)</option>
+          <option value="polygon">🔷 多角形 (頂点クリック / Enter確定)</option>
+        </select>
+      </div>
+      <div class="control-row">
+        <div class="control-label">
+          <span>ブラシ径 ([ / ]キー可)</span>
+          <span id="label-brush-radius">28 px</span>
+        </div>
+        <input type="range" id="slider-brush-radius" min="6" max="150" value="28">
+      </div>
       <button class="btn" id="btn-toggle-select" style="width: 100%;">
-        🔲 矩形選択モード: OFF
+        🔲 手動選択モード: OFF
       </button>
       <div class="btn-group-2">
+        <button class="btn" id="btn-confirm-polygon" disabled style="font-size: 11px; padding: 6px 8px; background: #0f766e;">多角形確定 (Enter)</button>
+        <button class="btn" id="btn-invert-selection" style="font-size: 11px; padding: 6px 8px;">選択反転 (I)</button>
+      </div>
+      <!-- スマートノイズ処理コマンド (大まかな塊処理 & 細かい局所・ヒゲ処理) -->
+      <div class="btn-group-2" style="margin-top: 4px;">
+        <button class="btn" id="btn-magic-wand" style="font-size: 11px; padding: 6px 6px; background: #4f46e5; font-weight: 700;" title="選択した点と3D空間で繋がっている塊全体を一発選択 (Gキー)">🪄 連結塊選択(G)</button>
+        <button class="btn" id="btn-local-clean" style="font-size: 11px; padding: 6px 6px; background: #0369a1; font-weight: 700;" title="選択範囲内だけに細かいSOR・エッジ飛散除去を適用">📦 選択内のみ除去</button>
+      </div>
+      <div class="btn-group-2" style="margin-top: 4px;">
+        <button class="btn" id="btn-keep-main-cluster" style="font-size: 11px; padding: 6px 6px; background: #0f766e; font-weight: 700;" title="主要な構造物の塊だけを残し、周囲の浮遊ノイズ塊を一括除去">🏝️ メイン塊のみ残す</button>
+        <button class="btn" id="btn-quick-edge-clean" style="font-size: 11px; padding: 6px 6px; background: #b45309; font-weight: 700;" title="構造物の輪郭エッジ飛散ノイズや表面の微細ヒゲを精密除去">🪶 エッジ・ヒゲ除去</button>
+      </div>
+      <div class="btn-group-2">
         <button class="btn btn-danger" id="btn-delete-selected">🗑️ 選択点を削除</button>
-        <button class="btn" id="btn-clear-selection">解除</button>
+        <button class="btn" id="btn-clear-selection">選択解除</button>
       </div>
       <div class="btn-group-2">
         <button class="btn" id="btn-undo" disabled>↩️ 元に戻す (Ctrl+Z)</button>
         <button class="btn" id="btn-redo" disabled>↪️ やり直し (Ctrl+Y)</button>
       </div>
       <p style="font-size: 11px; color: #64748b; line-height: 1.4;">
-        ※選択モードをONにして画面上をドラッグすると、四角く囲んだ点が赤くハイライトされ、Deleteキーで消去できます。
+        ※[Shift+選択]追加、[Ctrl+選択]除外、[I]反転、[G]連結塊選択。🔒ロックしたレイヤーは保護されます。
       </p>
     </section>
 
-    <!-- 5. 自動ノイズ除去 (SOR) -->
-    <section class="panel-section">
-      <div class="panel-title">自動ノイズ除去 (SOR)</div>
+    <!-- 5. 自動ノイズ除去 (大まか ⇄ 細かい プリセット & SOR) -->
+    <section class="panel-section sec-auto">
+      <div class="panel-title">🪄 自動ノイズ除去 (大まか ⇄ 細かい)</div>
+      <div style="font-size: 11px; color: #cbd5e1; font-weight: 600; margin-bottom: 4px;">🎚️ ワンクリック・プリセット:</div>
+      <div style="display: flex; gap: 4px; margin-bottom: 8px;">
+        <button class="btn" id="btn-preset-rough" style="flex: 1; font-size: 11px; padding: 5px 4px; background: #065f46; font-weight: 700;" title="浮遊する大きな塊や遠方ゴミを大まかに除去する設定">🟢 大まか</button>
+        <button class="btn" id="btn-preset-std" style="flex: 1; font-size: 11px; padding: 5px 4px; background: #1e40af; font-weight: 700;" title="標準バランス設定">🟡 標準</button>
+        <button class="btn" id="btn-preset-fine" style="flex: 1; font-size: 11px; padding: 5px 4px; background: #9a3412; font-weight: 700;" title="表面の微細ヒゲやエッジ飛び点を細かく除去する設定">🟠 細かい</button>
+      </div>
       <div class="control-row">
         <div class="control-label">
           <span>近傍探索点数 (k)</span>
@@ -152,25 +288,101 @@
         <input type="range" id="slider-sor-std" min="0.5" max="4.0" step="0.1" value="2.0">
       </div>
       <button class="btn btn-success" id="btn-run-sor" style="width: 100%;">⚡ 自動ノイズ除去を実行</button>
+      <!-- 自動除去用 1つ戻る/進むボタン -->
+      <div class="btn-group-2" style="margin-top: 4px;">
+        <button class="btn btn-outline" id="btn-auto-undo" disabled style="font-size: 11px; padding: 5px 6px;" title="直前の自動除去を1段階取り消す">◀ 1つ戻る (Ctrl+Z)</button>
+        <button class="btn btn-outline" id="btn-auto-redo" disabled style="font-size: 11px; padding: 5px 6px;" title="取り消した自動除去をやり直す">1つ進む ▶ (Ctrl+Y)</button>
+      </div>
     </section>
 
     <!-- 6. 保存・エクスポート -->
-    <section class="panel-section" style="border-bottom: none;">
-      <div class="panel-title">エクスポート</div>
-      <button class="btn btn-primary" id="btn-export-ply" style="width: 100%;">💾 編集後データをダウンロード (PLY)</button>
+    <section class="panel-section sec-file" style="border-bottom: none;">
+      <div class="panel-title">エクスポート (レイヤー別・分割出力対応)</div>
+      <div class="control-row" style="margin-bottom: 6px;">
+        <label class="control-label">出力モード</label>
+        <select id="select-export-mode">
+          <option value="normal" selected>有効レイヤー統合 (ノイズ除外)</option>
+          <option value="visible">現在表示ONのレイヤーのみ</option>
+          <option value="single_layer">選択中の対象レイヤー単体のみ</option>
+          <option value="noise_only">ノイズレイヤーのみ (除去点確認用)</option>
+          <option value="split_all">全レイヤーを別々のPLYへ一括分割出力</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="btn-export-ply" style="width: 100%;">💾 点群をダウンロード (PLY)</button>
     </section>
   </aside>
 
-  <!-- 画面下部 シークバー & ガイド -->
-  <footer class="bottom-bar">
+  <!-- ★ 柱②: 3Dビュー選択時フローティング・アクションバー -->
+  <div id="bottom-overlay-bar" class="bottom-overlay-bar" style="display: none;">
+    <div class="floating-badge" id="floating-sel-badge">✨ 0 点を選択中:</div>
+    <button class="btn btn-danger btn-sm" id="floating-btn-delete" title="選択した点をノイズレイヤーへ移動 (Del)">🗑️ ノイズ削除(Del)</button>
+    <button class="btn btn-sm" id="floating-btn-wand" style="background: #4f46e5;" title="選択点と3Dで繋がっている塊全体を一発選択 (G)">🪄 連結塊選択(G)</button>
+    <button class="btn btn-sm" id="floating-btn-local-clean" style="background: #0369a1;" title="選択範囲内だけに細かいノイズ除去を適用">📦 選択内のみ除去</button>
+    <button class="btn btn-primary btn-sm" id="floating-btn-move" title="選択した点を指定レイヤーへ移動">📁 レイヤー移動</button>
+    <button class="btn btn-outline btn-sm" id="floating-btn-restore" title="選択したノイズ点を通常レイヤーへ復元">♻️ 選択ノイズ復元</button>
+    <button class="btn btn-outline btn-sm" id="floating-btn-invert" title="選択を反転 (I)">🔄 反転(I)</button>
+    <button class="btn btn-outline btn-sm" id="floating-btn-clear" title="選択を解除 (Esc)">✖️ 解除(Esc)</button>
+  </div>
+
+  <!-- ★ 柱④: ピル型トースト通知ポップアップ -->
+  <div id="toast-pill" class="toast-pill"></div>
+
+  <!-- ★ 柱④: 右クリック文脈メニュー -->
+  <div id="context-menu" class="context-menu" style="display: none;">
+    <div class="ctx-header" id="ctx-header-title">点群エディタ 操作メニュー</div>
+    <div class="ctx-item" id="ctx-item-delete">🗑️ 選択点をノイズへ削除 (Del)</div>
+    <div class="ctx-item" id="ctx-item-wand">🪄 選択点から3D連結塊を一括選択 (G)</div>
+    <div class="ctx-submenu-parent" id="ctx-parent-move">
+      <div class="ctx-item">📁 選択点をレイヤーへ移動 ▶</div>
+      <div class="ctx-submenu" id="ctx-submenu-layers"></div>
+    </div>
+    <div class="ctx-item" id="ctx-item-restore">♻️ 選択内のノイズ点を復元</div>
+    <div class="ctx-item" id="ctx-item-invert">🔄 選択を反転 (I)</div>
+    <div class="ctx-item" id="ctx-item-clear">✖️ 選択を解除 (Esc)</div>
+    <div class="ctx-divider"></div>
+    <div class="ctx-item" id="ctx-item-keep-main">🏝️ メイン塊のみ残す (浮遊塊を一括除去)</div>
+    <div class="ctx-item" id="ctx-item-edge-clean">🪶 表面・輪郭のエッジヒゲ除去</div>
+    <div class="ctx-divider"></div>
+    <div class="ctx-item" id="ctx-mode-orbit">🖐 視点回転モード (V)</div>
+    <div class="ctx-item" id="ctx-mode-pan">✋ パン平行移動モード (H / V)</div>
+    <div class="ctx-item" id="ctx-mode-brush">🧹 ブラシ選択/消去モード (B)</div>
+    <div class="ctx-item" id="ctx-mode-rect">⬜ 矩形選択モード (R)</div>
+    <div class="ctx-item" id="ctx-mode-circle">⭕ 円形選択モード (C)</div>
+    <div class="ctx-item" id="ctx-mode-poly">⬠ 多角形選択モード (L)</div>
+    <div class="ctx-item" id="ctx-mode-measure">📐 距離計測モード (M)</div>
+    <div class="ctx-divider"></div>
+    <div class="ctx-item" id="ctx-view-fit">🎯 全体表示 (Fit / F)</div>
+    <div class="ctx-item" id="ctx-view-proj">📐 透視 ⇄ 正射影切替 (P)</div>
+    <div class="ctx-item" id="ctx-item-undo">↩️ 元に戻す (Ctrl+Z)</div>
+    <div class="ctx-item" id="ctx-item-redo">↪️ やり直し (Ctrl+Y)</div>
+  </div>
+
+  <!-- 画面下部 XYZ 3軸断面シークスライサー & ボックスクロップ (シーク基点・厚み指定対応) -->
+  <footer class="bottom-bar" style="min-width: 660px;">
     <div class="seek-container">
-      <span style="font-size: 12px; font-weight: 600; white-space: nowrap;">📐 高さ (Z) シーク断面:</span>
-      <input type="range" id="slider-seek-min-z" style="flex: 1;" title="下限Z">
-      <input type="range" id="slider-seek-max-z" style="flex: 1;" title="上限Z">
-      <button class="btn" id="btn-reset-seek" style="padding: 4px 10px; font-size: 11px;">全域表示</button>
+      <span style="font-size: 12px; font-weight: 600; white-space: nowrap;">📐 断面:</span>
+      <select id="select-seek-axis" style="width: 96px; padding: 4px 6px; font-size: 11px;">
+        <option value="z" selected>Z軸 (高さ)</option>
+        <option value="x">X軸 (左右)</option>
+        <option value="y">Y軸 (奥行)</option>
+      </select>
+      <select id="select-seek-origin-mode" style="width: 145px; padding: 4px 6px; font-size: 11px;" title="今シークしている位置(基点)からの断面の切り方">
+        <option value="center" selected>🔄 シーク基点 ±厚み/2</option>
+        <option value="plus">➕ 基点 〜 +厚み</option>
+        <option value="minus">➖ -厚み 〜 基点</option>
+        <option value="range">↔️ 下限・上限スライダー</option>
+      </select>
+      <span style="font-size: 11px; color: #cbd5e1; white-space: nowrap;">厚み:</span>
+      <input type="number" id="input-seek-thickness" value="2.0" min="0.02" max="5000" step="0.1" style="width: 62px; padding: 3px 5px; font-size: 11px; border-radius: 5px; border: 1px solid #334155; background: #0f172a; color: #38bdf8; font-weight: 700;" title="断面スライスの厚み (m)">
+      <button class="btn btn-outline" id="btn-seek-from-current" style="padding: 4px 8px; font-size: 11px; white-space: nowrap;" title="現在見ているカメラ注視点（または選択点群）をシーク基点にセット">🎯 現在位置を基点に</button>
+      <input type="range" id="slider-seek-min-z" style="flex: 1;" title="シーク基点位置 (または下限)">
+      <input type="range" id="slider-seek-max-z" style="flex: 1;" title="選択軸の上限">
+      <span id="label-seek-range" style="font-size: 11px; color: #38bdf8; white-space: nowrap; min-width: 135px; text-align: right;">全域</span>
+      <button class="btn" id="btn-crop-section" style="padding: 4px 10px; font-size: 11px; background: #7c2d12; white-space: nowrap;" title="断面ボックスの外側にある通常点を一括でノイズレイヤーへ移動">✂️ 断面外クロップ</button>
+      <button class="btn" id="btn-reset-seek" style="padding: 4px 10px; font-size: 11px; white-space: nowrap;">全域解除</button>
     </div>
     <div class="help-text">
-      操作方法: [P] 投影切替(透視/平行) | [F] 全体フィット | [WASD] 移動 | [M] 距離計測 | [ダブルクリック] 中心移動 | [左ドラッグ] 回転
+      操作: [P]投影切替 | [F]全体フィット | [WASD]移動 | [M]距離計測 | [I]選択反転 | [Shift+選択]追加 | [Enter]多角形確定
     </div>
   </footer>
 

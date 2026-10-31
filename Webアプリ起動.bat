@@ -1,22 +1,24 @@
 @echo off
-chcp 65001 > nul
+setlocal enabledelayedexpansion
+title E57 Web Point Cloud Viewer
 cd /d "%~dp0"
 
 echo ========================================================
-echo   Web版 3D点群エディタ & ノイズ除去ツールを起動中...
+echo  Starting Web Point Cloud Viewer ^(http://localhost:8080/^)...
 echo ========================================================
-echo.
-echo ブラウザが自動的に開きます。
-echo 終了するときはこの黒い画面を閉じてください。
-echo.
 
-rem ブラウザを自動で開く
 start http://localhost:8080/
 
-rem Python標準の内蔵Webサーバーを起動
-python -m http.server 8080
-if %ERRORLEVEL% NEQ 0 (
-    "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe" -m http.server 8080
+set "PY_EXE="
+for /d %%D in ("%LOCALAPPDATA%\Python\pythoncore-*") do (
+    if exist "%%~fD\python.exe" set "PY_EXE=%%~fD\python.exe"
 )
+if not defined PY_EXE (
+    for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+        if exist "%%~fD\python.exe" set "PY_EXE=%%~fD\python.exe"
+    )
+)
+if not defined PY_EXE set "PY_EXE=python"
 
+"!PY_EXE!" -m http.server 8080
 pause

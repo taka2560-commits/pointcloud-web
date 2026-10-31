@@ -11,6 +11,7 @@ from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 from core.filters import (
     filter_statistical_outlier,
     filter_radius_outlier,
+    filter_isolated_clusters,
     filter_distance,
     filter_intensity,
     voxel_downsample_indices,
@@ -83,12 +84,45 @@ class TestPointCloudCore(unittest.TestCase):
         self.assertLess(len(inliers_idx), 1050)
         self.assertGreater(len(inliers_idx), 700)
 
+    def test_filter_isolated_clusters(self):
+        """孤立クラスタ（浮遊する小塊ノイズ）除去フィルタのテスト"""
+        # 原点付近の密な本体クラスタ(200点)と、離れた位置にある15点の浮遊塊ノイズを作成
+        np.random.seed(123)
+        main_cluster = np.random.normal(loc=0.0, scale=0.1, size=(200, 3))
+        floating_blob = np.random.normal(loc=10.0, scale=0.05, size=(15, 3))
+        pts = np.vstack([main_cluster, floating_blob]).astype(np.float64)
+
+        # 最小クラスタ点数30点でDBSCANを実行すると、15点の浮遊塊ノイズが丸ごと除去される
+        keep_idx = filter_isolated_clusters(pts, eps=0.5, min_cluster_points=30)
+        self.assertEqual(len(keep_idx), 200)
+        self.assertTrue(np.all(keep_idx < 200))
+
     def test_filter_distance(self):
         """距離フィルタのテスト"""
         # 原点から2m以内の点を抽出
         indices = filter_distance(self.all_points, min_dist=0.0, max_dist=2.0)
         self.assertGreater(len(indices), 0)
         self.assertLess(len(indices), 1050)
+
+    def test_apply_filters_to_points_with_intensity_and_cluster(self):
+        """apply_filters_to_points における反射強度および孤立クラスタフィルタ統合テスト"""
+        config = FilterConfig(
+            use_sor=False,
+            use_cluster_filter=True,
+            cluster_eps=1.5,
+            cluster_min_points=30,
+            use_intensity_filter=True,
+            min_intensity=0.3,
+            max_intensity=0.8,
+        )
+        processor = PointCloudProcessor(config=config)
+        keep_idx, remove_idx = processor.apply_filters_to_points(
+            self.all_points, intensities=self.intensities
+        )
+        self.assertEqual(len(keep_idx) + len(remove_idx), len(self.all_points))
+        self.assertGreater(len(keep_idx), 0)
+        self.assertTrue(np.all(self.intensities[keep_idx] >= 0.3))
+        self.assertTrue(np.all(self.intensities[keep_idx] <= 0.8))
 
     def test_voxel_downsample(self):
         """ボクセル間引きのテスト"""
