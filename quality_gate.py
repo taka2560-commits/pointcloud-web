@@ -36,6 +36,14 @@ from typing import List, Tuple
 
 import numpy as np
 
+# Windows環境(cp932)でのUnicodeEncodeError(絵文字等)クラッシュ防止
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def print_banner(title: str) -> None:
     print("\n" + "=" * 68)
