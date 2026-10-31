@@ -68,7 +68,11 @@ from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS, get_theme_qss
-from gui.ui_mode import get_ui_mode, UI_MODE_MODERN, UI_MODE_CLASSIC, set_saved_ui_mode, get_saved_ui_mode
+from gui.ui_mode import (
+    get_ui_mode, UI_MODE_MODERN, UI_MODE_CLASSIC, set_saved_ui_mode, get_saved_ui_mode,
+    get_ui_theme, set_saved_ui_theme, get_saved_ui_theme,
+    get_saved_motion_enabled, set_saved_motion_enabled,
+)
 
 
 
@@ -203,11 +207,12 @@ class MainWindow(QMainWindow):
 
         # UI モード（新UI / 従来UI）。従来UIは改修前の見た目・配置をそのまま残す安全弁（gui/ui_mode.py）
         self.ui_mode = get_ui_mode()
+        self.ui_theme = get_ui_theme() if self.ui_mode == UI_MODE_MODERN else "dark"
         _app = QApplication.instance()
         if self.ui_mode == UI_MODE_MODERN:
             # 新UIはダイアログ・ツールチップ・メッセージボックスも含めて統一するためアプリ全体に適用
             if _app is not None:
-                _app.setStyleSheet(get_theme_qss(UI_MODE_MODERN))
+                _app.setStyleSheet(get_theme_qss(UI_MODE_MODERN, self.ui_theme))
         else:
             if _app is not None:
                 _app.setStyleSheet("")
@@ -2922,6 +2927,26 @@ class MainWindow(QMainWindow):
         self.combo_ui_mode.currentIndexChanged.connect(self._on_ui_mode_combo_changed)
         l_sys.addWidget(self.combo_ui_mode, 5, 1)
 
+        # 新UIのテーマ（ダーク / 軌跡（明））。次回起動時に適用
+        l_sys.addWidget(QLabel("テーマ (新UI):"), 6, 0)
+        self.combo_ui_theme = QComboBox()
+        self.combo_ui_theme.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_ui_theme.setMinimumContentsLength(8)
+        self.combo_ui_theme.addItem("ダーク (標準)", "dark")
+        self.combo_ui_theme.addItem("軌跡 (明るい地・黒い帯)", "kiseki")
+        _theme_idx = self.combo_ui_theme.findData(get_saved_ui_theme())
+        self.combo_ui_theme.setCurrentIndex(max(0, _theme_idx))
+        self.combo_ui_theme.setToolTip("新UIの配色テーマ（次回起動時に適用）。環境変数 E57_UI_THEME=kiseki / 起動引数 --theme=kiseki でも指定できます。")
+        self.combo_ui_theme.currentIndexChanged.connect(self._on_ui_theme_combo_changed)
+        l_sys.addWidget(self.combo_ui_theme, 6, 1)
+
+        # 新UIのアニメーション（押下・通知・切替の短い動き）。即時反映
+        self.chk_ui_motion = QCheckBox("アニメーション (押下・通知・切替の動き)")
+        self.chk_ui_motion.setChecked(get_saved_motion_enabled())
+        self.chk_ui_motion.setToolTip("新UIの短いアニメーションを使います。OFF にすると全て即時に切り替わります（低スペック機・動きが苦手な方向け）。")
+        self.chk_ui_motion.toggled.connect(self._on_ui_motion_toggled)
+        l_sys.addWidget(self.chk_ui_motion, 7, 0, 1, 2)
+
         tab_sub.addTab(tab_sys, "⚙️ システム")
 
         # 3. ショートカット一覧タブ
@@ -3025,6 +3050,24 @@ class MainWindow(QMainWindow):
             label = "新UI" if mode == UI_MODE_MODERN else "従来UI"
             self.show_toast(f"UIスタイルを「{label}」に設定しました（次回起動時に適用）")
             self.log_text.append(f"UIスタイルを「{label}」に変更（次回起動時に適用）")
+
+    def _on_ui_theme_combo_changed(self, index: int):
+        """新UIテーマの選択を保存（次回起動時に適用）"""
+        theme = self.combo_ui_theme.currentData()
+        if theme:
+            set_saved_ui_theme(theme)
+            self.show_toast(f"テーマを「{self.combo_ui_theme.currentText()}」に設定しました（次回起動時に適用）")
+
+    def _on_ui_motion_toggled(self, checked: bool):
+        """新UIのアニメーション ON/OFF を保存し、即時に反映"""
+        set_saved_motion_enabled(bool(checked))
+        try:
+            from gui.motion import set_motion_enabled
+
+            set_motion_enabled(bool(checked))
+        except Exception:
+            pass
+        self.show_toast("アニメーションを" + ("有効" if checked else "無効") + "にしました")
 
     def _on_undo_limit_changed(self, index: int):
         # 0 は「無制限」の意味なので `or 50` で潰してはならない（None のときだけ既定値 50）

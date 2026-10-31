@@ -49,6 +49,7 @@
 
 [ルール7] UI は新UI（modern）と従来UI（classic）を両立させる（詳細は AI_HANDOVER.md §2-⑦）
   ・新UIは gui/modern_ui.py が従来UIに後付けする方式。従来UIのコードと DARK_THEME_QSS は削除・変更しない。
+  ・新UIの配色はテーマ（dark / kiseki）としてトークンだけを分け、モーションは gui/motion.py に集約する（詳細は docs/DESIGN_STYLE_PLAN.md §9・§10）。
   ・新UIの色・文字サイズ・角丸は gui/design_tokens.py でのみ変更。インライン QSS と絵文字ラベルは追加しない。
   ・不具合時は 起動引数 --classic-ui / 環境変数 E57_UI_MODE=classic / 設定「UIスタイル」で改修前に戻せる。
   ・改修直前の main には Git タグ before-ui-redesign-2026-10-31 を付与済み。

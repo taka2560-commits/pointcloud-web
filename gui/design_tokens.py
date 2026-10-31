@@ -5,11 +5,16 @@
 色・文字サイズ・角丸・間隔の唯一の定義場所。QSS はここから生成する（gui/styles.py 経由で取得）。
 設計方針は docs/DESIGN_STYLE_PLAN.md を参照。
 
+テーマ:
+  - "dark"   : 既定。slate / sky 系のダーク（Web 版と同系統）
+  - "kiseki" : 「Stand 軌跡」デザインシステム（https://claude.ai/artifact/8jT43JDYDHk9hRCaZqHFR7）の見た目を
+               本ツールの役割に写したライトテーマ。明るい地に墨の文字、箱の頭は黒い帯、主ボタンは深緑、
+               選択中は信号赤、角丸 3px・影なし、数字は等幅。
+
 ルール:
-  - 色は「役割」で選ぶ（primary / danger / warning / success / info）。機能ごとの色分けはしない。
+  - 色は「役割」で選ぶ（primary / danger / warning / success / info / tone）。機能ごとの色分けは tone で控えめに。
   - 文字サイズは 12 / 13 / 15 / 18 の 4 段のみ（10〜11px は使わない）。
-  - 角丸は 4 / 6 / 10 の 3 種、間隔は 4 の倍数。
-  - セレクタ無しのインライン QSS は書かない（子孫へ伝播して事故になる）。役割は setProperty("role", ...) で表現する。
+  - 角丸・間隔はトークンから。セレクタ無しのインライン QSS は書かない。役割は setProperty("role"/"tone", ...) で表現する。
 """
 
 import os
@@ -32,13 +37,39 @@ def icon_url(name: str) -> str:
     return f'url("{path}")'
 
 
+# 機能別の控えめな色分け（tone）。値: (背景, 文字, 枠, hover 背景, ON/pressed の塗り)
+# 意味: violet=塊の選択・壁合わせ, teal=精密除去, amber=粗取り・地面, green=復元・平面・粗取りプリセット, blue=標準・移動
+TONES_DARK: Dict[str, Tuple[str, str, str, str, str]] = {
+    "violet": ("#2e1065", "#e9d5ff", "#7c3aed", "#3b1a7a", "#7c3aed"),
+    "teal":   ("#042f2e", "#99f6e4", "#0d9488", "#064e4a", "#0d9488"),
+    "amber":  ("#3b2a06", "#fde68a", "#d97706", "#4d3608", "#d97706"),
+    "green":  ("#052e16", "#bbf7d0", "#16a34a", "#0a3d1f", "#16a34a"),
+    "blue":   ("#0c2a3f", "#bae6fd", "#0284c7", "#10364f", "#0284c7"),
+    "rose":   ("#4c0519", "#fecdd3", "#e11d48", "#5e0a22", "#e11d48"),
+}
+# 軌跡（明）: 薄い地に濃い文字・濃い枠。ON は濃い塗りに白字
+TONES_KISEKI: Dict[str, Tuple[str, str, str, str, str]] = {
+    "violet": ("#ece6f7", "#4a2a8f", "#5e35b1", "#e0d6f2", "#5e35b1"),
+    "teal":   ("#d9edde", "#0a5c42", "#007a55", "#cbe5d3", "#007a55"),
+    "amber":  ("#fdf8d1", "#6a4700", "#7a5200", "#f7efb8", "#7a5200"),
+    "green":  ("#d9edde", "#19663f", "#19663f", "#cbe5d3", "#19663f"),
+    "blue":   ("#d6e3f8", "#1d4fa8", "#1d5fa8", "#c7d8f3", "#1d5fa8"),
+    "rose":   ("#f7dada", "#9a2f22", "#9a2f22", "#f2c9c9", "#9a2f22"),
+}
+TONES = TONES_DARK  # 後方互換
+
+
 @dataclass(frozen=True)
 class Tokens:
+    name: str = "dark"
+    is_light: bool = False
     # 背景
     bg_canvas: str = "#0f172a"
     bg_surface: str = "#172033"
     bg_elevated: str = "#1e293b"
     bg_input: str = "#0b1220"
+    hover_bg: str = "#263247"
+    pressed_bg: str = "#0f1a2e"
     # 枠線
     border_subtle: str = "#263247"
     border_strong: str = "#3b4a63"
@@ -47,18 +78,50 @@ class Tokens:
     text_secondary: str = "#a3b1c6"
     text_disabled: str = "#6b7a90"
     text_on_accent: str = "#ffffff"
+    heading_text: str = "#38bdf8"          # 箱の見出し
+    group_header_bg: str = "transparent"   # 箱の頭（kiseki では黒い帯）
+    # 帯（箱の頭・上部/下部バー・ステータスバー）
+    band_bg: str = "#1e293b"
+    band_text: str = "#e2e8f0"
+    band_muted: str = "#a3b1c6"
+    band_border: str = "#263247"
     # アクセント
     accent_base: str = "#0ea5e9"
-    accent_strong: str = "#0369a1"   # 白文字で 4.5:1 以上を満たす濃さ（#0284c7 は 4.1 で不足）
+    accent_strong: str = "#0369a1"
     accent_soft: str = "#38bdf8"
     accent_tint: str = "rgba(14, 165, 233, 0.14)"
+    # 主ボタン
+    primary_bg: str = "#0ea5e9"
+    primary_bg_hover: str = "#38bdf8"
+    primary_bg_pressed: str = "#0284c7"
+    primary_text: str = "#06283d"
+    primary_border: str = "#bae6fd"
+    # 選択中 (ON / checked)
+    on_bg: str = "#0ea5e9"
+    on_text: str = "#06283d"
+    on_border: str = "#bae6fd"
     # 意味色
     danger_base: str = "#ef4444"
     danger_strong: str = "#b91c1c"
+    danger_hover: str = "#dc2626"
     warning_base: str = "#f59e0b"
     success_base: str = "#22c55e"
+    success_hover: str = "#4ade80"
     success_text: str = "#052e16"
     info_base: str = "#38bdf8"
+    # トースト（帯の上の文字色: 種類別）
+    toast_bg: str = "#1e293b"
+    toast_info: str = "#bae6fd"
+    toast_success: str = "#86efac"
+    toast_warning: str = "#fde68a"
+    toast_error: str = "#fca5a5"
+    # 選択バッジ（選択中の強調）
+    badge_bg: str = "#3b2a06"
+    badge_text: str = "#fde68a"
+    badge_border: str = "#f59e0b"
+    # 空状態カード
+    card_bg: str = "rgba(23, 32, 51, 0.92)"
+    card_border: str = "#3b4a63"
     # タイポグラフィ
     font_ui: str = '"Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
     font_mono: str = '"Cascadia Mono", "Consolas", monospace'
@@ -70,14 +133,85 @@ class Tokens:
     radius_sm: int = 4
     radius_md: int = 6
     radius_lg: int = 10
+    radius_band: int = 6     # 帯（箱の頭）の角
     control_h_sm: int = 28
     control_h_md: int = 32
     control_h_lg: int = 36
     sidebar_min: int = 320
-    sidebar_default: int = 380
+    sidebar_default: int = 400
+    tones: Dict[str, Tuple[str, str, str, str, str]] = field(default_factory=lambda: dict(TONES_DARK))
 
 
 TOKENS = Tokens()
+
+# 「Stand 軌跡」の見た目を本ツールの役割に写したライトテーマ
+KISEKI_TOKENS = Tokens(
+    name="kiseki",
+    is_light=True,
+    bg_canvas="#e7efec",        # ground
+    bg_surface="#f7fbf9",       # panel
+    bg_elevated="#ffffff",      # paper
+    bg_input="#ffffff",
+    hover_bg="#eef4f1",
+    pressed_bg="#dfe6e3",       # well
+    border_subtle="#cfd8d4",    # line (不透明化)
+    border_strong="#5c6964",    # line-strong
+    text_primary="#0f1a17",     # ink
+    text_secondary="#4a534e",   # muted
+    text_disabled="#6f7a75",
+    text_on_accent="#ffffff",
+    heading_text="#dfe9e5",     # bar-text（見出しは黒い帯の上）
+    group_header_bg="#0b1110",  # 箱の頭は黒い帯（frame）
+    band_bg="#0b1110",          # frame
+    band_text="#dfe9e5",        # bar-text
+    band_muted="#9fb3ac",       # bar-muted
+    band_border="#0b1110",
+    accent_base="#c0392b",      # signal
+    accent_strong="#9a2f22",    # loss
+    accent_soft="#1d5fa8",      # rank2（リンク・焦点）
+    accent_tint="rgba(192, 57, 43, 0.10)",
+    primary_bg="#004c2c",       # cta
+    primary_bg_hover="#0a6a40",
+    primary_bg_pressed="#003a21",
+    primary_text="#ffffff",
+    primary_border="#004c2c",
+    on_bg="#c0392b",            # signal: 選んだ物
+    on_text="#ffffff",
+    on_border="#9a2f22",
+    danger_base="#c0392b",
+    danger_strong="#9a2f22",
+    danger_hover="#b3362a",
+    warning_base="#7a5200",
+    success_base="#19663f",     # gain
+    success_hover="#1f7a4c",
+    success_text="#ffffff",
+    info_base="#1d5fa8",
+    toast_bg="#0b1110",
+    toast_info="#dfe9e5",
+    toast_success="#5cd69c",    # bar-gain
+    toast_warning="#eadc62",    # bar-accent
+    toast_error="#e27b6c",      # bar-loss
+    badge_bg="#0b1110",
+    badge_text="#eadc62",
+    badge_border="#0b1110",
+    card_bg="rgba(247, 251, 249, 0.96)",
+    card_border="#5c6964",
+    font_ui='"Noto Sans JP", "Yu Gothic UI", "Meiryo UI", sans-serif',
+    font_mono='"IBM Plex Mono", "Cascadia Mono", "Consolas", monospace',
+    radius_sm=3,
+    radius_md=3,
+    radius_lg=9,                # r-chip
+    radius_band=0,              # 帯は角丸なし
+    sidebar_default=430,        # Noto Sans JP は字幅が広いので少し広く
+    tones=dict(TONES_KISEKI),
+)
+
+THEMES: Dict[str, Tokens] = {"dark": TOKENS, "kiseki": KISEKI_TOKENS}
+THEME_LABELS: Dict[str, str] = {"dark": "ダーク（標準）", "kiseki": "軌跡（明）"}
+
+
+def get_tokens(theme: str = "dark") -> Tokens:
+    return THEMES.get(theme or "dark", TOKENS)
 
 
 # ----------------------------------------------------------------------------- コントラスト計算
@@ -103,7 +237,7 @@ def text_background_pairs(t: Tokens = TOKENS) -> Dict[str, Tuple[str, str, float
     テストで検証する「文字色 / 背景色 / 必要コントラスト比」の組。
     4.5 = 通常文字 (AA)、3.0 = 大きな文字・無効状態・UI 部品。
     """
-    return {
+    pairs = {
         "本文 / canvas": (t.text_primary, t.bg_canvas, 4.5),
         "本文 / surface": (t.text_primary, t.bg_surface, 4.5),
         "本文 / elevated": (t.text_primary, t.bg_elevated, 4.5),
@@ -111,20 +245,63 @@ def text_background_pairs(t: Tokens = TOKENS) -> Dict[str, Tuple[str, str, float
         "補足 / elevated": (t.text_secondary, t.bg_elevated, 4.5),
         "無効 / surface": (t.text_disabled, t.bg_surface, 3.0),
         "無効 / elevated": (t.text_disabled, t.bg_elevated, 3.0),
-        "見出し / surface": (t.accent_soft, t.bg_surface, 4.5),
-        "primary ボタン": (t.text_on_accent, t.accent_strong, 4.5),
+        "見出し / 箱の頭": (t.heading_text, t.bg_surface if t.group_header_bg == "transparent" else t.group_header_bg, 4.5),
+        "帯の文字": (t.band_text, t.band_bg, 4.5),
+        "帯の補足": (t.band_muted, t.band_bg, 4.5),
+        "primary ボタン": (t.primary_text, t.primary_bg, 4.5),
+        "primary ボタン hover": (t.primary_text, t.primary_bg_hover, 4.5),
+        "選択中(ON)": (t.on_text, t.on_bg, 4.5),
         "danger ボタン": (t.text_on_accent, t.danger_strong, 4.5),
         "success 実行ボタン": (t.success_text, t.success_base, 4.5),
         "入力欄": (t.text_primary, t.bg_input, 4.5),
-        "警告 HUD 文字": (t.warning_base, t.bg_elevated, 3.0),
+        "トースト info": (t.toast_info, t.toast_bg, 4.5),
+        "トースト success": (t.toast_success, t.toast_bg, 4.5),
+        "トースト warning": (t.toast_warning, t.toast_bg, 4.5),
+        "トースト error": (t.toast_error, t.toast_bg, 4.5),
+        "選択バッジ": (t.badge_text, t.badge_bg, 4.5),
     }
+    for name, vals in t.tones.items():
+        pairs[f"tone {name}"] = (vals[1], vals[0], 4.5)
+        pairs[f"tone {name} ON"] = (t.text_on_accent, vals[4], 3.0)
+    return pairs
 
 
 # ----------------------------------------------------------------------------- QSS 生成
+def _tone_qss(t: Tokens) -> str:
+    parts = []
+    for name, (bg, fg, border, hover, on_fill) in t.tones.items():
+        parts.append(
+            f"""
+QPushButton[tone="{name}"] {{
+    background-color: {bg};
+    color: {fg};
+    border: 1px solid {border};
+    font-size: {t.size_xs}px;
+    font-weight: 600;
+    padding: 4px 7px;
+}}
+QPushButton[tone="{name}"]:hover {{
+    background-color: {hover};
+}}
+QPushButton[tone="{name}"]:pressed, QPushButton[tone="{name}"]:checked {{
+    background-color: {on_fill};
+    color: #ffffff;
+    border: 1px solid #ffffff;
+}}
+QPushButton[tone="{name}"]:disabled {{
+    background-color: {t.bg_surface};
+    color: {t.text_disabled};
+    border-color: {t.border_subtle};
+}}"""
+        )
+    return "\n".join(parts)
+
+
 def build_modern_qss(t: Tokens = TOKENS) -> str:
     """新UIの QSS を生成する（QApplication 全体に適用する想定。ダイアログ・ツールチップも対象）"""
+    gl_bg_note = "/* light theme */" if t.is_light else "/* dark theme */"
     return f"""
-/* ===== 基本 ===== */
+/* ===== 基本 ({t.name}) ===== */ {gl_bg_note}
 QMainWindow, QDialog, QMessageBox, QFileDialog {{
     background-color: {t.bg_canvas};
     color: {t.text_primary};
@@ -146,8 +323,8 @@ QLabel[hint="true"], QLabel#hint {{
     font-size: {t.size_xs}px;
 }}
 QToolTip {{
-    background-color: {t.bg_elevated};
-    color: {t.text_primary};
+    background-color: {t.band_bg};
+    color: {t.band_text};
     border: 1px solid {t.border_strong};
     border-radius: {t.radius_sm}px;
     padding: 6px 8px;
@@ -158,7 +335,7 @@ QSplitter::handle {{
     width: 4px;
 }}
 QSplitter::handle:hover {{
-    background-color: {t.accent_strong};
+    background-color: {t.accent_base};
 }}
 
 /* ===== サイドバー・パネル ===== */
@@ -179,18 +356,23 @@ QGroupBox#collapsible_group {{
     margin-top: 2px;
     padding: 2px;
 }}
-QWidget#collapsible_content, QWidget#collapsible_header {{
+QWidget#collapsible_content {{
     background: transparent;
 }}
+QWidget#collapsible_header {{
+    background-color: {t.group_header_bg};
+    border-radius: {t.radius_band}px;
+}}
 QLabel#collapsible_title {{
-    color: {t.accent_soft};
+    color: {t.heading_text};
     font-size: {t.size_md}px;
     font-weight: 700;
+    background: transparent;
 }}
 QPushButton#collapsible_toggle {{
     background: transparent;
     border: none;
-    color: {t.text_secondary};
+    color: {t.band_muted};
     font-size: {t.size_xs}px;
     min-width: 22px;
     max-width: 22px;
@@ -198,9 +380,7 @@ QPushButton#collapsible_toggle {{
     padding: 0;
 }}
 QPushButton#collapsible_toggle:hover {{
-    color: {t.text_primary};
-    background-color: {t.accent_tint};
-    border-radius: {t.radius_sm}px;
+    color: {t.band_text};
 }}
 QGroupBox {{
     border: 1px solid {t.border_subtle};
@@ -208,7 +388,7 @@ QGroupBox {{
     margin-top: 10px;
     padding: 12px 8px 8px 8px;
     font-weight: 600;
-    color: {t.accent_soft};
+    color: {t.text_primary};
     background-color: {t.bg_surface};
 }}
 QGroupBox::title {{
@@ -230,16 +410,15 @@ QPushButton {{
     color: {t.text_primary};
     border: 1px solid {t.border_strong};
     border-radius: {t.radius_md}px;
-    padding: 4px 10px;
+    padding: 4px 7px;
     min-height: {t.control_h_sm - 10}px;
     font-weight: 600;
 }}
 QPushButton:hover {{
-    background-color: #263247;
-    border-color: #4b5b78;
+    background-color: {t.hover_bg};
 }}
 QPushButton:pressed {{
-    background-color: #0f1a2e;
+    background-color: {t.pressed_bg};
 }}
 QPushButton:focus {{
     border: 1px solid {t.accent_soft};
@@ -250,22 +429,25 @@ QPushButton:disabled {{
     border-color: {t.border_subtle};
 }}
 QPushButton:checked {{
-    background-color: {t.accent_strong};
-    color: {t.text_on_accent};
-    border-color: {t.accent_base};
+    background-color: {t.on_bg};
+    color: {t.on_text};
+    border: 1px solid {t.on_border};
+    font-weight: 700;
 }}
 
 QPushButton[role="primary"] {{
-    background-color: {t.accent_strong};
-    color: {t.text_on_accent};
-    border: 1px solid {t.accent_base};
+    background-color: {t.primary_bg};
+    color: {t.primary_text};
+    border: 1px solid {t.primary_border};
     min-height: {t.control_h_md - 10}px;
+    font-size: {t.size_sm + 1}px;
+    font-weight: 700;
 }}
 QPushButton[role="primary"]:hover {{
-    background-color: {t.accent_base};
+    background-color: {t.primary_bg_hover};
 }}
 QPushButton[role="primary"]:pressed {{
-    background-color: #075985;
+    background-color: {t.primary_bg_pressed};
 }}
 QPushButton[role="primary"]:disabled {{
     background-color: {t.bg_elevated};
@@ -276,17 +458,17 @@ QPushButton[role="primary"]:disabled {{
 QPushButton#execute_button {{
     background-color: {t.success_base};
     color: {t.success_text};
-    border: 1px solid #16a34a;
+    border: 1px solid {t.success_base};
     font-size: {t.size_md}px;
     font-weight: 700;
     min-height: {t.control_h_lg - 10}px;
     padding: 8px 16px;
 }}
 QPushButton#execute_button:hover {{
-    background-color: #4ade80;
+    background-color: {t.success_hover};
 }}
 QPushButton#execute_button:pressed {{
-    background-color: #16a34a;
+    background-color: {t.success_base};
 }}
 QPushButton#execute_button:disabled {{
     background-color: {t.bg_elevated};
@@ -302,7 +484,7 @@ QPushButton[role="outline"] {{
 }}
 QPushButton[role="outline"]:hover {{
     background-color: {t.accent_tint};
-    border-color: {t.accent_soft};
+    border-color: {t.accent_base};
 }}
 QPushButton[role="outline"]:disabled {{
     color: {t.text_disabled};
@@ -327,7 +509,7 @@ QPushButton[role="danger"] {{
     border: 1px solid {t.danger_base};
 }}
 QPushButton[role="danger"]:hover {{
-    background-color: #dc2626;
+    background-color: {t.danger_hover};
 }}
 QPushButton[role="danger"]:disabled {{
     background-color: {t.bg_elevated};
@@ -341,9 +523,10 @@ QPushButton[role="danger-toggle"] {{
     border: 1px solid {t.border_strong};
 }}
 QPushButton[role="danger-toggle"]:checked {{
-    background-color: {t.danger_strong};
+    background-color: {t.danger_hover};
     color: {t.text_on_accent};
-    border-color: {t.danger_base};
+    border: 1px solid {t.text_on_accent};
+    font-weight: 700;
 }}
 
 QPushButton[role="segment"] {{
@@ -351,19 +534,23 @@ QPushButton[role="segment"] {{
     color: {t.text_secondary};
     border: 1px solid {t.border_subtle};
     border-radius: {t.radius_md}px;
-    padding: 4px 8px;
+    padding: 4px 6px;
     font-size: {t.size_xs}px;
     font-weight: 600;
 }}
 QPushButton[role="segment"]:hover {{
-    background-color: #263247;
+    background-color: {t.hover_bg};
     color: {t.text_primary};
 }}
 QPushButton[role="segment"]:checked {{
-    background-color: {t.accent_strong};
-    color: {t.text_on_accent};
-    border: 1px solid {t.accent_base};
+    background-color: {t.on_bg};
+    color: {t.on_text};
+    border: 1px solid {t.on_border};
+    font-weight: 700;
 }}
+
+/* ===== 機能別の控えめな色分け（tone） ===== */
+{_tone_qss(t)}
 
 /* ===== 入力系 ===== */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
@@ -373,7 +560,8 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     padding: 4px 8px;
     color: {t.text_primary};
     min-height: {t.control_h_sm - 10}px;
-    selection-background-color: {t.accent_strong};
+    selection-background-color: {t.accent_base};
+    selection-color: {t.text_on_accent};
 }}
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border: 1px solid {t.accent_soft};
@@ -391,7 +579,7 @@ QComboBox::drop-down {{
     border-bottom-right-radius: {t.radius_sm}px;
 }}
 QComboBox::down-arrow {{
-    image: {icon_url("chevron-down.svg")};
+    image: {icon_url("chevron-down-light.svg" if t.is_light else "chevron-down.svg")};
     width: 12px;
     height: 12px;
 }}
@@ -399,8 +587,8 @@ QComboBox QAbstractItemView {{
     background-color: {t.bg_elevated};
     color: {t.text_primary};
     border: 1px solid {t.border_strong};
-    selection-background-color: {t.accent_strong};
-    selection-color: {t.text_on_accent};
+    selection-background-color: {t.on_bg};
+    selection-color: {t.on_text};
     outline: none;
 }}
 QSpinBox::up-button, QDoubleSpinBox::up-button,
@@ -419,14 +607,14 @@ QSpinBox::down-button, QDoubleSpinBox::down-button {{
 }}
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
 QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
-    background-color: #263247;
+    background-color: {t.hover_bg};
 }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-    image: {icon_url("chevron-up.svg")};
+    image: {icon_url("chevron-up-light.svg" if t.is_light else "chevron-up.svg")};
     width: 10px; height: 10px;
 }}
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-    image: {icon_url("chevron-down.svg")};
+    image: {icon_url("chevron-down-light.svg" if t.is_light else "chevron-down.svg")};
     width: 10px; height: 10px;
 }}
 
@@ -445,8 +633,8 @@ QCheckBox::indicator:hover {{
     border-color: {t.accent_soft};
 }}
 QCheckBox::indicator:checked {{
-    background-color: {t.accent_strong};
-    border-color: {t.accent_base};
+    background-color: {t.on_bg};
+    border-color: {t.on_border};
     image: {icon_url("check.svg")};
 }}
 QCheckBox::indicator:disabled {{
@@ -463,7 +651,7 @@ QSlider::groove:horizontal {{
     border-radius: 2px;
 }}
 QSlider::sub-page:horizontal {{
-    background: {t.accent_strong};
+    background: {t.on_bg};
     border-radius: 2px;
 }}
 QSlider::handle:horizontal {{
@@ -471,12 +659,11 @@ QSlider::handle:horizontal {{
     height: 16px;
     margin: -6px 0;
     border-radius: 8px;
-    background: {t.text_primary};
-    border: 2px solid {t.accent_strong};
+    background: {t.bg_elevated};
+    border: 2px solid {t.on_bg};
 }}
 QSlider::handle:horizontal:hover {{
-    background: #ffffff;
-    border-color: {t.accent_base};
+    border-color: {t.accent_soft};
 }}
 QSlider::handle:horizontal:disabled {{
     background: {t.text_disabled};
@@ -503,8 +690,9 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{
     background-color: {t.bg_elevated};
-    color: {t.accent_soft};
+    color: {t.text_primary};
     font-weight: 700;
+    border-bottom: 2px solid {t.on_bg};
 }}
 QTabBar::tab:hover:!selected {{
     color: {t.text_primary};
@@ -523,7 +711,7 @@ QMenuBar::item {{
 }}
 QMenuBar::item:selected {{
     background-color: {t.accent_tint};
-    color: {t.accent_soft};
+    color: {t.text_primary};
 }}
 QMenu {{
     background-color: {t.bg_elevated};
@@ -537,8 +725,8 @@ QMenu::item {{
     border-radius: {t.radius_sm}px;
 }}
 QMenu::item:selected {{
-    background-color: {t.accent_strong};
-    color: {t.text_on_accent};
+    background-color: {t.on_bg};
+    color: {t.on_text};
 }}
 QMenu::item:disabled {{
     color: {t.text_disabled};
@@ -550,18 +738,19 @@ QMenu::separator {{
 }}
 
 QStatusBar {{
-    background-color: {t.bg_surface};
-    color: {t.text_primary};
-    border-top: 1px solid {t.border_subtle};
+    background-color: {t.band_bg};
+    color: {t.band_text};
+    border-top: 1px solid {t.band_border};
     font-size: {t.size_xs}px;
 }}
 QStatusBar::item {{
     border: none;
 }}
 QStatusBar QLabel {{
-    color: {t.text_primary};
+    color: {t.band_text};
     font-size: {t.size_xs}px;
     padding: 0 6px;
+    background: transparent;
 }}
 
 QProgressBar {{
@@ -572,11 +761,12 @@ QProgressBar {{
     color: {t.text_primary};
     font-size: {t.size_xs}px;
     font-weight: 600;
+    font-family: {t.font_mono};
     min-height: 16px;
     max-height: 18px;
 }}
 QProgressBar::chunk {{
-    background-color: {t.accent_strong};
+    background-color: {t.on_bg};
     border-radius: 3px;
 }}
 
@@ -602,10 +792,10 @@ QScrollBar::handle:vertical {{
     border-radius: 5px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: #4b5b78;
+    background: {t.text_secondary};
 }}
 QScrollBar::handle:vertical:pressed {{
-    background: {t.accent_strong};
+    background: {t.on_bg};
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
@@ -630,69 +820,94 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
 
 /* ===== 上部・下部バー、バッジ、トースト ===== */
 QWidget#nav_bar {{
-    background-color: {t.bg_surface};
-    border-bottom: 1px solid {t.border_subtle};
+    background-color: {t.band_bg};
+    border-bottom: 1px solid {t.band_border};
+}}
+QWidget#nav_bar QPushButton {{
+    color: {t.band_text};
+}}
+QWidget#nav_bar QPushButton[role="segment"] {{
+    background-color: transparent;
+    color: {t.band_muted};
+    border: 1px solid {t.band_muted};
+}}
+QWidget#nav_bar QPushButton[role="segment"]:hover {{
+    color: {t.band_text};
+    border-color: {t.band_text};
+}}
+QWidget#nav_bar QPushButton[role="segment"]:checked {{
+    background-color: {t.on_bg};
+    color: {t.on_text};
+    border: 1px solid {t.on_border};
+}}
+QWidget#nav_bar QPushButton[role="outline"], QWidget#nav_bar QPushButton[role="danger-toggle"] {{
+    color: {t.band_text};
+    border: 1px solid {t.band_muted};
+    background-color: transparent;
+}}
+QWidget#nav_bar QPushButton[role="danger-toggle"]:checked {{
+    background-color: {t.danger_hover};
+    color: {t.text_on_accent};
+    border-color: {t.text_on_accent};
 }}
 QWidget#bottom_bar {{
-    background-color: {t.bg_surface};
-    border-top: 1px solid {t.border_subtle};
+    background-color: {t.band_bg};
+    border-top: 1px solid {t.band_border};
 }}
 QLabel#point_count_pill {{
-    color: {t.accent_soft};
+    color: {t.band_text};
     font-weight: 700;
     font-size: {t.size_xs}px;
-    background-color: {t.bg_elevated};
-    border: 1px solid {t.border_strong};
+    font-family: {t.font_mono};
+    background-color: transparent;
+    border: 1px solid {t.band_muted};
     border-radius: {t.radius_lg}px;
     padding: 2px 10px;
 }}
 QLabel#floating_sel_badge {{
-    color: {t.text_secondary};
+    color: {t.band_muted};
     font-size: {t.size_xs}px;
     font-weight: 600;
     padding: 2px 6px;
 }}
 QLabel#floating_sel_badge[active="true"] {{
-    color: #fde68a;
-    background-color: #3b2a06;
-    border: 1px solid {t.warning_base};
+    color: {t.badge_text};
+    background-color: {t.badge_bg};
+    border: 1px solid {t.badge_border};
     border-radius: {t.radius_md}px;
     padding: 2px 10px;
+    font-family: {t.font_mono};
 }}
 QLabel#toast_label {{
-    background-color: {t.bg_elevated};
-    color: {t.text_primary};
-    border: 1px solid {t.border_strong};
+    background-color: {t.toast_bg};
+    color: {t.toast_info};
+    border: 1px solid {t.toast_info};
     border-radius: {t.radius_lg}px;
     padding: 3px 12px;
     font-size: {t.size_xs}px;
     font-weight: 600;
 }}
 QLabel#toast_label[kind="success"] {{
-    background-color: #0b3b22;
-    color: #bbf7d0;
-    border-color: {t.success_base};
+    color: {t.toast_success};
+    border-color: {t.toast_success};
 }}
 QLabel#toast_label[kind="warning"] {{
-    background-color: #3b2a06;
-    color: #fde68a;
-    border-color: {t.warning_base};
+    color: {t.toast_warning};
+    border-color: {t.toast_warning};
 }}
 QLabel#toast_label[kind="error"] {{
-    background-color: #450a0a;
-    color: #fecaca;
-    border-color: {t.danger_base};
+    color: {t.toast_error};
+    border-color: {t.toast_error};
 }}
 QLabel#toast_label[kind="info"] {{
-    background-color: #0c2a3f;
-    color: #bae6fd;
-    border-color: {t.info_base};
+    color: {t.toast_info};
+    border-color: {t.toast_info};
 }}
 
 /* ===== 空状態カード（3Dビュー中央） ===== */
 QFrame#empty_state_card {{
-    background-color: rgba(23, 32, 51, 0.92);
-    border: 1px dashed {t.border_strong};
+    background-color: {t.card_bg};
+    border: 1px dashed {t.card_border};
     border-radius: {t.radius_lg}px;
 }}
 QLabel#empty_state_title {{
@@ -757,13 +972,13 @@ QPushButton#progressCancel:hover {{
 }}
 QProgressBar#progressBarModern {{
     background-color: {t.bg_input};
-    border: none;
+    border: 1px solid {t.border_subtle};
     border-radius: 6px;
     min-height: 12px;
     max-height: 12px;
 }}
 QProgressBar#progressBarModern::chunk {{
-    background-color: {t.accent_base};
+    background-color: {t.on_bg};
     border-radius: 6px;
 }}
 

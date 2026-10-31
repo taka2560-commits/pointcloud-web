@@ -60,6 +60,8 @@
 - 新UIの見た目は `gui/design_tokens.py` のトークンから生成した QSS（`get_theme_qss("modern")`、アプリ全体に適用）で描きます。色・文字サイズ・角丸はここだけで変更してください。従来UIの `DARK_THEME_QSS` は変更しないでください。
 - 新UIで新しいウィジェットを追加するときは、インライン `setStyleSheet` を書かず `setProperty("role", "primary|outline|ghost|danger|segment|danger-toggle")` と objectName で表現し、絵文字をラベルに使わないでください（Gate4 が検査します）。両モードで動くコードにする場合は `self.ui_mode == UI_MODE_MODERN` で分岐します（例: レイヤー行のロックボタン）。
 - 品質ゲート Gate4 は modern で全シナリオを検証したあと、classic でも起動・タブ・モード切替のスモークを行います。
+- 新UIには **テーマ**（`dark` 既定 / `kiseki` = 「Stand 軌跡」準拠のライト）があります。`gui/design_tokens.py: THEMES` のトークンだけが違い、QSS 生成・部品・ロジックは共通です（`get_theme_qss("modern", theme)`）。解決順は UI モードと同じ（`--theme=kiseki` ＞ `E57_UI_THEME` ＞ 設定「テーマ (新UI)」 ＞ dark）。新しい色を足すときは両テーマに値を入れ、`tests/test_design_tokens.py` のコントラスト検査を通してください。
+- 新UIの **モーション**は `gui/motion.py` に集約しています（押下・出入り・カスケード・展開・数値ティッカー・シェイク・バウンス・パルス。選定理由は `docs/DESIGN_STYLE_PLAN.md` §9）。ルール: 1 回きり・420ms 以内・位置と透明度のみ・終了後は描画効果を外す。設定「アニメーション」OFF（`set_motion_enabled(False)`）で全て即時反映になるよう `motion_enabled()` を見てください。Gate4 は dark・classic・kiseki の 3 通りで起動し、モーション後に描画効果が残らないことも検査します。
 
 ### ⑥ 【UI スタイル】セレクタ無しのインライン QSS を書かない
 - `widget.setStyleSheet("background: transparent;")` のようにセレクタを付けない宣言は**その子孫すべてに伝播**し、グローバル QSS（`QPushButton#execute_button` 等）を打ち消します（2026-10-31 に主要ボタンが文字だけに見える不具合として顕在化）。

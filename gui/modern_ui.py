@@ -22,7 +22,7 @@ import os
 import re
 from typing import Callable, Iterable, List, Optional
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -123,6 +123,22 @@ def _install_text_stripper(w: QWidget) -> None:
         w.setText = lambda s, _w=w, _b=base: _b.setText(_w, strip_emoji(s))  # type: ignore[assignment]
     except Exception:
         pass
+
+
+def _name_collapsible(grp) -> None:
+    """CollapsibleGroupBox の見出し・トグルに objectName を付け、インライン QSS を外す（トークン QSS で描くため）"""
+    hdr = getattr(grp, "_header_widget", None)
+    ttl = getattr(grp, "_title_label", None)
+    tgl = getattr(grp, "_toggle_btn", None)
+    for w in (grp, hdr, ttl, tgl):
+        if w is not None and w.styleSheet():
+            _disable_inline_stylesheet(w)
+    if hdr is not None:
+        hdr.setObjectName("collapsible_header")
+    if ttl is not None:
+        ttl.setObjectName("collapsible_title")
+    if tgl is not None:
+        tgl.setObjectName("collapsible_toggle")
 
 
 def _find_label(parent: QWidget, text: str) -> Optional[QLabel]:
@@ -294,14 +310,43 @@ def _assign_roles_and_names(win) -> None:
         b = g(name)
         if b is not None:
             b.setProperty("role", "segment")
-    for name in ("floating_wand_btn", "floating_local_clean_btn"):
-        b = g(name)
-        if b is not None:
-            b.setProperty("role", "secondary")
     for name in ("nav_btn_screenshot",):
         b = g(name)
         if b is not None:
             b.setProperty("role", "outline")
+
+    # 機能別の控えめな色分け（tone）: 「どれが何か」を色でも見分けられるようにする（意味は design_tokens.TONES 参照）
+    tone_map = {
+        "violet": ("btn_magic_wand", "floating_wand_btn", "btn_wall_pick"),
+        "teal": ("btn_local_clean", "floating_local_clean_btn", "btn_quick_edge_clean", "btn_add_layer"),
+        "amber": ("btn_keep_main_cluster", "btn_auto_ground", "btn_preset_fine"),
+        "green": ("btn_auto_plane", "btn_restore_selected_noise", "btn_restore_noise", "floating_restore_btn", "btn_preset_rough"),
+        "blue": ("btn_preset_std", "btn_move_to_layer", "btn_sec_from_current"),
+    }
+    for tone, names in tone_map.items():
+        for name in names:
+            b = g(name)
+            if b is not None:
+                b.setProperty("tone", tone)
+                # tone は role より後に定義された QSS で描く。outline/primary の指定は tone に置き換える
+                if b.property("role") in ("outline", "secondary"):
+                    b.setProperty("role", "")
+    # 断面外クロップ・選択削除は危険寄りの一括操作
+    for name in ("btn_crop_section", "delete_pts_btn"):
+        b = g(name)
+        if b is not None:
+            b.setProperty("role", "danger")
+
+    # プリセット名は短く（詳細はツールチップ）。サイドバー幅 320px でも 3 つ並ぶようにする
+    for name, label, tip in (
+        ("btn_preset_rough", "大まか", "大まか（粗取り）: 浮遊塊除去 + 標準 SOR。まず全体のゴミを落とすとき"),
+        ("btn_preset_std", "標準", "標準バランス: SOR + 孤立クラスタ。迷ったらこれ"),
+        ("btn_preset_fine", "細かい", "細かい（精密）: エッジ飛散・ヒゲ除去 + 高感度 SOR。仕上げ用"),
+    ):
+        b = g(name)
+        if b is not None:
+            b.setText(label)
+            b.setToolTip(tip)
 
     if g("point_count_label") is not None:
         win.point_count_label.setObjectName("point_count_pill")
@@ -325,15 +370,7 @@ def _assign_roles_and_names(win) -> None:
     # 折りたたみグループの見出し・トグルに名前を付けてトークン QSS で描く
     for grp in win.findChildren(QGroupBox):
         if grp.objectName() == "collapsible_group":
-            hdr = getattr(grp, "_header_widget", None)
-            ttl = getattr(grp, "_title_label", None)
-            tgl = getattr(grp, "_toggle_btn", None)
-            if hdr is not None:
-                hdr.setObjectName("collapsible_header")
-            if ttl is not None:
-                ttl.setObjectName("collapsible_title")
-            if tgl is not None:
-                tgl.setObjectName("collapsible_toggle")
+            _name_collapsible(grp)
 
     # 高さ色分け枠（QFrame）に名前を付ける
     for fr in win.findChildren(QFrame):
@@ -387,6 +424,7 @@ def _reorganize_sidebar(win) -> None:
     # 保存グループ（⑤）: ファイル入出力から「保存対象」コンボと保存ボタンを移す
     group_cls = type(win.file_group)
     save_group = group_cls("保存")
+    _name_collapsible(save_group)  # 後から作る箱なので、インライン QSS 無効化と命名をここで行う
     save_group.toggled_collapse.connect(win._on_panel_collapse_toggled)
     sl = QHBoxLayout(save_group.content_widget)
     sl.setContentsMargins(6, 4, 6, 4)
@@ -401,6 +439,7 @@ def _reorganize_sidebar(win) -> None:
         w.setParent(save_group.content_widget)
         w.show()
     if lbl_target is not None:
+        lbl_target.setMinimumWidth(lbl_target.sizeHint().width())  # フォントが広いテーマでも切れない
         sl.addWidget(lbl_target)
     sl.addWidget(win.export_mode_combo, 1)
     win.save_manual_btn.setMaximumWidth(16777215)
@@ -444,9 +483,20 @@ def _reorganize_sidebar(win) -> None:
     # 情報量の削減はタブ（①自動 / ②手動 / ③確認 …）で行い、グループ自体は展開したままにする
     # （タブで開いたグループが畳まれていると、もう一度クリックが必要になり操作性が落ちるため）
 
-    # 狭い画面向けにサイドバー最小幅を下げる
-    win.sidebar_scroll.setMinimumWidth(320)
-    win._sidebar_min_width = 320
+    # サイドバーの既定幅と最小幅はテーマのトークンから（dark: 400 / 320、kiseki はフォントが広いので 430 / 320）
+    from gui.design_tokens import get_tokens
+
+    _t = get_tokens(getattr(win, "ui_theme", "dark"))
+    win.sidebar_scroll.setMinimumWidth(_t.sidebar_min)
+    win._sidebar_min_width = _t.sidebar_min
+    win._sidebar_user_width = _t.sidebar_default
+    try:
+        sizes = win.splitter.sizes()
+        total = sum(sizes) if sizes else 0
+        if total > 0:
+            win.splitter.setSizes([_t.sidebar_default, max(200, total - _t.sidebar_default)])
+    except Exception:
+        pass
 
 
 def _install_status_bar(win) -> None:
@@ -616,9 +666,28 @@ def _convert_bars_to_flow(win) -> None:
 
 
 def _install_behaviors(win) -> None:
-    """トーストの種類付け・選択バッジの状態・最近使ったファイル・空状態カードの表示制御"""
-    # トースト: 内容から種類を判定し、:kind プロパティで色分け。絵文字は除去
+    """トーストの種類付け・選択バッジの状態・最近使ったファイル・空状態カードの表示制御・モーション"""
+    from gui.design_tokens import get_tokens
+    from gui.motion import (
+        bounce, cascade_in, expand_animated, fade_in, fade_out_then_hide, fade_slide_in, focus_pulse,
+        install_button_motion, install_number_ticker, set_motion_enabled, shake,
+    )
+    from gui.ui_mode import get_saved_motion_enabled
+
+    # モーション ON/OFF（設定「アニメーション」）と押下フィードバック（アプリ全体の QAbstractButton）
+    set_motion_enabled(get_saved_motion_enabled())
+    install_button_motion(QApplication.instance())
+    tokens = get_tokens(getattr(win, "ui_theme", "dark"))
+    pulse_color = tokens.accent_base if tokens.is_light else tokens.accent_soft
+
+    # トースト: 内容から種類を判定し、:kind プロパティで色分け。絵文字は除去。
+    #   出現 = フェード＋スライド（オーバーシュート）、警告 = エラーシェイク、退出 = フェード
     orig_toast = win.show_toast
+    try:
+        win._toast_timer.timeout.disconnect()
+    except Exception:
+        pass
+    win._toast_timer.timeout.connect(lambda: fade_out_then_hide(win.toast_label))
 
     def classify(msg: str) -> str:
         m = msg or ""
@@ -629,22 +698,37 @@ def _install_behaviors(win) -> None:
         return "info"
 
     def show_toast(message: str, duration_ms: int = 2600):
-        win.toast_label.setProperty("kind", classify(message))
+        kind = classify(message)
+        win.toast_label.setProperty("kind", kind)
         _repolish(win.toast_label)
+        was_visible = win.toast_label.isVisible()
         orig_toast(strip_emoji(message), duration_ms)
+        if kind == "warning":
+            if not was_visible:
+                fade_in(win.toast_label)
+            shake(win.toast_label)
+        elif not was_visible:
+            fade_slide_in(win.toast_label, overshoot=True)
 
     win.show_toast = show_toast  # type: ignore[assignment]
 
-    # 選択バッジ: 選択中は active プロパティで強調
+    # 選択バッジ: 選択中は active プロパティで強調。選択が始まった瞬間に 1 回だけ跳ねる
     orig_update_bar = win._update_floating_selection_bar
 
     def update_bar(count: int):
-        orig_update_bar(count)
         badge = win.floating_sel_badge
+        was_active = bool(badge.property("active"))
+        orig_update_bar(count)
         badge.setProperty("active", bool(count > 0))
         _repolish(badge)
+        if count > 0 and not was_active:
+            bounce(badge)
 
     win._update_floating_selection_bar = update_bar  # type: ignore[assignment]
+
+    # 点数ピル: 数値ティッカー（前の値から新しい値へ数え上げ。桁幅固定）
+    if getattr(win, "point_count_label", None) is not None:
+        install_number_ticker(win.point_count_label)
 
     # 最近使ったファイル: 読み込み要求時に記録
     orig_load = win._load_file_to_viewer
@@ -660,12 +744,57 @@ def _install_behaviors(win) -> None:
 
     win._load_file_to_viewer = load_with_recent  # type: ignore[assignment]
 
-    # 空状態カード
+    # 空状態カード: 最初の点群が入ったらフェードで退場し、次に押す「実行」ボタンをフォーカスパルスで示す
     card = EmptyStateCard(win)
     win.empty_state_card = card
     has_points = win.viewer.points_raw is not None and len(win.viewer.points_raw) > 0
     card.setVisible(not has_points)
-    win.viewer.bounds_ready.connect(lambda *_: card.hide())
+    exec_btn = getattr(win, "auto_exec_btn", None)
+
+    def on_first_points(*_):
+        if not card.isVisible():
+            return
+        fade_out_then_hide(card)
+        if exec_btn is not None:
+            QTimer.singleShot(350, lambda: focus_pulse(exec_btn, pulse_color))
+
+    win.viewer.bounds_ready.connect(on_first_points)
+
+    # タブ切替: 表示される箱を上から順に時間差で出す（カスケード表示）
+    orig_set_tab = win._set_sidebar_workflow_tab
+    tab_state = {"key": None}
+    alias = {"select": "edit", "auto": "filter"}
+
+    def set_tab(tab_key: str, *args, **kwargs):
+        norm = alias.get(tab_key, tab_key)
+        changed = tab_state["key"] != norm
+        tab_state["key"] = norm
+        result = orig_set_tab(tab_key, *args, **kwargs)
+        if changed:
+            groups = [getattr(win, n, None) for n in
+                      ("auto_group", "tools_group", "layer_group", "section_group", "view_group", "settings_group")]
+            cascade_in([g for g in groups if g is not None])
+        return result
+
+    win._set_sidebar_workflow_tab = set_tab  # type: ignore[assignment]
+
+    # 折りたたみ箱: 展開はアコーディオン（高さ＋透明度）。畳むのは即時
+    for grp in win.findChildren(QGroupBox):
+        if grp.objectName() != "collapsible_group" or not hasattr(grp, "set_expanded"):
+            continue
+        _wrap_collapsible(grp, expand_animated)
+
+
+def _wrap_collapsible(grp, expand_animated) -> None:
+    orig_set_expanded = grp.set_expanded
+
+    def set_expanded(expanded: bool, _g=grp, _orig=orig_set_expanded):
+        was = bool(_g.is_expanded())
+        _orig(expanded)
+        if expanded and not was and _g.isVisible():
+            expand_animated(_g.content_widget)
+
+    grp.set_expanded = set_expanded  # type: ignore[assignment]
 
 
 # ----------------------------------------------------------------------------- 公開 API
