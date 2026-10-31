@@ -7,10 +7,13 @@ GUIの応答性を保つための非同期ワーカースレッドモジュー�
 import math
 import os
 import time
+import inspect
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from PySide6.QtCore import QThread, Signal
 import numpy as np
+
+from core.logger import log_exception
 
 from core.processor import (
     FilterConfig,
@@ -106,6 +109,8 @@ class ProcessWorker(QThread):
             )
             self.finished_success.emit(summary)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -136,6 +141,10 @@ class FileLoadWorker(QThread):
         self.coord_mode = coord_mode
         self._is_cancelled = False
 
+    def cancel(self):
+        """読み込みの中断を要求（ファイル境界および E57 読み込みの進捗コールバックで反映される）"""
+        self._is_cancelled = True
+
     def run(self):
         try:
             # 1. E57スキャンの読み込み (フォルダ指定時はフォルダ内の全E57を統合)
@@ -153,11 +162,15 @@ class FileLoadWorker(QThread):
             )
 
             for f_i, fpath in enumerate(file_list):
+                if self._is_cancelled:
+                    raise InterruptedError("読み込みがユーザーによって中止されました。")
                 fname = os.path.basename(fpath)
                 sub = f"ファイル {f_i + 1}/{n_files}: {fname}"
                 self.progress_changed.emit(int(5 + 60 * f_i / n_files), "E57ヘッダー解析中...", sub)
 
                 def on_e57_progress(ratio: float, msg: str, _fi=f_i, _sub=sub):
+                    if self._is_cancelled:
+                        raise InterruptedError("読み込みがユーザーによって中止されました。")
                     pct = int(5 + 60 * (_fi + ratio) / n_files)  # 5% - 65%
                     self.progress_changed.emit(pct, msg, _sub)
 
@@ -320,6 +333,8 @@ class FileLoadWorker(QThread):
 
             self.finished_success.emit(preloaded)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -413,6 +428,8 @@ class MemoryFilterWorker(QThread):
             self.finished_stages.emit(stages)
             self.finished_success.emit(remaining, remove_idx)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -469,6 +486,8 @@ class KeepMainClusterWorker(QThread):
             self.progress_changed.emit(100, "解析完了！", f"浮遊ノイズ: {len(remove_local):,} 点")
             self.finished_success.emit(remove_local)
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
 
 
@@ -495,6 +514,18 @@ class FileSaveWorker(QThread):
         self.scans = scans
         self.layer_mask = layer_mask.copy()
         self.split_masks = {k: v.copy() for k, v in split_masks.items()} if split_masks else None
+        self._is_cancelled = False
+
+    def cancel(self):
+        """
+        保存の中断を要求。単一ファイルは書き込み開始前、分割保存はファイル境界で反映される。
+        書き込み中のファイルは一時ファイル (.tmp) 経由のアトミック置換なので、中断しても既存ファイルは壊れない。
+        """
+        self._is_cancelled = True
+
+    def _check_cancelled(self):
+        if self._is_cancelled:
+            raise InterruptedError("保存がユーザーによって中止されました。")
 
     def _restore_original_coordinates(self) -> List[str]:
         """
@@ -542,6 +573,8 @@ class FileSaveWorker(QThread):
             applied_modes = self._restore_original_coordinates()
             self._run_save()
         except Exception as e:
+            # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
+            log_exception(f"{type(self).__name__} でエラー: {e}")
             self.finished_error.emit(str(e))
         finally:
             # 表示用の座標系へ必ず戻す（保存失敗時も含む）
@@ -568,6 +601,7 @@ class FileSaveWorker(QThread):
             n_items = len(non_empty_items)
 
             for idx, (layer_name, mask) in enumerate(non_empty_items):
+                self._check_cancelled()
                 safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in layer_name).strip("_")
                 if not safe_name:
                     safe_name = f"layer_{idx}"
@@ -598,9 +632,11 @@ class FileSaveWorker(QThread):
         fname = os.path.basename(self.output_path)
         self.progress_changed.emit(15, "保存対象レイヤーの点群を抽出中...", f"出力先: {fname}")
 
+        self._check_cancelled()
         filtered_scans = self._extract_scans_by_mask(self.layer_mask)
         if not filtered_scans:
             raise ValueError("保存対象レイヤーの点数が 0 点のため出力できません。")
+        self._check_cancelled()
 
         total_clean_pts = sum(s.point_count for s in filtered_scans)
         total_noise_pts = int(len(self.layer_mask) - total_clean_pts)
@@ -617,3 +653,65 @@ class FileSaveWorker(QThread):
 
 
 
+
+
+class FunctionWorker(QThread):
+    """
+    任意の重い関数をバックグラウンドで実行する汎用ワーカー（設計憲章③: 重い処理をメインスレッドで実行しない）。
+
+    使い方:
+        worker = FunctionWorker(segment_ground_points, pts, grid_size=1.0)
+        worker.finished_success.connect(on_done)   # fn の戻り値がそのまま渡る
+        worker.finished_error.connect(on_error)
+        worker.start()
+
+    fn が `is_cancelled` キーワード引数を受け取れる場合は、中断判定用の callable を自動で渡す。
+    fn が `progress_callback(ratio: float, message: str)` を受け取れる場合も同様に渡す。
+    """
+
+    progress_changed = Signal(int, str, str)  # (0-100%, メインメッセージ, サブメッセージ)
+    finished_success = Signal(object)         # fn の戻り値
+    finished_error = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, fn: Callable, *args, parent=None, **kwargs):
+        super().__init__(parent)
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+        self._is_cancelled = False
+
+    def cancel(self):
+        """処理の中断を要求（fn が is_cancelled を確認する場合のみ途中中断できる）"""
+        self._is_cancelled = True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
+
+    def run(self):
+        try:
+            kwargs = dict(self._kwargs)
+            try:
+                params = inspect.signature(self._fn).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "is_cancelled" in params:
+                kwargs["is_cancelled"] = lambda: self._is_cancelled
+            if "progress_callback" in params:
+                def _cb(ratio: float, message: str = ""):
+                    if self._is_cancelled:
+                        raise InterruptedError("処理がユーザーによって中止されました。")
+                    self.progress_changed.emit(int(max(0.0, min(1.0, ratio)) * 100), message, "")
+                kwargs["progress_callback"] = _cb
+
+            result = self._fn(*self._args, **kwargs)
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+            self.finished_success.emit(result)
+        except InterruptedError:
+            self.cancelled.emit()
+        except Exception as e:
+            log_exception(f"FunctionWorker({getattr(self._fn, '__name__', 'fn')}) でエラー: {e}")
+            self.finished_error.emit(str(e))

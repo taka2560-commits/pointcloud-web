@@ -1,8 +1,17 @@
 # Vercelデプロイ対象外ファイル (Pythonファイルを無視して静的Webアプリとして配信)
 *.py
+*.spec
 core/
 gui/
 tests/
-requirements.txt
+samples/
+logs/
+dist/
+build/
+__pycache__/
+requirements-desktop.txt
+requirements-lock.txt
 *.bat
 *.e57
+*.md
+*.txt

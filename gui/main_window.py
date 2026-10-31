@@ -61,6 +61,7 @@ from gui.worker_thread import (
     MemoryFilterWorker,
     FileSaveWorker,
     KeepMainClusterWorker,
+    FunctionWorker,
     collect_e57_files,
 )
 from gui.progress_dialog import ModernProgressDialog
@@ -207,6 +208,8 @@ class MainWindow(QMainWindow):
         self.load_worker: Optional[FileLoadWorker] = None
         self.memory_filter_worker: Optional[MemoryFilterWorker] = None
         self.save_worker: Optional[FileSaveWorker] = None
+        self.cluster_worker: Optional[KeepMainClusterWorker] = None
+        self.func_worker: Optional[FunctionWorker] = None   # 地面抽出・主平面・エッジ飛散・マジックワンド等の汎用バックグラウンド処理
         self.progress_dialog: Optional[ModernProgressDialog] = None
 
         # 点群のワールド範囲キャッシュ
@@ -2120,7 +2123,8 @@ class MainWindow(QMainWindow):
                 max_steps = 10
             else:
                 max_steps = getattr(self, "undo_max_steps", 50)
-            while len(self.layer_undo_stack) > max_steps:
+            # max_steps <= 0 は「無制限」
+            while max_steps > 0 and len(self.layer_undo_stack) > max_steps:
                 self.layer_undo_stack.pop(0)
             self.layer_redo_stack.clear()
             self._sync_undo_buttons()
@@ -2326,8 +2330,99 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"レイヤー「{lname}」: {state_str}")
         self.show_toast(f"{state_str}: 「{lname}」")
 
+    # ------------------------------------------------------------------
+    # 汎用バックグラウンド実行ヘルパー（設計憲章③: 重い処理はメインスレッドで実行しない）
+    # ------------------------------------------------------------------
+    def _is_background_busy(self) -> bool:
+        """読み込み・保存・フィルタ等のバックグラウンド処理が実行中なら True（再入防止用）"""
+        for w in (
+            getattr(self, "load_worker", None),
+            getattr(self, "save_worker", None),
+            getattr(self, "memory_filter_worker", None),
+            getattr(self, "cluster_worker", None),
+            getattr(self, "func_worker", None),
+            getattr(self, "worker", None),
+        ):
+            if w is not None and w.isRunning():
+                return True
+        return False
+
+    def _run_in_background(self, title: str, sub_text: str, fn, *args, on_success=None, **kwargs) -> bool:
+        """
+        重い関数 fn(*args, **kwargs) を FunctionWorker で実行し、進捗ダイアログ（中止ボタン付き）を表示する。
+        完了時は on_success(result) をメインスレッドで呼ぶ。実行中に点数が変わった場合は結果を破棄する。
+        戻り値: 起動できたら True（既に別処理が実行中なら False）
+        """
+        if self._is_background_busy():
+            self.show_toast("⏳ 別の処理を実行中です。完了または中止してから操作してください")
+            return False
+
+        n_points_at_start = len(self.viewer.points_raw) if self.viewer.points_raw is not None else 0
+
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        self.progress_dialog = ModernProgressDialog(title, self)
+        self.progress_dialog.set_progress(10, title, sub_text)
+        self.progress_dialog.show()
+
+        self.func_worker = FunctionWorker(fn, *args, **kwargs)
+
+        def _close_dialog():
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+
+        def _on_progress(pct: int, msg: str, sub: str):
+            if self.progress_dialog:
+                self.progress_dialog.set_progress(max(10, pct), msg or title, sub or sub_text)
+
+        def _on_done(result):
+            _close_dialog()
+            n_now = len(self.viewer.points_raw) if self.viewer.points_raw is not None else 0
+            if n_now != n_points_at_start:
+                log_warning(f"{title}: 処理中に点群が入れ替わったため結果を破棄しました ({n_points_at_start:,} → {n_now:,} 点)")
+                self.show_toast(f"⚠️ {title}: 点群が変わったため結果を破棄しました")
+                return
+            if on_success is not None:
+                on_success(result)
+
+        def _on_cancel():
+            _close_dialog()
+            self.status_label.setText(f"{title} を中断しました")
+            self.show_toast(f"⚠️ {title} を中断しました")
+
+        def _on_error(err_msg: str):
+            _close_dialog()
+            self.status_label.setText("エラーが発生しました")
+            QMessageBox.critical(self, "処理エラー", f"{title} 中にエラーが発生しました:\n{err_msg}")
+
+        self.progress_dialog.cancelled.connect(self.func_worker.cancel)
+        self.func_worker.progress_changed.connect(_on_progress)
+        self.func_worker.finished_success.connect(_on_done)
+        self.func_worker.cancelled.connect(_on_cancel)
+        self.func_worker.finished_error.connect(_on_error)
+        self.func_worker.start()
+        return True
+
+    def _wait_for_background(self, timeout_ms: int = 60000) -> bool:
+        """
+        バックグラウンド処理の完了をイベントループを回しながら待つ（自動テスト・スクリプト用）。
+        完了したら True、タイムアウトなら False。
+        """
+        from PySide6.QtCore import QCoreApplication, QElapsedTimer, QThread
+
+        timer = QElapsedTimer()
+        timer.start()
+        while self._is_background_busy():
+            QCoreApplication.processEvents()
+            if timer.elapsed() > timeout_ms:
+                return False
+            QThread.msleep(5)
+        QCoreApplication.processEvents()
+        return True
+
     def _on_auto_extract_ground(self):
-        """⑥ 地面（グラウンド）の点を自動抽出して地面レイヤーへ振り分け"""
+        """⑥ 地面（グラウンド）の点を自動抽出して地面レイヤーへ振り分け（バックグラウンド実行）"""
         if self.viewer.points_raw is None or len(self.viewer.points_raw) == 0:
             QMessageBox.information(self, "自動地面抽出", "先に点群データを読み込んでください。")
             return
@@ -2336,23 +2431,28 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "自動地面抽出", "抽出対象の未ロック有効点群がありません。")
             return
 
-        ground_local_idx = segment_ground_points(self.viewer.points_raw[cand_idx], grid_size=1.0, height_threshold=0.25)
-        if len(ground_local_idx) == 0:
-            QMessageBox.information(self, "自動地面抽出", "地面と判定される点が見つかりませんでした。")
-            return
+        def on_done(ground_local_idx):
+            if len(ground_local_idx) == 0:
+                QMessageBox.information(self, "自動地面抽出", "地面と判定される点が見つかりませんでした。")
+                return
+            ground_orig_idx = cand_idx[ground_local_idx]
+            self._push_layer_undo_state()
+            lid = self.viewer.ensure_preset_layer(
+                PointCloudViewer.LAYER_GROUND, "地面 (自動抽出)", (0.55, 0.40, 0.22)
+            )
+            moved = self.viewer.move_indices_to_layer(ground_orig_idx, lid, respect_lock=True)
+            self.log_text.append(f"自動地面抽出: {moved:,} 点を「地面 (自動抽出)」レイヤーへ分離しました")
+            self.status_label.setText(f"地面 {moved:,} 点を地面レイヤーへ自動振り分けしました (🔒ロックで保護可能)")
+            self.show_toast(f"🏞️ 地面 {moved:,} 点を自動抽出しました")
 
-        ground_orig_idx = cand_idx[ground_local_idx]
-        self._push_layer_undo_state()
-        lid = self.viewer.ensure_preset_layer(
-            PointCloudViewer.LAYER_GROUND, "地面 (自動抽出)", (0.55, 0.40, 0.22)
+        self._run_in_background(
+            "🏞️ 自動地面抽出", f"対象: {len(cand_idx):,} 点",
+            segment_ground_points, self.viewer.points_raw[cand_idx], grid_size=1.0, height_threshold=0.25,
+            on_success=on_done,
         )
-        moved = self.viewer.move_indices_to_layer(ground_orig_idx, lid, respect_lock=True)
-        self.log_text.append(f"自動地面抽出: {moved:,} 点を「地面 (自動抽出)」レイヤーへ分離しました")
-        self.status_label.setText(f"地面 {moved:,} 点を地面レイヤーへ自動振り分けしました (🔒ロックで保護可能)")
-        self.show_toast(f"🏞️ 地面 {moved:,} 点を自動抽出しました")
 
     def _on_auto_extract_plane(self):
-        """⑥ RANSACにより支配的な主平面（壁・床・天井）を自動検出して平面レイヤーへ振り分け"""
+        """⑥ RANSACにより支配的な主平面（壁・床・天井）を自動検出して平面レイヤーへ振り分け（バックグラウンド実行）"""
         if self.viewer.points_raw is None or len(self.viewer.points_raw) == 0:
             QMessageBox.information(self, "自動平面検出", "先に点群データを読み込んでください。")
             return
@@ -2361,22 +2461,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "自動平面検出", "検出対象の未ロック有効点群が不足しています。")
             return
 
-        plane_local_idx, _ = segment_largest_plane(
-            self.viewer.points_raw[cand_idx], distance_threshold=0.06, ransac_n=3, num_iterations=400
-        )
-        if len(plane_local_idx) == 0:
-            QMessageBox.information(self, "自動平面検出", "平面が見つかりませんでした。")
-            return
+        def on_done(result):
+            plane_local_idx, _ = result
+            if len(plane_local_idx) == 0:
+                QMessageBox.information(self, "自動平面検出", "平面が見つかりませんでした。")
+                return
+            plane_orig_idx = cand_idx[plane_local_idx]
+            self._push_layer_undo_state()
+            lid = self.viewer.ensure_preset_layer(
+                PointCloudViewer.LAYER_PLANE, "主平面 (壁/床)", (0.20, 0.82, 0.55)
+            )
+            moved = self.viewer.move_indices_to_layer(plane_orig_idx, lid, respect_lock=True)
+            self.log_text.append(f"自動平面検出: {moved:,} 点を「主平面 (壁/床)」レイヤーへ分離しました")
+            self.status_label.setText(f"主平面 {moved:,} 点を平面レイヤーへ自動振り分けしました")
+            self.show_toast(f"🧱 主平面 {moved:,} 点を自動検出しました")
 
-        plane_orig_idx = cand_idx[plane_local_idx]
-        self._push_layer_undo_state()
-        lid = self.viewer.ensure_preset_layer(
-            PointCloudViewer.LAYER_PLANE, "主平面 (壁/床)", (0.20, 0.82, 0.55)
+        self._run_in_background(
+            "🧱 自動平面検出", f"対象: {len(cand_idx):,} 点 (RANSAC)",
+            segment_largest_plane, self.viewer.points_raw[cand_idx],
+            distance_threshold=0.06, ransac_n=3, num_iterations=400,
+            on_success=on_done,
         )
-        moved = self.viewer.move_indices_to_layer(plane_orig_idx, lid, respect_lock=True)
-        self.log_text.append(f"自動平面検出: {moved:,} 点を「主平面 (壁/床)」レイヤーへ分離しました")
-        self.status_label.setText(f"主平面 {moved:,} 点を平面レイヤーへ自動振り分けしました")
-        self.show_toast(f"🧱 主平面 {moved:,} 点を自動検出しました")
 
     def _on_save_layer_project(self, file_path: Optional[str] = None):
         """⑤ 作業途中のレイヤー状態を .npz ファイルに保存"""
@@ -2793,7 +2898,9 @@ class MainWindow(QMainWindow):
                 sp.setSingleStep(step_val)
 
     def _on_undo_limit_changed(self, index: int):
-        self.undo_max_steps = int(self.combo_undo_limit.currentData() or 50)
+        # 0 は「無制限」の意味なので `or 50` で潰してはならない（None のときだけ既定値 50）
+        data = self.combo_undo_limit.currentData()
+        self.undo_max_steps = 50 if data is None else int(data)
 
     def _save_app_settings(self, silent: bool = False):
         """設定を QSettings に保存"""
@@ -2911,8 +3018,9 @@ class MainWindow(QMainWindow):
             inv_v = s.value("invert_orbit", False, type=bool)
             self.chk_invert_orbit.setChecked(inv_v)
             self.viewer.invert_orbit_y = inv_v
-        except Exception:
-            pass
+        except Exception as e:
+            # 設定が壊れていても起動は継続するが、黙って握りつぶさずログに残す
+            log_warning(f"保存済み設定の一部を読み込めませんでした（既定値で続行）: {e}")
 
     def _reset_app_settings(self):
         """設定を初期値に戻す"""
@@ -2988,10 +3096,18 @@ class MainWindow(QMainWindow):
                 self._save_app_settings(silent=True)
         except Exception:
             pass
-        for w in (self.load_worker, self.worker, self.save_worker, self.memory_filter_worker):
+        for w in (
+            self.load_worker, self.worker, self.save_worker, self.memory_filter_worker,
+            getattr(self, "cluster_worker", None), getattr(self, "func_worker", None),
+        ):
             if w and w.isRunning():
-                w.terminate()
-                w.wait()
+                # 協調的に中断を要求してから待つ。terminate() は最後の手段（ロック解放されず保存ファイルが壊れる恐れ）
+                if hasattr(w, "cancel"):
+                    w.cancel()
+                if not w.wait(5000):
+                    log_warning(f"{type(w).__name__} が 5 秒以内に停止しなかったため強制終了します")
+                    w.terminate()
+                    w.wait()
         super().closeEvent(event)
 
     def show_toast(self, message: str, duration_ms: int = 2600):
@@ -4321,10 +4437,13 @@ class MainWindow(QMainWindow):
             sub_init = f"ファイル: {fname}"
         self.progress_bar.setValue(0)
 
-        # 既存ワーカーの終了待ち
+        # 既存ワーカーの終了待ち（協調的に中断要求 → 待機。terminate() は最後の手段）
         if self.load_worker and self.load_worker.isRunning():
-            self.load_worker.terminate()
-            self.load_worker.wait()
+            self.load_worker.cancel()
+            if not self.load_worker.wait(5000):
+                log_warning("前回の読み込みワーカーが 5 秒以内に停止しなかったため強制終了します")
+                self.load_worker.terminate()
+                self.load_worker.wait()
 
         # 画面中央の進捗モーダルダイアログを表示
         if self.progress_dialog:
@@ -4415,10 +4534,19 @@ class MainWindow(QMainWindow):
                 self.progress_dialog.close()
                 self.progress_dialog = None
             self.progress_bar.setValue(0)
+            if "中止されました" in err_msg:
+                # ユーザーによる中止はエラーではなく通知のみ
+                self.status_label.setText("読み込みを中止しました")
+                self.log_text.append("読み込みをユーザーが中止しました")
+                self.show_toast("⚠️ 読み込みを中止しました")
+                return
             self.status_label.setText("読み込みエラー")
             self.log_text.append(f"エラー: {err_msg}")
             QMessageBox.critical(self, "読み込みエラー", f"E57ファイルの読み込みに失敗しました:\n{err_msg}")
 
+        # 進捗ダイアログの「中止」ボタンで読み込みを協調的に中断できるようにする
+        if self.progress_dialog:
+            self.progress_dialog.cancelled.connect(self.load_worker.cancel)
         self.load_worker.progress_changed.connect(on_progress)
         self.load_worker.finished_success.connect(on_success)
         self.load_worker.finished_error.connect(on_error)
@@ -4751,32 +4879,36 @@ class MainWindow(QMainWindow):
             return
 
         eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.18
-        cluster_local = extract_connected_cluster_from_seeds(
-            self.viewer.points_raw[cand_orig],
-            seed_in_cand,
-            eps=max(0.05, eps),
-            max_cluster_ratio=0.45,
-        )
-        cluster_orig = cand_orig[cluster_local]
-        if len(cluster_orig) == 0:
-            return
+        n_seed = len(seed_orig)
 
-        if self.viewer.instant_delete_mode:
-            self._push_layer_undo_state()
-            moved = self.viewer.move_indices_to_layer(cluster_orig, PointCloudViewer.LAYER_NOISE, respect_lock=True)
-            self._clear_selection()
-            self.log_text.append(f"🪄 連結塊の即時消去: シード {len(seed_orig):,} 点から塊全体 {moved:,} 点をノイズへ移動")
-            self.status_label.setText(f"🪄 連結塊 {moved:,} 点を丸ごと即消去しました (Ctrl+Zで取消可)")
-            self.show_toast(f"🪄 連結塊 {moved:,} 点を丸ごと即消去しました")
-        else:
-            self.viewer.selected_indices = np.asarray(cluster_orig, dtype=np.int64)
-            self.viewer._update_active_colors()
-            self.viewer._update_display_arrays()
-            self.viewer.update()
-            self.viewer.point_selected.emit(self.viewer.selected_indices.tolist())
-            self.log_text.append(f"🪄 連結塊選択: シード {len(seed_orig):,} 点から同一塊 {len(cluster_orig):,} 点を一括選択しました")
-            self.status_label.setText(f"🪄 繋がっている塊 {len(cluster_orig):,} 点を一括選択しました (Delで即削除)")
-            self.show_toast(f"🪄 連結塊 {len(cluster_orig):,} 点を一括選択しました")
+        def on_done(cluster_local):
+            cluster_orig = cand_orig[cluster_local]
+            if len(cluster_orig) == 0:
+                return
+            if self.viewer.instant_delete_mode:
+                self._push_layer_undo_state()
+                moved = self.viewer.move_indices_to_layer(cluster_orig, PointCloudViewer.LAYER_NOISE, respect_lock=True)
+                self._clear_selection()
+                self.log_text.append(f"🪄 連結塊の即時消去: シード {n_seed:,} 点から塊全体 {moved:,} 点をノイズへ移動")
+                self.status_label.setText(f"🪄 連結塊 {moved:,} 点を丸ごと即消去しました (Ctrl+Zで取消可)")
+                self.show_toast(f"🪄 連結塊 {moved:,} 点を丸ごと即消去しました")
+            else:
+                self.viewer.selected_indices = np.asarray(cluster_orig, dtype=np.int64)
+                self.viewer._update_active_colors()
+                self.viewer._update_display_arrays()
+                self.viewer.update()
+                self.viewer.point_selected.emit(self.viewer.selected_indices.tolist())
+                self.log_text.append(f"🪄 連結塊選択: シード {n_seed:,} 点から同一塊 {len(cluster_orig):,} 点を一括選択しました")
+                self.status_label.setText(f"🪄 繋がっている塊 {len(cluster_orig):,} 点を一括選択しました (Delで即削除)")
+                self.show_toast(f"🪄 連結塊 {len(cluster_orig):,} 点を一括選択しました")
+
+        # 全候補点に対する KDTree 構築と連結追跡は数百万点で数秒〜数十秒かかるためバックグラウンドで実行
+        self._run_in_background(
+            "🪄 連結塊の追跡", f"シード {n_seed:,} 点 / 候補 {len(cand_orig):,} 点",
+            extract_connected_cluster_from_seeds, self.viewer.points_raw[cand_orig], seed_in_cand,
+            eps=max(0.05, eps), max_cluster_ratio=0.45,
+            on_success=on_done,
+        )
 
     def _on_local_fine_clean_selected(self):
         """📦 選択範囲内のみ局所精密ノイズ除去: 選択中の点群だけに細かいSOR+エッジ飛散ヒゲ除去を適用"""
@@ -4830,6 +4962,12 @@ class MainWindow(QMainWindow):
 
         eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.25
 
+        # 再入防止: 別のバックグラウンド処理（読込・保存・フィルタ）が走っている間は開始しない
+        if self._is_background_busy():
+            self.show_toast("⏳ 別の処理を実行中です。完了または中止してから操作してください")
+            return
+        n_points_at_start = len(self.viewer.points_raw)
+
         if self.progress_dialog:
             self.progress_dialog.close()
         self.progress_dialog = ModernProgressDialog("🏝️ メイン構造物の解析", self)
@@ -4860,6 +4998,13 @@ class MainWindow(QMainWindow):
             if self.progress_dialog:
                 self.progress_dialog.close()
                 self.progress_dialog = None
+
+            # 処理中に別の点群へ入れ替わっていたら、開始時のインデックスは無効なので結果を破棄
+            n_now = len(self.viewer.points_raw) if self.viewer.points_raw is not None else 0
+            if n_now != n_points_at_start:
+                log_warning(f"メイン塊解析: 処理中に点群が入れ替わったため結果を破棄しました ({n_points_at_start:,} → {n_now:,} 点)")
+                self.show_toast("⚠️ 点群が変わったため解析結果を破棄しました")
+                return
 
             if len(remove_local) == 0:
                 self.status_label.setText("🏝️ 周囲に分離可能な浮遊塊ノイズはありませんでした")
@@ -4908,21 +5053,26 @@ class MainWindow(QMainWindow):
         k_nb = int(self.edge_k_spin.value()) if hasattr(self, "edge_k_spin") else 16
         lin_th = float(self.edge_lin_spin.value()) if hasattr(self, "edge_lin_spin") else 0.72
 
-        keep_local = filter_edge_veil_noise(
-            self.viewer.points_raw[normal_indices],
-            nb_neighbors=k_nb,
-            linearity_threshold=lin_th,
-            sor_std_ratio=1.25,
+        def on_done(keep_local):
+            keep_mask = np.zeros(len(normal_indices), dtype=bool)
+            keep_mask[keep_local] = True
+            remove_orig = normal_indices[~keep_mask]
+            if len(remove_orig) == 0:
+                self.status_label.setText("🪶 エッジ飛散・ヒゲノイズは検出されませんでした")
+                self.show_toast("🪶 エッジ飛散・ヒゲは検出されませんでした")
+                return
+            self._apply_edge_veil_result(remove_orig)
+
+        # 全有効点に対する近傍・共分散解析は数千万点で数分かかるためバックグラウンドで実行（中止可）
+        self._run_in_background(
+            "🪶 エッジ飛散・ヒゲ精密除去", f"対象: {len(normal_indices):,} 点 (k={k_nb})",
+            filter_edge_veil_noise, self.viewer.points_raw[normal_indices],
+            nb_neighbors=k_nb, linearity_threshold=lin_th, sor_std_ratio=1.25,
+            on_success=on_done,
         )
-        keep_mask = np.zeros(len(normal_indices), dtype=bool)
-        keep_mask[keep_local] = True
-        remove_orig = normal_indices[~keep_mask]
 
-        if len(remove_orig) == 0:
-            self.status_label.setText("🪶 エッジ飛散・ヒゲノイズは検出されませんでした")
-            self.show_toast("🪶 エッジ飛散・ヒゲは検出されませんでした")
-            return
-
+    def _apply_edge_veil_result(self, remove_orig: np.ndarray):
+        """エッジ飛散除去の結果（除去対象の元インデックス）を専用ノイズレイヤーへ反映する"""
         self._push_layer_undo_state()
         layer_name = "自動除去: エッジ飛散"
         lid = next((k for k, v in self.viewer.layers.items() if v.name == layer_name), None)
@@ -5133,10 +5283,19 @@ class MainWindow(QMainWindow):
                 self.progress_dialog = None
             self.save_manual_btn.setEnabled(True)
             self.progress_bar.setValue(0)
+            if "中止されました" in err_msg:
+                # ユーザーによる中止はエラーではなく通知のみ（既存ファイルはアトミック置換のため無傷）
+                self.status_label.setText("保存を中止しました")
+                self.log_text.append("保存をユーザーが中止しました（既存ファイルは変更されていません）")
+                self.show_toast("⚠️ 保存を中止しました")
+                return
             self.status_label.setText("保存失敗")
             self.log_text.append(f"保存エラー: {err_msg}")
             QMessageBox.critical(self, "保存エラー", f"保存中にエラーが発生しました:\n{err_msg}")
 
+        # 進捗ダイアログの「中止」ボタンで保存を協調的に中断できるようにする（ファイル境界で反映）
+        if self.progress_dialog:
+            self.progress_dialog.cancelled.connect(self.save_worker.cancel)
         self.save_worker.progress_changed.connect(on_save_progress)
         self.save_worker.finished_success.connect(on_save_success)
         self.save_worker.finished_error.connect(on_save_error)

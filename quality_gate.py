@@ -381,7 +381,9 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert len(win.viewer.get_normal_indices()) == 300
 
     # ⑥ 自動レイヤー振り分け (地面抽出 & 主平面検出) の検証
+    #    ※ 重い解析は FunctionWorker でバックグラウンド実行されるため、完了を待ってから検証する
     win._on_auto_extract_ground()
+    assert win._wait_for_background(), "自動地面抽出のバックグラウンド処理がタイムアウトしました"
     win.viewer.validate_invariants()
     assert len(win.viewer.get_layer_indices(PointCloudViewer.LAYER_GROUND)) > 0
 
@@ -389,8 +391,12 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     win._undo_action()
     win.viewer.validate_invariants()
     win._on_auto_extract_plane()
+    assert win._wait_for_background(), "自動平面検出のバックグラウンド処理がタイムアウトしました"
     win.viewer.validate_invariants()
     assert len(win.viewer.get_layer_indices(PointCloudViewer.LAYER_PLANE)) > 0
+
+    # 再入防止: 処理中に同じ操作を重ねても二重起動しないこと（busy 判定）
+    assert not win._is_background_busy()
 
     # 一時ファイル置き場（リポジトリ内に残さないよう OS の一時ディレクトリ配下に作る）
     qgate_tmp = tempfile.mkdtemp(prefix="e57_qgate_")
@@ -617,6 +623,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     win.viewer.selected_indices = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.int64)
     win.viewer._update_active_colors()
     win._on_magic_wand_cluster_select()
+    assert win._wait_for_background(), "マジックワンドのバックグラウンド処理がタイムアウトしました"
     win.viewer.validate_invariants()
 
     win.viewer.selected_indices = np.arange(30, dtype=np.int64)
@@ -625,10 +632,14 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     win.viewer.validate_invariants()
 
     win._on_keep_main_cluster_only()
+    assert win._wait_for_background(), "メイン塊解析のバックグラウンド処理がタイムアウトしました"
     win.viewer.validate_invariants()
 
+    n_before_edge = len(win.viewer.get_layer_indices(PointCloudViewer.LAYER_NORMAL))
     win._on_quick_edge_veil_clean()
+    assert win._wait_for_background(), "エッジ飛散除去のバックグラウンド処理がタイムアウトしました"
     win.viewer.validate_invariants()
+    assert len(win.viewer.get_layer_indices(PointCloudViewer.LAYER_NORMAL)) <= n_before_edge
     print("  [OK] ノイズ処理専用モード・ブラシ消去・即時削除・プリセット・新スマートコマンド4種検査合格")
 
     # 5. Esc選択解除 & ショートカット重複チェック & モード切替時の途中状態クリア検査

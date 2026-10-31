@@ -31,6 +31,9 @@ class ModernProgressDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(460, 210)
+        # 処理中はメインウィンドウの操作を受け付けない（処理中にレイヤー編集されると、
+        # 開始時に捕捉したインデックスで結果を適用して誤った点を動かす恐れがあるため）
+        self.setWindowModality(Qt.ApplicationModal)
 
         self._current_value = 0
         self._target_value = 0
