@@ -365,6 +365,13 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert len(win.viewer.measure_points) == 1 and len(win.viewer.measure_coord_lines) == 1
     win.viewer.clear_measure_points()
     assert not win.viewer.measure_points and not win.viewer.measure_coord_lines and win.viewer.measure_result_text == ""
+    # pose: 回転と平行移動を持つスキャンを表示すると、座標が pose 適用後になり、保存用の生座標は変わらないこと
+    from core.e57_io import E57ScanData as _Scan
+    from core.processor import scan_display_points as _display_pts
+    _local = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]])
+    _posed = _Scan(0, _local.copy(), {}, rotation=np.array([np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)]), translation=np.array([10.0, 20.0, 30.0]))
+    assert np.allclose(_display_pts(_posed), [[10.0, 21.0, 30.0], [8.0, 20.0, 30.0], [10.0, 20.0, 33.0]]), "pose の適用結果が不正です"
+    assert np.array_equal(_posed.points, _local), "pose の適用で保存用の生座標が変わりました"
     print("  [OK] 計測ツール 座標読み取り（座標行・距離行・ファイル系併記・コピー文字列・クリア）検査合格")
     win._set_interaction_mode("orbit")
     assert not win.viewer.measure_mode and not win.viewer.selection_mode and win.seg_btn_orbit.isChecked()

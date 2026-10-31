@@ -217,10 +217,14 @@ class PointCloudProcessor:
         points: np.ndarray,
         log_callback: Optional[Callable[[str], None]] = None,
         intensities: Optional[np.ndarray] = None,
+        distance_points: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         メモリ上の3D点群座標に対して各種フィルタを直接適用し、(keep_indices, removed_indices) を返す。
         手動削除後の通常レイヤー点群に対して実行でき、手動削除点が復活する問題を根本解決します。
+
+        distance_points: 距離フィルタだけに使う「スキャン原点からの相対座標」。
+        points が pose 適用後の座標のとき、原点からの距離を保つために渡す（省略時は points を使う）。
         """
         total = len(points)
         keep_mask = np.ones(total, dtype=bool)
@@ -234,7 +238,7 @@ class PointCloudProcessor:
             current = np.where(keep_mask)[0]
             if len(current) > 0:
                 d_idx = filter_distance(
-                    points[current],
+                    (points if distance_points is None else distance_points)[current],
                     min_dist=self.config.min_distance,
                     max_dist=self.config.max_distance,
                 )
@@ -486,6 +490,56 @@ def inverse_transform_coordinate_system(points: np.ndarray, coord_mode: str) -> 
     if points is None or len(points) == 0 or is_identity_coord_mode(coord_mode):
         return points
     return _apply_axes(points, inverse_coord_axes(coord_mode))
+
+
+def scan_pose_transform(scan) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    スキャンの pose を (回転行列 R, 平行移動 t) で返す。world = R @ local + t。
+    pose が無い、または恒等変換なら None（呼び出し側は座標をコピーせずに済む）。
+    """
+    rotation = getattr(scan, "rotation", None)
+    translation = getattr(scan, "translation", None)
+    t = np.zeros(3, dtype=np.float64) if translation is None else np.asarray(translation, dtype=np.float64)
+    R = np.eye(3, dtype=np.float64)
+    if rotation is not None:
+        q = np.asarray(rotation, dtype=np.float64)
+        norm = float(np.linalg.norm(q))
+        if norm > 0.0:
+            w, x, y, z = q / norm
+            R = np.array(
+                [
+                    [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+                ],
+                dtype=np.float64,
+            )
+    if np.array_equal(R, np.eye(3)) and not np.any(t):
+        return None
+    return R, t
+
+
+def scan_display_points(scan) -> np.ndarray:
+    """
+    スキャンの表示用座標を返す: 生座標に pose を適用し、そのあと取り込み時の座標系変換を適用する。
+    scan.points は保存に使う生座標のまま変更しない（ロスレス保存のため）。
+    pose が恒等変換なら scan.points をそのまま返し、メモリを増やさない。
+    """
+    pose = scan_pose_transform(scan)
+    if pose is None or len(scan.points) == 0:
+        return scan.points
+    R, t = pose
+    mode = getattr(scan, "coord_mode", "cartesian")
+    world = inverse_transform_coordinate_system(scan.points, mode).dot(R.T)
+    world += t
+    return transform_coordinate_system(world, mode)
+
+
+def scan_display_origin(scan) -> np.ndarray:
+    """スキャンのローカル原点（距離フィルタの基準）の表示用座標を返す"""
+    pose = scan_pose_transform(scan)
+    origin = np.zeros((1, 3), dtype=np.float64) if pose is None else pose[1].reshape(1, 3)
+    return transform_coordinate_system(origin, getattr(scan, "coord_mode", "cartesian"))[0]
 
 
 def _negate_schema(schema):

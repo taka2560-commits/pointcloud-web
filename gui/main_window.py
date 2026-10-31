@@ -43,7 +43,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, QColor
 
-from core.processor import FilterConfig, PointCloudProcessor, ProcessSummary, transform_coordinate_system, transform_scan_coordinate_system
+from core.processor import (
+    FilterConfig, PointCloudProcessor, ProcessSummary, transform_coordinate_system, transform_scan_coordinate_system,
+    scan_display_origin, scan_display_points, scan_pose_transform,
+)
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 from core.logger import log_info, log_warning, log_error, log_exception, open_log_folder
 from core.filters import (
@@ -4783,6 +4786,18 @@ class MainWindow(QMainWindow):
         self.load_worker.finished_error.connect(on_error)
         self.load_worker.start()
 
+    def _distance_reference_points(self, indices: np.ndarray) -> Optional[np.ndarray]:
+        """
+        距離フィルタの基準はスキャン原点。表示座標は pose 適用後なので、各点からスキャン原点を引いた座標を返す。
+        pose が無ければ None（表示座標をそのまま使う）。
+        """
+        if not any(scan_pose_transform(s) is not None for s in self.current_scans):
+            return None
+        origins = np.array([scan_display_origin(s) for s in self.current_scans], dtype=np.float64)
+        scan_ids = self.viewer.scan_ids
+        ids = scan_ids[indices] if scan_ids is not None else np.zeros(len(indices), dtype=np.int64)
+        return self.viewer.points_raw[indices] - origins[ids]
+
     def _update_viewer_from_scans(self):
         """現在のスキャンリストから点群データとスキャンIDをまとめてビューアに転送"""
         if not self.current_scans:
@@ -4807,7 +4822,7 @@ class MainWindow(QMainWindow):
         for s_idx, s in enumerate(self.current_scans):
             if s.point_count == 0:
                 continue
-            all_pts.append(s.points)
+            all_pts.append(scan_display_points(s))
             all_scan_ids.append(np.full(s.point_count, s_idx, dtype=np.int32))
             if has_any_color:
                 if "colorRed" in s.raw_fields and "colorGreen" in s.raw_fields and "colorBlue" in s.raw_fields:
@@ -5626,6 +5641,7 @@ class MainWindow(QMainWindow):
             target_points,
             config,
             intensities=target_intensities,
+            distance_points=self._distance_reference_points(normal_indices) if config.use_distance_filter else None,
         )
 
         def on_progress(percent: int, msg: str, sub_msg: str):
