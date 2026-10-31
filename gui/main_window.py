@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
         # UI モード（新UI / 従来UI）。従来UIは改修前の見た目・配置をそのまま残す安全弁（gui/ui_mode.py）
         self.ui_mode = get_ui_mode()
         self.ui_theme = get_ui_theme() if self.ui_mode == UI_MODE_MODERN else "dark"
+        log_info(f"UIモード: {self.ui_mode} / テーマ: {self.ui_theme}")
         _app = QApplication.instance()
         if self.ui_mode == UI_MODE_MODERN:
             # 新UIはダイアログ・ツールチップ・メッセージボックスも含めて統一するためアプリ全体に適用
@@ -2936,7 +2937,7 @@ class MainWindow(QMainWindow):
         self.combo_ui_theme.addItem("軌跡 (明るい地・黒い帯)", "kiseki")
         _theme_idx = self.combo_ui_theme.findData(get_saved_ui_theme())
         self.combo_ui_theme.setCurrentIndex(max(0, _theme_idx))
-        self.combo_ui_theme.setToolTip("新UIの配色テーマ（次回起動時に適用）。環境変数 E57_UI_THEME=kiseki / 起動引数 --theme=kiseki でも指定できます。")
+        self.combo_ui_theme.setToolTip("新UIの配色テーマ。選ぶとその場で切り替わり、次回起動時も保持されます。環境変数 E57_UI_THEME=kiseki / 起動引数 --theme=kiseki でも指定できます。")
         self.combo_ui_theme.currentIndexChanged.connect(self._on_ui_theme_combo_changed)
         l_sys.addWidget(self.combo_ui_theme, 6, 1)
 
@@ -3052,11 +3053,32 @@ class MainWindow(QMainWindow):
             self.log_text.append(f"UIスタイルを「{label}」に変更（次回起動時に適用）")
 
     def _on_ui_theme_combo_changed(self, index: int):
-        """新UIテーマの選択を保存（次回起動時に適用）"""
+        """新UIテーマの選択を保存し、新UIで動作中ならその場で切り替える"""
         theme = self.combo_ui_theme.currentData()
-        if theme:
-            set_saved_ui_theme(theme)
-            self.show_toast(f"テーマを「{self.combo_ui_theme.currentText()}」に設定しました（次回起動時に適用）")
+        if not theme:
+            return
+        set_saved_ui_theme(theme)
+        if self.ui_mode != UI_MODE_MODERN:
+            self.show_toast(f"テーマを「{self.combo_ui_theme.currentText()}」に設定しました（新UIで起動したときに適用）")
+            return
+        self.apply_ui_theme(theme)
+        self.show_toast(f"テーマを「{self.combo_ui_theme.currentText()}」に切り替えました")
+
+    def apply_ui_theme(self, theme: str) -> None:
+        """新UIのテーマをその場で切り替える（トークン QSS をアプリ全体に再適用。再起動不要）"""
+        if self.ui_mode != UI_MODE_MODERN or theme == getattr(self, "ui_theme", None):
+            return
+        self.ui_theme = theme
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.setStyleSheet(get_theme_qss(UI_MODE_MODERN, theme))
+        try:
+            from gui.modern_ui import on_theme_changed
+
+            on_theme_changed(self, theme)
+        except Exception as exc:
+            log_warning(f"テーマ切替の後処理に失敗しました: {exc}")
+        log_info(f"UIテーマを切り替えました: {theme}")
 
     def _on_ui_motion_toggled(self, checked: bool):
         """新UIのアニメーション ON/OFF を保存し、即時に反映"""

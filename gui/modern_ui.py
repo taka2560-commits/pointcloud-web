@@ -677,8 +677,11 @@ def _install_behaviors(win) -> None:
     # モーション ON/OFF（設定「アニメーション」）と押下フィードバック（アプリ全体の QAbstractButton）
     set_motion_enabled(get_saved_motion_enabled())
     install_button_motion(QApplication.instance())
-    tokens = get_tokens(getattr(win, "ui_theme", "dark"))
-    pulse_color = tokens.accent_base if tokens.is_light else tokens.accent_soft
+
+    def pulse_color() -> str:
+        # テーマはその場で切り替わることがあるので、使う瞬間のトークンから色を決める
+        t = get_tokens(getattr(win, "ui_theme", "dark"))
+        return t.accent_base if t.is_light else t.accent_soft
 
     # トースト: 内容から種類を判定し、:kind プロパティで色分け。絵文字は除去。
     #   出現 = フェード＋スライド（オーバーシュート）、警告 = エラーシェイク、退出 = フェード
@@ -756,7 +759,7 @@ def _install_behaviors(win) -> None:
             return
         fade_out_then_hide(card)
         if exec_btn is not None:
-            QTimer.singleShot(350, lambda: focus_pulse(exec_btn, pulse_color))
+            QTimer.singleShot(350, lambda: focus_pulse(exec_btn, pulse_color()))
 
     win.viewer.bounds_ready.connect(on_first_points)
 
@@ -798,6 +801,23 @@ def _wrap_collapsible(grp, expand_animated) -> None:
 
 
 # ----------------------------------------------------------------------------- 公開 API
+def on_theme_changed(win, theme: str) -> None:
+    """テーマのその場切替の後処理: サイドバー幅の既定値をテーマのトークンに合わせ、全ウィジェットを再描画する"""
+    from gui.design_tokens import get_tokens
+
+    t = get_tokens(theme)
+    try:
+        win.sidebar_scroll.setMinimumWidth(t.sidebar_min)
+        win._sidebar_min_width = t.sidebar_min
+        win._sidebar_user_width = max(getattr(win, "_sidebar_user_width", 0) or 0, t.sidebar_default)
+        win._lock_sidebar_width()
+    except Exception as exc:
+        log_warning(f"テーマ切替: サイドバー幅の更新に失敗しました: {exc}")
+    for w in win.findChildren(QWidget):
+        _repolish(w)
+    win.update()
+
+
 def apply_modern_ui(win) -> None:
     """MainWindow に新UIを後付けする（UI モードが modern のときに __init__ の最後で呼ばれる）"""
     _neutralize_inline_styles(win)

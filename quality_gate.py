@@ -857,6 +857,13 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         qss_k = app.styleSheet()
         assert "#e7efec" in qss_k and "#004c2c" in qss_k and "#0b1110" in qss_k, "軌跡テーマの QSS が適用されていません"
         assert "chevron-down-light.svg" in qss_k, "軌跡テーマで明るい地用の矢印アイコンが使われていません"
+        # その場でのテーマ切替（再起動不要）: dark → kiseki と往復して QSS とテーマ名が入れ替わること
+        win_k.apply_ui_theme("dark")
+        app.processEvents()
+        assert win_k.ui_theme == "dark" and "#0f172a" in app.styleSheet(), "テーマのその場切替（dark）が効いていません"
+        win_k.apply_ui_theme("kiseki")
+        app.processEvents()
+        assert win_k.ui_theme == "kiseki" and "#e7efec" in app.styleSheet(), "テーマのその場切替（kiseki）が効いていません"
         win_k.current_scans = [scan0, scan1]
         win_k._update_viewer_from_scans()
         app.processEvents()
@@ -877,7 +884,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         n_fx = sum(1 for w in win_k.findChildren(QWidget) if w.graphicsEffect() is not None and w.isVisible())
         assert n_fx == 0, f"モーション終了後に描画効果が残っています: {n_fx} 件"
         win_k.viewer.validate_invariants()
-        print("  [OK] 軌跡（明）テーマ スモーク合格 (起動・QSS 適用・タブ切替・通知・選択・展開・効果の後始末)")
+        print("  [OK] 軌跡（明）テーマ スモーク合格 (起動・QSS 適用・その場切替・タブ切替・通知・選択・展開・効果の後始末)")
     finally:
         win_k.close()
         os.environ.pop("E57_UI_THEME", None)
