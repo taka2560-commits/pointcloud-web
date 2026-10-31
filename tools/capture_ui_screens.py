@@ -148,6 +148,19 @@ def main() -> int:
     except Exception as exc:
         print("  [warn] section", exc)
 
+    # 6b. 計測ツール: 座標の読み取り（1点目で座標、2点目で距離と ΔX/ΔY/ΔZ を HUD に表示）
+    try:
+        win._set_interaction_mode("measure")
+        dp = win.viewer.display_points
+        c1, c2 = dp[0], dp[len(dp) // 2]
+        win.viewer._on_measure_pick(c1, c1.astype(np.float64) + win.viewer.center_offset)
+        win.viewer._on_measure_pick(c2, c2.astype(np.float64) + win.viewer.center_offset)
+        app.processEvents()
+        shot("07b_measure_coords")
+        win._set_interaction_mode("orbit")
+    except Exception as exc:
+        print("  [warn] measure", exc)
+
     # 7. トースト通知
     try:
         win.show_toast("✅ 保存が完了しました（トースト表示の例）", duration_ms=5000)

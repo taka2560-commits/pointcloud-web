@@ -3694,11 +3694,10 @@ class MainWindow(QMainWindow):
                 self.select_mode_btn.blockSignals(False)
                 self._toggle_selection_mode(False)
             self.btn_measure.setStyleSheet("background-color: #0284c7; font-weight: bold;")
-            self.status_label.setText("【計測モード】3D画面上の2点を左クリックしてください（右クリックまたはEscでクリア）")
+            self.status_label.setText("【計測モード】点をクリックすると座標を表示、2点目で距離。Ctrl+C で座標をコピー（右クリック/Escでクリア）")
         else:
             self.btn_measure.setStyleSheet("font-weight: bold;")
-            self.viewer.measure_points.clear()
-            self.viewer.measure_result_text = ""
+            self.viewer.clear_measure_points()
             self.viewer.update()
             self.status_label.setText("計測モードを終了しました")
         self._sync_segment_buttons()
@@ -4790,6 +4789,9 @@ class MainWindow(QMainWindow):
             self.viewer.set_point_cloud(None)
             self.point_count_label.setText("点数: 0 点")
             return
+
+        # 読み込み時の座標系変換を計測ツールへ伝える（ピックした座標をファイル系でも表示するため）
+        self.viewer.coord_mode = getattr(self.current_scans[0], "coord_mode", "cartesian") or "cartesian"
 
         all_pts = []
         all_scan_ids = []

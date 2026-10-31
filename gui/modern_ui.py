@@ -563,6 +563,7 @@ def _install_menu_bar(win) -> None:
     m_edit.addSeparator()
     m_edit.addAction("選択を反転\tI", win._invert_selection)
     m_edit.addAction("選択を解除\tEsc", win._clear_selection)
+    m_edit.addAction("計測した座標をコピー\tCtrl+C (計測中)", lambda: win.viewer.copy_measure_to_clipboard())
     m_edit.addAction("選択点をノイズへ移動\tDel", win._delete_selected_points)
     m_edit.addSeparator()
     m_edit.addAction("全ノイズを通常レイヤーへ復元", win._restore_all_noise)
@@ -619,7 +620,8 @@ def _shortcut_sheet_text(win) -> str:
     return (
         "Ctrl+O 開く / Ctrl+S 保存 / Ctrl+Z 元に戻す / Ctrl+Y やり直し\n"
         "V 回転⇄パン / H パン / B ブラシ / R 矩形 / C 円形 / L 多角形 / M 計測 / U 2点壁 / N ノイズ専用\n"
-        "Del ノイズへ移動 / I 選択反転 / Esc 解除 / F フィット / P 投影切替 / Shift+B 断面枠の表示切替 / [ ] ブラシ径"
+        "Del ノイズへ移動 / I 選択反転 / Esc 解除 / F フィット / P 投影切替 / Shift+B 断面枠の表示切替 / [ ] ブラシ径\n"
+        "計測中: クリックで座標表示 / 2点目で距離 / Ctrl+C 座標をコピー / 右クリック クリア"
     )
 
 

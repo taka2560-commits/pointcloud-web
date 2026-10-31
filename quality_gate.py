@@ -340,6 +340,32 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert win.viewer.selection_mode and win.viewer.selection_shape == PointCloudViewer.SELECT_CIRCLE and win.seg_btn_circle.isChecked()
     win._set_interaction_mode("measure")
     assert win.viewer.measure_mode and win.nav_btn_measure.isChecked()
+    # 計測ツールの座標読み取り: 1点目で座標行、2点目で距離行と ΔX/ΔY/ΔZ、座標系変換時はファイル系の行、クリア
+    from gui.measure_text import measure_clipboard_text
+    _dp = win.viewer.display_points
+    assert _dp is not None and len(_dp) >= 2
+    _c1, _c2 = _dp[0], _dp[len(_dp) - 1]
+    win.viewer._on_measure_pick(_c1, _c1.astype(np.float64) + win.viewer.center_offset)
+    app.processEvents()
+    assert len(win.viewer.measure_coord_lines) == 1 and win.viewer.measure_coord_lines[0].startswith("P1 X="), win.viewer.measure_coord_lines
+    assert win.status_label.text().startswith("P1 X="), win.status_label.text()
+    assert win.viewer.measure_result_text == ""
+    win.viewer._on_measure_pick(_c2, _c2.astype(np.float64) + win.viewer.center_offset)
+    app.processEvents()
+    assert len(win.viewer.measure_coord_lines) == 4 and win.viewer.measure_coord_lines[1].startswith("P2 X=")
+    assert win.viewer.measure_result_text.startswith("直線距離:") and win.viewer.measure_coord_lines[3].startswith("ΔX=")
+    assert win.status_label.text().startswith("直線距離:")
+    _tsv = measure_clipboard_text([p[1] for p in win.viewer.measure_points], win.viewer.coord_mode)
+    assert _tsv.startswith("点\tX\tY\tZ") and "\nP1\t" in _tsv and "\nP2\t" in _tsv and "直線距離" in _tsv
+    win.viewer.coord_mode = "survey_swap"
+    win.viewer._refresh_measure_text()
+    assert len(win.viewer.measure_coord_lines) == 6 and win.viewer.measure_coord_lines[1].strip().startswith("ファイル系")
+    win.viewer.coord_mode = "cartesian"
+    win.viewer._on_measure_pick(_c1, _c1.astype(np.float64) + win.viewer.center_offset)  # 3点目 → 新しい計測
+    assert len(win.viewer.measure_points) == 1 and len(win.viewer.measure_coord_lines) == 1
+    win.viewer.clear_measure_points()
+    assert not win.viewer.measure_points and not win.viewer.measure_coord_lines and win.viewer.measure_result_text == ""
+    print("  [OK] 計測ツール 座標読み取り（座標行・距離行・ファイル系併記・コピー文字列・クリア）検査合格")
     win._set_interaction_mode("orbit")
     assert not win.viewer.measure_mode and not win.viewer.selection_mode and win.seg_btn_orbit.isChecked()
 
