@@ -47,6 +47,12 @@
   ・取り込み時の座標系変換は表示・編集用。保存時は FileSaveWorker が自動で元の座標系へ
     逆変換してからビット完全一致で書き戻す（tests/test_coord_roundtrip.py で検証）。
 
+[ルール7] UI は新UI（modern）と従来UI（classic）を両立させる（詳細は AI_HANDOVER.md §2-⑦）
+  ・新UIは gui/modern_ui.py が従来UIに後付けする方式。従来UIのコードと DARK_THEME_QSS は削除・変更しない。
+  ・新UIの色・文字サイズ・角丸は gui/design_tokens.py でのみ変更。インライン QSS と絵文字ラベルは追加しない。
+  ・不具合時は 起動引数 --classic-ui / 環境変数 E57_UI_MODE=classic / 設定「UIスタイル」で改修前に戻せる。
+  ・改修直前の main には Git タグ before-ui-redesign-2026-10-31 を付与済み。
+
 [ルール6] 複数AIでの並行開発（詳細は AGENTS.md）
   ・元AIは「点群マイツール」フォルダ(main)、Claude は「点群マイツール-claude」worktree(claude/*)で作業。
   ・他方のフォルダを直接編集しない。取り込みは git マージのみ。作業終了時は必ず全ファイルをコミット。
@@ -83,7 +89,7 @@ gui/progress_dialog.py: キャンセル対応モーダル進捗ダイアログ
       python -X utf8 quality_gate.py          （全5ゲート。コミット時にも pre-commit フックで自動実行）
       python -X utf8 quality_gate.py --quick  （Gate 1/3/5 のみ。GUIを開かない作業中の確認用）
   ・全5ゲート（構文/DOM整合、ビューア不変条件、境界値ファジング、実機GUIシナリオ、
-    unittest スイート 55件）がすべてPASSすることを確認してください。
+    unittest スイート 66件）がすべてPASSすることを確認してください。
 
 【スタンドアロンEXEのビルド】
   ・「EXE配布パッケージ作成.bat」 をダブルクリックしてください。

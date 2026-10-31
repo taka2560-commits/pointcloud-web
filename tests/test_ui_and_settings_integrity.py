@@ -267,6 +267,9 @@ class TestUIAndSettingsIntegrity(unittest.TestCase):
     # -------------------------------------------------------------
     def test_section_collapse_and_reset(self):
         """断面チェックONでスライダー行が展開し、リセットですべて折りたたまれるか"""
+        # 新UIの既定タブは「①自動」で断面グループが隠れているため、断面タブへ切り替えてから検証する
+        self.win._set_sidebar_workflow_tab("section")
+        QApplication.processEvents()
         # 初期状態: すべて折りたたまれている (非表示)
         self.assertFalse(self.win.sec_x_detail.isVisible())
         self.assertFalse(self.win.sec_y_detail.isVisible())

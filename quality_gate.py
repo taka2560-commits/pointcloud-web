@@ -262,10 +262,16 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     from gui.gl_viewer import PointCloudViewer
     from gui.worker_thread import FileSaveWorker
 
+    # 新UI（modern）で検証する。ユーザー設定で従来UIが選ばれていても、ゲートは両モードを順に検証する
+    from gui.ui_mode import reset_ui_mode_cache
+    os.environ["E57_UI_MODE"] = "modern"
+    reset_ui_mode_cache()
+
     app = QApplication.instance() or QApplication(sys.argv)
     win = MainWindow()
     win.show()
     app.processEvents()
+    assert win.ui_mode == "modern", f"UIモードが modern ではありません: {win.ui_mode}"
 
     # テスト用マルチスキャン (Scan 0: 200点, Scan 1: 100点 = 計300点) をロード
     np.random.seed(99)
@@ -764,9 +770,69 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     win.viewer.validate_invariants()
     print("  [OK] 🧭 2点ピック斜め壁アライン (横・縦・直交正面・壁真横・180°反転) & 斜め壁スライス検査合格")
 
+    # 8. 新UI（modern）固有の検査: 絵文字ゼロ・メニュー/ステータスバー・作業順・狭い画面での折り返し・未保存フラグ
+    from PySide6.QtWidgets import QPushButton
+    from gui.modern_ui import has_emoji
+
+    emoji_btns = [b.text() for b in win.findChildren(QPushButton) if b.text() and has_emoji(b.text())]
+    assert not emoji_btns, f"新UIのボタンに絵文字が残っています: {emoji_btns[:5]}"
+    assert win.menuBar() is not None and len(win.menuBar().actions()) >= 4, "新UIのメニューバー（ファイル/編集/表示/ヘルプ）がありません"
+    assert win.status_label.parentWidget() is win.statusBar(), "状態ラベルがステータスバーに移動していません"
+    side_lay = win.sidebar_widget.layout()
+    order = [side_lay.indexOf(g) for g in (win.auto_group, win.tools_group, win.layer_group, win.section_group)]
+    assert order == sorted(order) and all(i >= 0 for i in order), f"サイドバーが作業順（自動→手動→レイヤー→断面）になっていません: {order}"
+    assert hasattr(win, "save_group") and win.save_group.isVisible(), "保存グループが表示されていません"
+    assert hasattr(win, "empty_state_card"), "空状態カードが生成されていません"
+    win.resize(1000, 650)
+    for _ in range(5):
+        app.processEvents()
+    nav_bar = getattr(win, "_nav_bar_widget", None)
+    assert nav_bar is not None
+    for b in nav_bar.findChildren(QPushButton):
+        if b.isVisible():
+            assert nav_bar.rect().contains(b.geometry()), f"1000px幅で上部バーのボタン「{b.text()}」がはみ出しています"
+    for b in win.bottom_overlay_bar.findChildren(QPushButton):
+        if b.isVisible():
+            assert win.bottom_overlay_bar.rect().contains(b.geometry()), f"1000px幅で下部バーのボタン「{b.text()}」がはみ出しています"
+    win.resize(1400, 900)
+    app.processEvents()
+    # 未保存フラグ: 編集でタイトルに * が付き、保存成功相当で消える
+    win._set_dirty(False)
+    win._push_layer_undo_state()
+    assert win._dirty and win.windowTitle().startswith("* "), "編集後に未保存フラグ（タイトルの *）が立っていません"
+    win._set_dirty(False)
+    assert not win.windowTitle().startswith("* ")
+    print("  [OK] 新UI検査合格 (絵文字0・メニュー/ステータスバー・作業順・1000px幅で折り返し・未保存フラグ)")
+
     win.close()
     shutil.rmtree(qgate_tmp, ignore_errors=True)
     print("  [OK] 実機 OpenGL VBO 描画 & MainWindow 全操作・レイヤー拡張①〜⑥シナリオ検査合格")
+
+    # 9. 従来UI（classic）スモーク: 改修前の画面が引き続き起動・操作できること（安全策の検証）
+    os.environ["E57_UI_MODE"] = "classic"
+    reset_ui_mode_cache()
+    win_c = MainWindow()
+    win_c.show()
+    app.processEvents()
+    try:
+        assert win_c.ui_mode == "classic"
+        assert has_emoji(win_c.btn_instant_del.text()), "従来UIで絵文字付きラベルが失われています（従来UIは改修前のまま残す）"
+        assert win_c.menuBar() is None or len(win_c.menuBar().actions()) == 0, "従来UIにメニューバーが付いています"
+        assert win_c.status_label.parentWidget() is not win_c.statusBar(), "従来UIで状態ラベルの位置が変わっています"
+        win_c.current_scans = [scan0, scan1]
+        win_c._update_viewer_from_scans()
+        app.processEvents()
+        for tab_key in ["layer", "select", "section", "auto", "view", "settings", "all"]:
+            win_c._set_sidebar_workflow_tab(tab_key)
+        win_c._set_interaction_mode("rect")
+        assert win_c.viewer.selection_mode and win_c.side_btn_rect.isChecked()
+        win_c._set_interaction_mode("orbit")
+        win_c.viewer.validate_invariants()
+        print("  [OK] 従来UI（classic）スモーク合格 (起動・タブ切替・モード切替・絵文字ラベル維持)")
+    finally:
+        win_c.close()
+        os.environ.pop("E57_UI_MODE", None)
+        reset_ui_mode_cache()
 
 
 def gate_5_unit_and_integration_suites() -> None:

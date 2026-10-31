@@ -1,6 +1,19 @@
 """
-GUIのスタイルシート定義（モダン・ダークテーマ）
+GUIのスタイルシート定義
+
+- DARK_THEME_QSS: 従来UI（classic）のテーマ。改修前の見た目を保つため変更しない。
+- 新UI（modern）の QSS は gui/design_tokens.py のトークンから生成する（get_theme_qss("modern")）。
 """
+
+
+def get_theme_qss(ui_mode: str) -> str:
+    """UI モードに応じた QSS を返す（"modern" はトークン生成、それ以外は従来テーマ）"""
+    if ui_mode == "modern":
+        from gui.design_tokens import build_modern_qss
+
+        return build_modern_qss()
+    return DARK_THEME_QSS
+
 
 DARK_THEME_QSS = """
 QMainWindow {

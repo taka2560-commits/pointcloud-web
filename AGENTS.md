@@ -70,3 +70,4 @@ python -X utf8 quality_gate.py --fix-eol  # .bat の改行コードを CRLF へ�
 3. 取り込み時の座標系変換は表示・編集用。**保存は元の座標系・元のスケールに逆変換して書き戻す**（`FileSaveWorker` が自動で行う）。
 4. 大規模点群のクラスタリングは代表点安全リミッター（`REPRESENTATIVE_POINT_LIMIT = 200,000`）を介す。
 5. フィルタが「全点を除去」する結果になる場合は安全側（全点保持＋警告）に倒す。
+6. UI は新UI（modern）と従来UI（classic）の両立を保つ。従来UIのコード・`DARK_THEME_QSS` は削除/変更しない。新UIの見た目は `gui/design_tokens.py` でのみ変更し、インライン QSS・絵文字ラベルを追加しない（Gate4 が検査）。不具合時の退避は `--classic-ui`（AI_HANDOVER.md §2-⑦）。

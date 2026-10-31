@@ -957,7 +957,7 @@ class PointCloudViewer(QOpenGLWidget):
             vis_cnt = len(self.display_points) if self.display_points is not None else 0
             guide_tag = ""
             if not getattr(self, "show_section_origin_plane", True) and not getattr(self, "show_section_box", True):
-                guide_tag = " (枠非表示 / B:再表示)"
+                guide_tag = " (枠非表示 / Shift+B:再表示)"
             elif not getattr(self, "show_section_origin_plane", True):
                 guide_tag = " (基点枠OFF / B:切替)"
             elif not getattr(self, "show_section_box", True):
@@ -2803,12 +2803,12 @@ class PointCloudViewer(QOpenGLWidget):
             self.update()
 
     def toggle_section_guides(self) -> bool:
-        """断面ガイド枠（基点枠・厚み枠）の表示を一括トグル切替 (ショートカット: Bキー)"""
+        """断面ガイド枠（基点枠・厚み枠）の表示を一括トグル切替 (ショートカット: Shift+B)"""
         new_state = not (self.show_section_origin_plane or self.show_section_box)
         self.show_section_origin_plane = new_state
         self.show_section_box = new_state
         self.section_guides_changed.emit(self.show_section_origin_plane, self.show_section_box)
-        state_txt = "ON" if new_state else "OFF (点群のみ表示中 / Bキーで再表示)"
+        state_txt = "ON" if new_state else "OFF (点群のみ表示中 / Shift+Bで再表示)"
         self.status_changed.emit(f"📐 断面ガイド枠表示: {state_txt}")
         self.update()
         return new_state
@@ -3105,7 +3105,7 @@ class PointCloudViewer(QOpenGLWidget):
             self.toggle_projection()
         elif key == Qt.Key_I:
             self.invert_selection()
-        elif key == Qt.Key_B:
+        elif key == Qt.Key_B and (event.modifiers() & Qt.ShiftModifier):
             self.toggle_section_guides()
         elif key == Qt.Key_BracketLeft:
             self.set_brush_radius(self.brush_radius - 4)

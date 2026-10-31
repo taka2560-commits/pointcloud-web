@@ -67,7 +67,8 @@ from gui.worker_thread import (
 from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
-from gui.styles import DARK_THEME_QSS
+from gui.styles import DARK_THEME_QSS, get_theme_qss
+from gui.ui_mode import get_ui_mode, UI_MODE_MODERN, UI_MODE_CLASSIC, set_saved_ui_mode, get_saved_ui_mode
 
 
 
@@ -135,7 +136,11 @@ class CollapsibleGroupBox(QGroupBox):
 
         # コンテンツウィジェット (実際のコントロール群を格納)
         self.content_widget = QWidget(self)
-        self.content_widget.setStyleSheet("background: transparent;")
+        # ★ セレクタ無しの "background: transparent;" は子孫ウィジェット全体に伝播し、
+        #    グローバル QSS（例: QPushButton#execute_button の緑背景）を打ち消して
+        #    主要ボタンが文字だけに見える不具合の原因になっていた。objectName で自分自身に限定する。
+        self.content_widget.setObjectName("collapsible_content")
+        self.content_widget.setStyleSheet("QWidget#collapsible_content { background: transparent; }")
         self._root_layout.addWidget(self.content_widget)
 
         # クリックイベント接続
@@ -195,7 +200,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("E57 点群ノイズ処理ツール - 3Dエディタ")
         self.resize(1400, 900)
         self.setMinimumSize(QSize(1000, 650))
-        self.setStyleSheet(DARK_THEME_QSS)
+
+        # UI モード（新UI / 従来UI）。従来UIは改修前の見た目・配置をそのまま残す安全弁（gui/ui_mode.py）
+        self.ui_mode = get_ui_mode()
+        _app = QApplication.instance()
+        if self.ui_mode == UI_MODE_MODERN:
+            # 新UIはダイアログ・ツールチップ・メッセージボックスも含めて統一するためアプリ全体に適用
+            if _app is not None:
+                _app.setStyleSheet(get_theme_qss(UI_MODE_MODERN))
+        else:
+            if _app is not None:
+                _app.setStyleSheet("")
+            self.setStyleSheet(DARK_THEME_QSS)
+
+        # 未保存の編集があるか（終了・再読込時の確認に使う）
+        self._dirty = False
+        self._last_loaded_input_path = ""
+        self._coord_prev_index = 0
 
         self.setAcceptDrops(True)
 
@@ -228,6 +249,38 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._setup_shortcuts()
         self._load_app_settings()
+
+        if self.ui_mode == UI_MODE_MODERN:
+            # 従来UIの構築結果に新UI（作業順の並び・メニュー/ステータスバー・重複ボタン非表示・絵文字除去等）を後付けする
+            from gui.modern_ui import apply_modern_ui
+
+            apply_modern_ui(self)
+
+    # ------------------------------------------------------------------
+    # 未保存の編集の追跡（作業消失防止）
+    # ------------------------------------------------------------------
+    def _set_dirty(self, dirty: bool) -> None:
+        """未保存の編集フラグを更新し、ウィンドウタイトルに「*」で示す"""
+        self._dirty = bool(dirty)
+        base = self.windowTitle().lstrip("* ")
+        self.setWindowTitle(("* " + base) if self._dirty else base)
+
+    def _confirm_discard_changes(self, action_text: str) -> bool:
+        """未保存の編集がある場合に確認する。続行してよければ True"""
+        if not getattr(self, "_dirty", False):
+            return True
+        n_noise = 0
+        if self.viewer.layer_mask is not None:
+            n_noise = int(np.sum(~self.viewer.layer_mask))
+        ret = QMessageBox.question(
+            self,
+            "未保存の編集があります",
+            f"{action_text}と、保存していない編集内容（ノイズレイヤー {n_noise:,} 点などのレイヤー変更）は失われます。\n\n"
+            "続行しますか？（「いいえ」で戻り、Ctrl+S または「保存」で E57 に書き出せます）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return ret == QMessageBox.Yes
 
     def _init_ui(self):
         """UIコンポーネントの構築"""
@@ -266,7 +319,9 @@ class MainWindow(QMainWindow):
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("E57ファイル / フォルダを指定・ドロップ")
         self.input_edit.setMinimumWidth(70)
-        self.input_edit.textChanged.connect(self._on_input_file_changed)
+        # 入力途中で読み込みが走らないよう、Enter / フォーカス移動の確定時にのみ読み込む
+        # （参照・フォルダ・ドロップは各ハンドラから明示的に読み込む）
+        self.input_edit.editingFinished.connect(self._on_input_edit_finished)
         file_layout.addWidget(self.input_edit, 0, 1)
 
         self.input_browse_btn = QPushButton("参照")
@@ -685,11 +740,11 @@ class MainWindow(QMainWindow):
         self.chk_sec_show_box.toggled.connect(self._on_section_guide_visibility_changed)
         sec_guide_row.addWidget(self.chk_sec_show_box)
 
-        self.btn_toggle_sec_guides = QPushButton("切替(B)")
+        self.btn_toggle_sec_guides = QPushButton("切替(Shift+B)")
         self.btn_toggle_sec_guides.setProperty("role", "outline")
         self.btn_toggle_sec_guides.setMaximumWidth(52)
         self.btn_toggle_sec_guides.setStyleSheet("padding: 1px 3px; font-size: 10px;")
-        self.btn_toggle_sec_guides.setToolTip("断面の基点枠・厚み枠の表示を一括トグル切替 (ショートカット: Bキー)")
+        self.btn_toggle_sec_guides.setToolTip("断面の基点枠・厚み枠の表示を一括トグル切替 (ショートカット: Shift+B)")
         self.btn_toggle_sec_guides.clicked.connect(self._toggle_section_guides_ui)
         sec_guide_row.addWidget(self.btn_toggle_sec_guides)
         sec_guide_row.addStretch()
@@ -1808,7 +1863,7 @@ class MainWindow(QMainWindow):
         self.seg_btn_rect.clicked.connect(lambda: self._set_interaction_mode("rect"))
         nav_layout.addWidget(self.seg_btn_rect)
 
-        self.seg_btn_circle = QPushButton("⭕ 円(C)")
+        self.seg_btn_circle = QPushButton("⭕ 円形(C)")
         self.seg_btn_circle.setCheckable(True)
         self.seg_btn_circle.setProperty("role", "segment")
         self.seg_btn_circle.setStyleSheet("padding: 3px 5px; font-size: 11px;")
@@ -1816,7 +1871,7 @@ class MainWindow(QMainWindow):
         self.seg_btn_circle.clicked.connect(lambda: self._set_interaction_mode("circle"))
         nav_layout.addWidget(self.seg_btn_circle)
 
-        self.seg_btn_poly = QPushButton("⬠ 多角(L)")
+        self.seg_btn_poly = QPushButton("⬠ 多角形(L)")
         self.seg_btn_poly.setCheckable(True)
         self.seg_btn_poly.setProperty("role", "segment")
         self.seg_btn_poly.setStyleSheet("padding: 3px 5px; font-size: 11px;")
@@ -1831,7 +1886,7 @@ class MainWindow(QMainWindow):
         self.btn_instant_del.toggled.connect(self._toggle_instant_delete_mode)
         nav_layout.addWidget(self.btn_instant_del)
 
-        self.btn_clean_mode = QPushButton("🎯 専用(N)")
+        self.btn_clean_mode = QPushButton("🎯 ノイズ専用(N)")
         self.btn_clean_mode.setCheckable(True)
         self.btn_clean_mode.setToolTip("ノイズ処理に特化した高コントラスト・ブラシ即消去ワークスペースへワンタッチ切替 (N)")
         self.btn_clean_mode.setStyleSheet(
@@ -2058,6 +2113,10 @@ class MainWindow(QMainWindow):
         wall_align_shortcut = QShortcut(QKeySequence("U"), self)
         wall_align_shortcut.activated.connect(lambda: self._toggle_wall_align_mode(not self.viewer.wall_align_mode))
 
+        # 断面枠の表示切替は Shift+B（B はブラシと衝突していたため移動）
+        sec_guides_shortcut = QShortcut(QKeySequence("Shift+B"), self)
+        sec_guides_shortcut.activated.connect(self._toggle_section_guides_ui)
+
     def _on_shortcut_v_view_mode(self):
         """Vキー: 選択/計測モード中なら即座に画面操作へ戻り、すでに回転モード中なら『🖐回転 ⇄ ✋パン』を交互に切替"""
         if not self.viewer.selection_mode and not self.viewer.measure_mode and not self.viewer.pan_mode:
@@ -2148,6 +2207,7 @@ class MainWindow(QMainWindow):
             # max_steps <= 0 は「無制限」
             self.layer_history.push(self._current_layer_state(), max_steps=max_steps)
             self._sync_undo_buttons()
+            self._set_dirty(True)
 
     def _sync_undo_buttons(self):
         """戻す/やり直しボタン (手動編集パネル・自動フィルタパネル両方) の有効状態を履歴スタックと同期"""
@@ -2194,7 +2254,7 @@ class MainWindow(QMainWindow):
         sorted_layer_ids = sorted(self.viewer.layers.keys(), key=lambda x: (self.viewer.is_noise_layer(x), x))
         for lid in sorted_layer_ids:
             linfo = self.viewer.layers[lid]
-            lock_mark = "🔒" if linfo.locked else ""
+            lock_mark = ("[保護] " if self.ui_mode == UI_MODE_MODERN else "🔒") if linfo.locked else ""
             self.target_layer_combo.addItem(f"{lock_mark}[ID:{lid}] {linfo.name}", lid)
         if prev_target_id in self.viewer.layers:
             idx = self.target_layer_combo.findData(prev_target_id)
@@ -2231,25 +2291,38 @@ class MainWindow(QMainWindow):
             col_btn.clicked.connect(lambda _=False, layer_id=lid: self._on_pick_layer_color(layer_id))
             row_l.addWidget(col_btn)
 
-            lock_btn = QPushButton("🔒" if linfo.locked else "🔓")
-            lock_btn.setFixedSize(26, 20)
+            if self.ui_mode == UI_MODE_MODERN:
+                # 新UI: 絵文字ではなく文字で状態を示し、:checked で色が変わる（QSS）
+                lock_btn = QPushButton("保護中" if linfo.locked else "保護")
+                lock_btn.setCheckable(True)
+                lock_btn.setChecked(bool(linfo.locked))
+                lock_btn.setProperty("role", "segment")
+                lock_btn.setFixedSize(54, 24)
+            else:
+                lock_btn = QPushButton("🔒" if linfo.locked else "🔓")
+                lock_btn.setFixedSize(26, 20)
+                lock_btn.setStyleSheet(
+                    "background-color: #b45309; font-size: 10px; padding: 0px;"
+                    if linfo.locked
+                    else "background-color: #334155; font-size: 10px; padding: 0px;"
+                )
             lock_btn.setToolTip("レイヤーのロック(保護)切替: ロック中は選択・削除・自動フィルタから保護されます")
-            lock_btn.setStyleSheet(
-                "background-color: #b45309; font-size: 10px; padding: 0px;"
-                if linfo.locked
-                else "background-color: #334155; font-size: 10px; padding: 0px;"
-            )
             lock_btn.clicked.connect(
                 lambda _=False, layer_id=lid, cur_lock=linfo.locked: self._on_toggle_layer_lock(layer_id, not cur_lock)
             )
             row_l.addWidget(lock_btn)
 
             cnt_lbl = QLabel(f"{cnt:,}点")
-            cnt_lbl.setStyleSheet(
-                "color: #cbd5e1; font-size: 11px; min-width: 50px;"
-                if not self.viewer.is_noise_layer(lid)
-                else "color: #f87171; font-size: 11px; min-width: 50px;"
-            )
+            if self.ui_mode == UI_MODE_MODERN:
+                cnt_lbl.setStyleSheet(
+                    "color: #e2e8f0; min-width: 50px;" if not self.viewer.is_noise_layer(lid) else "color: #fca5a5; min-width: 50px;"
+                )
+            else:
+                cnt_lbl.setStyleSheet(
+                    "color: #cbd5e1; font-size: 11px; min-width: 50px;"
+                    if not self.viewer.is_noise_layer(lid)
+                    else "color: #f87171; font-size: 11px; min-width: 50px;"
+                )
             cnt_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             row_l.addWidget(cnt_lbl)
 
@@ -2583,6 +2656,17 @@ class MainWindow(QMainWindow):
         if len(noise_idx) == 0:
             QMessageBox.information(self, "情報", "ノイズレイヤーに点はありません。")
             return
+        if len(noise_idx) >= 1000:
+            ret = QMessageBox.question(
+                self,
+                "全ノイズ復元",
+                f"ノイズレイヤーの {len(noise_idx):,} 点をすべて通常レイヤーへ戻します。\n"
+                "よろしいですか？（Ctrl+Z で元に戻せます）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if ret != QMessageBox.Yes:
+                return
         self._push_layer_undo_state()
         self.viewer.restore_indices_to_normal(noise_idx)
         self.log_text.append(f"全ノイズ復元: {len(noise_idx):,} 点を通常レイヤーへ復元しました")
@@ -2822,6 +2906,22 @@ class MainWindow(QMainWindow):
         sys_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
         l_sys.addWidget(sys_hint, 4, 0, 1, 2)
 
+        # UI スタイル（新UI / 従来UI）: 改修をいつでも元に戻せる安全弁。次回起動時に適用
+        l_sys.addWidget(QLabel("UIスタイル:"), 5, 0)
+        self.combo_ui_mode = QComboBox()
+        self.combo_ui_mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_ui_mode.setMinimumContentsLength(8)
+        self.combo_ui_mode.addItem("新UI (作業順・メニュー・ステータスバー)", UI_MODE_MODERN)
+        self.combo_ui_mode.addItem("従来UI (改修前の画面)", UI_MODE_CLASSIC)
+        _saved_idx = self.combo_ui_mode.findData(get_saved_ui_mode())
+        self.combo_ui_mode.setCurrentIndex(max(0, _saved_idx))
+        self.combo_ui_mode.setToolTip(
+            "画面の見た目と配置を切り替えます（次回起動時に適用）。\n"
+            "起動引数 --classic-ui / --modern-ui、環境変数 E57_UI_MODE=classic でも指定できます。"
+        )
+        self.combo_ui_mode.currentIndexChanged.connect(self._on_ui_mode_combo_changed)
+        l_sys.addWidget(self.combo_ui_mode, 5, 1)
+
         tab_sub.addTab(tab_sys, "⚙️ システム")
 
         # 3. ショートカット一覧タブ
@@ -2916,6 +3016,15 @@ class MainWindow(QMainWindow):
         ):
             if sp:
                 sp.setSingleStep(step_val)
+
+    def _on_ui_mode_combo_changed(self, index: int):
+        """UIスタイルの選択を保存（次回起動時に適用）"""
+        mode = self.combo_ui_mode.currentData()
+        if mode in (UI_MODE_MODERN, UI_MODE_CLASSIC):
+            set_saved_ui_mode(mode)
+            label = "新UI" if mode == UI_MODE_MODERN else "従来UI"
+            self.show_toast(f"UIスタイルを「{label}」に設定しました（次回起動時に適用）")
+            self.log_text.append(f"UIスタイルを「{label}」に変更（次回起動時に適用）")
 
     def _on_undo_limit_changed(self, index: int):
         # 0 は「無制限」の意味なので `or 50` で潰してはならない（None のときだけ既定値 50）
@@ -3110,7 +3219,10 @@ class MainWindow(QMainWindow):
         self.show_toast("🔄 設定を初期値に戻しました")
 
     def closeEvent(self, event):
-        """アプリケーション終了時の処理 (設定の自動保存・ワーカー安全終了)"""
+        """アプリケーション終了時の処理 (未保存確認・設定の自動保存・ワーカー安全終了)"""
+        if not self._confirm_discard_changes("このまま終了する"):
+            event.ignore()
+            return
         try:
             if getattr(self, "chk_auto_save_settings", None) is None or self.chk_auto_save_settings.isChecked():
                 self._save_app_settings(silent=True)
@@ -3318,7 +3430,7 @@ class MainWindow(QMainWindow):
             move_sub = menu.addMenu(f"📁 選択した {n_sel:,} 点をレイヤーへ移動")
             for lid in sorted(self.viewer.layers.keys(), key=lambda x: (x == 0, x)):
                 linfo = self.viewer.layers[lid]
-                lock_mark = "🔒" if linfo.locked else ""
+                lock_mark = ("[保護] " if self.ui_mode == UI_MODE_MODERN else "🔒") if linfo.locked else ""
                 act_mv = move_sub.addAction(f"{lock_mark}[ID:{lid}] {linfo.name}")
                 act_mv.triggered.connect(lambda _=False, target_id=lid: self._move_selected_to_specific_layer(target_id))
 
@@ -3377,7 +3489,7 @@ class MainWindow(QMainWindow):
         ):
             guides_on = self.viewer.show_section_origin_plane or self.viewer.show_section_box
             state_txt = "OFFにする (点群のみ表示)" if guides_on else "ONにする"
-            act_sec_guide = menu.addAction(f"📐 断面基点枠・厚み枠を{state_txt} (B)")
+            act_sec_guide = menu.addAction(f"📐 断面基点枠・厚み枠を{state_txt} (Shift+B)")
             act_sec_guide.triggered.connect(self._toggle_section_guides_ui)
 
         menu.addSeparator()
@@ -3413,7 +3525,7 @@ class MainWindow(QMainWindow):
                 target_w = getattr(self, "_sidebar_user_width", 380)
                 total = sum(curr_sizes)
                 if total > 0:
-                    left = max(340, min(target_w, total - 200))
+                    left = max(getattr(self, "_sidebar_min_width", 340), min(target_w, total - 200))
                     right = total - left
                     if abs(curr_sizes[0] - left) > 1:
                         self.splitter.setSizes([left, right])
@@ -3949,7 +4061,7 @@ class MainWindow(QMainWindow):
         """断面ガイド枠を一括トグル切替"""
         is_on = self.viewer.toggle_section_guides()
         txt = "表示" if is_on else "非表示 (点群のみ)"
-        self.show_toast(f"📐 断面枠: {txt} (B)")
+        self.show_toast(f"📐 断面枠: {txt} (Shift+B)")
 
     def _on_section_origin_mode_changed(self):
         """断面スライスの基点基準モード切替時ハンドラ"""
@@ -4332,6 +4444,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "情報", "断面ボックスの外側に移動対象の未ロック有効点群はありません。")
             return
 
+        # 一括で大量の点を動かす操作なので、件数を示して確認する（Ctrl+Z で戻せることも案内）
+        ret = QMessageBox.question(
+            self,
+            "断面ボックス外クロップ",
+            f"断面ボックスの外側にある {len(outside_idx):,} 点をノイズレイヤーへ移動します。\n"
+            "よろしいですか？（Ctrl+Z で元に戻せます）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if ret != QMessageBox.Yes:
+            return
+
         self._push_layer_undo_state()
         self.viewer.move_indices_to_noise(outside_idx)
         self.log_text.append(f"断面ボックス外クロップ: {len(outside_idx):,} 点をノイズレイヤーへ一括移動しました")
@@ -4365,15 +4489,28 @@ class MainWindow(QMainWindow):
         # 既に点群が読み込まれている場合は現在点群をリロードして新座標系を即時適用
         in_path = self.input_edit.text().strip()
         if in_path and (os.path.isfile(in_path) or os.path.isdir(in_path)):
+            if self._load_file_to_viewer(in_path) is False:
+                # 未保存の編集を守るため取りやめた → コンボを元の座標系に戻す
+                self.coord_system_combo.blockSignals(True)
+                self.coord_system_combo.setCurrentIndex(self._coord_prev_index)
+                self.coord_system_combo.blockSignals(False)
+                return
+            self._coord_prev_index = index
             msg = f"🌐 座標系「{mode_text}」を適用して再読込中..."
             self.status_label.setText(msg)
             self.log_text.append(msg)
             self.show_toast(f"🌐 座標系「{mode_text}」を適用します")
-            self._load_file_to_viewer(in_path)
         else:
             msg = f"🌐 座標系を「{mode_text}」に設定しました"
             self.status_label.setText(msg)
             self.show_toast(msg)
+
+    def _on_input_edit_finished(self):
+        """入力欄の確定（Enter / フォーカス移動）: 前回読み込んだパスと同じなら何もしない"""
+        path = self.input_edit.text().strip()
+        if not path or os.path.normpath(path) == os.path.normpath(self._last_loaded_input_path or ""):
+            return
+        self._on_input_file_changed(path)
 
     def _on_input_file_changed(self, text: str):
         path = text.strip()
@@ -4410,6 +4547,7 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.input_edit.setText(path)
+            self._on_input_file_changed(path)
 
     def _browse_input_folder(self):
         """フォルダを選択して、フォルダ内の全E57ファイルを一括で統合読み込みする"""
@@ -4420,6 +4558,7 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.input_edit.setText(folder)
+            self._on_input_file_changed(folder)
 
     def _browse_output_file(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -4441,9 +4580,16 @@ class MainWindow(QMainWindow):
             path = urls[0].toLocalFile()
             if os.path.isdir(path) or path.lower().endswith(".e57"):
                 self.input_edit.setText(path)
+                self._on_input_file_changed(path)
 
     def _load_file_to_viewer(self, file_path: str):
-        """E57ファイルまたはフォルダ内の全E57をバックグラウンドスレッドで完全非同期読み込みし、画面中央に進捗モーダルを表示"""
+        """
+        E57ファイルまたはフォルダ内の全E57をバックグラウンドスレッドで完全非同期読み込みし、画面中央に進捗モーダルを表示。
+        未保存の編集がある場合は確認し、取りやめた場合は False を返す。
+        """
+        if not self._confirm_discard_changes("別のデータを読み込む"):
+            return False
+        self._last_loaded_input_path = file_path
         is_dir = os.path.isdir(file_path)
         fname = os.path.basename(os.path.normpath(file_path))
         if is_dir:
@@ -4509,6 +4655,7 @@ class MainWindow(QMainWindow):
             self.layer_undo_stack.clear()
             self.layer_redo_stack.clear()
             self._sync_undo_buttons()
+            self._set_dirty(False)
 
             # チェックボックス表示と断面スライス状態をリセット
             self.chk_layer_normal.setChecked(True)
@@ -5306,6 +5453,7 @@ class MainWindow(QMainWindow):
                 self.progress_dialog = None
             self.save_manual_btn.setEnabled(True)
             self.progress_bar.setValue(100)
+            self._set_dirty(False)
             self.log_text.append(
                 f"保存完了: {saved_path} (出力点数: {total_clean_pts:,} 点, 除外: {total_noise_pts:,} 点)"
             )
@@ -5465,6 +5613,9 @@ class MainWindow(QMainWindow):
             # 1回のバッチ更新で一括レイヤー移動（画面再描画・VBO転送は最後に1度だけ実行）
             n_removed = self.viewer.batch_move_indices_to_layers(moves, respect_lock=True)
             self._sync_undo_buttons()
+            if self.ui_mode == UI_MODE_MODERN and n_removed > 0 and hasattr(self, "chk_layer_noise"):
+                # 新UI: 何が除去されたかをその場で確認できるよう、除去点（ノイズレイヤー）を表示する
+                self.chk_layer_noise.setChecked(True)
 
             n_remain = len(normal_indices) - n_removed
             ratio = (n_removed / len(normal_indices) * 100.0) if len(normal_indices) > 0 else 0.0
