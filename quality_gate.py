@@ -256,6 +256,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     print_banner("Gate 4: 実機 OpenGL VBO & GUI 操作シナリオ (レイヤー拡張①〜⑥含む) 自動スモーク検査")
 
     from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QWidget
     from core.e57_io import E57ScanData
     from gui.main_window import MainWindow
@@ -783,6 +784,14 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert order == sorted(order) and all(i >= 0 for i in order), f"サイドバーが作業順（自動→手動→レイヤー→断面）になっていません: {order}"
     assert hasattr(win, "save_group") and win.save_group.isVisible(), "保存グループが表示されていません"
     assert hasattr(win, "empty_state_card"), "空状態カードが生成されていません"
+    # 「全て」タブ（全グループ表示）でも左パネルが横に見切れないこと
+    win._set_sidebar_workflow_tab("all")
+    for _ in range(5):
+        app.processEvents()
+    all_min_w = win.sidebar_widget.minimumSizeHint().width()
+    all_vp_w = win.sidebar_scroll.viewport().width()
+    assert all_min_w <= all_vp_w, f"「全て」タブで左パネルの最小幅({all_min_w}px)が表示領域幅({all_vp_w}px)を超えています"
+    win._set_sidebar_workflow_tab("filter")
     win.resize(1000, 650)
     for _ in range(5):
         app.processEvents()
@@ -833,6 +842,48 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         win_c.close()
         os.environ.pop("E57_UI_MODE", None)
         reset_ui_mode_cache()
+
+    # 10. 「軌跡（明）」テーマのスモーク: 新UIのライトテーマが起動・タブ切替・通知・選択操作できること
+    from gui.ui_mode import reset_ui_theme_cache
+    os.environ["E57_UI_MODE"] = "modern"
+    os.environ["E57_UI_THEME"] = "kiseki"
+    reset_ui_mode_cache()
+    reset_ui_theme_cache()
+    win_k = MainWindow()
+    win_k.show()
+    app.processEvents()
+    try:
+        assert win_k.ui_mode == "modern" and win_k.ui_theme == "kiseki", f"テーマ解決が不正: {win_k.ui_mode}/{win_k.ui_theme}"
+        qss_k = app.styleSheet()
+        assert "#e7efec" in qss_k and "#004c2c" in qss_k and "#0b1110" in qss_k, "軌跡テーマの QSS が適用されていません"
+        assert "chevron-down-light.svg" in qss_k, "軌跡テーマで明るい地用の矢印アイコンが使われていません"
+        win_k.current_scans = [scan0, scan1]
+        win_k._update_viewer_from_scans()
+        app.processEvents()
+        for tab_key in ["layer", "select", "section", "auto", "view", "settings", "all"]:
+            win_k._set_sidebar_workflow_tab(tab_key)
+            app.processEvents()
+        win_k.show_toast("テーマ検査: 保存しました")
+        win_k.show_toast("テーマ検査: エラー")
+        app.processEvents()
+        win_k._update_floating_selection_bar(1234)
+        win_k._update_floating_selection_bar(0)
+        for grp in win_k.findChildren(QWidget):
+            if grp.objectName() == "collapsible_group" and hasattr(grp, "set_expanded"):
+                grp.set_expanded(False)
+                grp.set_expanded(True)
+        QTest.qWait(500)  # カスケード・展開・ティッカーが終わるのを待つ（効果が外れることの確認）
+        app.processEvents()
+        n_fx = sum(1 for w in win_k.findChildren(QWidget) if w.graphicsEffect() is not None and w.isVisible())
+        assert n_fx == 0, f"モーション終了後に描画効果が残っています: {n_fx} 件"
+        win_k.viewer.validate_invariants()
+        print("  [OK] 軌跡（明）テーマ スモーク合格 (起動・QSS 適用・タブ切替・通知・選択・展開・効果の後始末)")
+    finally:
+        win_k.close()
+        os.environ.pop("E57_UI_THEME", None)
+        os.environ.pop("E57_UI_MODE", None)
+        reset_ui_mode_cache()
+        reset_ui_theme_cache()
 
 
 def gate_5_unit_and_integration_suites() -> None:

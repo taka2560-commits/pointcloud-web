@@ -183,4 +183,10 @@
 | 2.3 | コントラスト不足 | ✅ | 無効 3.3:1、補足 6.4:1、primary 白文字 6.3:1。`tests/test_design_tokens.py` で全ペアを検査 |
 | 2.4 | 1100px 幅で切れる | ✅ | 上部・下部バーを折り返しレイアウトに。Gate4 で 1000×650 でもボタンがはみ出さないことを検査 |
 
-安全策: 従来UIのコードは削除せず、UIモード（`gui/ui_mode.py`）で切替可能。Gate4 は modern の全シナリオに加えて classic のスモークも実行。改修前のコミットには Git タグ `before-ui-redesign-2026-10-31` を付与。
+| 追加 | ボタンの色が単調で区別しにくい（ユーザー指摘） | ✅ | 機能別の控えめな色分け `tone`（violet=塊選択・壁合わせ / teal=精密除去 / amber=粗取り・地面 / green=復元・平面 / blue=標準・移動）。全ペアのコントラストをテストで検査 |
+| 追加 | 主要ボタンが目立たない（ユーザー指摘） | ✅ | primary を明るい塗り＋濃い文字に（`primary_bg/primary_text`）。実行ボタンは緑の塗り |
+| 追加 | 選択中（ON）が分かりにくい（ユーザー指摘） | ✅ | :checked を明るい塗り＋濃い文字＋明るい枠に統一（`on_bg/on_text/on_border`）。tone ボタンの ON は濃い塗りに白字 |
+| 追加 | 押したときの反応・動作（ユーザー要望、参考: motion-reference.takayustudio.jp） | ✅ | `gui/motion.py`: 押下フィードバック、フェード＋スライド、カスケード表示、アコーディオン展開、数値ティッカー、オーバーシュート、エラーシェイク、アテンションバウンス、フォーカスパルス。選定理由は `DESIGN_STYLE_PLAN.md` §9。設定で OFF 可 |
+| 追加 | 「Stand 軌跡」スタイルで行くとどうなるか（ユーザー質問） | ✅（試作） | ライトテーマ「軌跡（明）」を `KISEKI_TOKENS` として追加（`DESIGN_STYLE_PLAN.md` §10、実画面 `docs/ui_review/kiseki/`）。既定は dark のまま |
+
+安全策: 従来UIのコードは削除せず、UIモード（`gui/ui_mode.py`）で切替可能。テーマ（dark / kiseki）とアニメーション ON/OFF も設定で切替可能。Gate4 は modern の全シナリオに加えて classic と kiseki のスモークも実行。改修前のコミットには Git タグ `before-ui-redesign-2026-10-31` を付与。

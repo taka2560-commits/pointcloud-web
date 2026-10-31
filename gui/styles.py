@@ -6,12 +6,12 @@ GUIのスタイルシート定義
 """
 
 
-def get_theme_qss(ui_mode: str) -> str:
-    """UI モードに応じた QSS を返す（"modern" はトークン生成、それ以外は従来テーマ）"""
+def get_theme_qss(ui_mode: str, theme: str = "dark") -> str:
+    """UI モードに応じた QSS を返す（"modern" はトークン生成（テーマ dark / kiseki）、それ以外は従来テーマ）"""
     if ui_mode == "modern":
-        from gui.design_tokens import build_modern_qss
+        from gui.design_tokens import build_modern_qss, get_tokens
 
-        return build_modern_qss()
+        return build_modern_qss(get_tokens(theme))
     return DARK_THEME_QSS
 
 
