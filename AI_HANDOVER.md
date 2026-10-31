@@ -54,6 +54,13 @@
 - 保存時は `FileSaveWorker` が `restore_scan_original_coordinates()` で元の座標系へ逆変換してから書き出し、終了後に表示用座標系へ再適用します。これにより ScaledInteger の生整数・スケール定義がそのまま使われ、**ビット完全一致**で書き戻せます（`tests/test_coord_roundtrip.py`）。
 - `core.processor.transform_scan_coordinate_system()` は points だけでなく `raw_unscaled_fields` と `field_schemas` も軸ごとに付け替えるため、変換後も `points == raw × scale + offset` が厳密に成り立ちます。この整合を壊す変更をしないでください。
 
+### ⑦ 【UI モード】新UIと従来UIを両立させ、いつでも戻せるようにする
+- 2026-10-31 のデザイン改修は **「後付けアダプタ」方式**です。`MainWindow._init_ui()` が組み立てた従来UIに対し、`gui/modern_ui.py` の `apply_modern_ui()` が「作業順の並べ替え・メニュー/ステータスバー・重複ボタンの非表示・絵文字除去・インライン QSS 無効化・折り返しバー・空状態カード」を起動後に適用します。従来UIのコードは削除していません。
+- UI モードは `gui/ui_mode.py` が決めます（優先順: 起動引数 `--classic-ui`/`--modern-ui` ＞ 環境変数 `E57_UI_MODE` ＞ 設定「システム → UIスタイル」 ＞ 既定 modern）。**不具合時は `起動.bat` に `--classic-ui` を付けるか、設定で「従来UI」を選べば改修前に戻ります。**
+- 新UIの見た目は `gui/design_tokens.py` のトークンから生成した QSS（`get_theme_qss("modern")`、アプリ全体に適用）で描きます。色・文字サイズ・角丸はここだけで変更してください。従来UIの `DARK_THEME_QSS` は変更しないでください。
+- 新UIで新しいウィジェットを追加するときは、インライン `setStyleSheet` を書かず `setProperty("role", "primary|outline|ghost|danger|segment|danger-toggle")` と objectName で表現し、絵文字をラベルに使わないでください（Gate4 が検査します）。両モードで動くコードにする場合は `self.ui_mode == UI_MODE_MODERN` で分岐します（例: レイヤー行のロックボタン）。
+- 品質ゲート Gate4 は modern で全シナリオを検証したあと、classic でも起動・タブ・モード切替のスモークを行います。
+
 ### ⑥ 【UI スタイル】セレクタ無しのインライン QSS を書かない
 - `widget.setStyleSheet("background: transparent;")` のようにセレクタを付けない宣言は**その子孫すべてに伝播**し、グローバル QSS（`QPushButton#execute_button` 等）を打ち消します（2026-10-31 に主要ボタンが文字だけに見える不具合として顕在化）。
 - 必ず `QWidget#name { ... }` のように objectName / クラスで限定するか、`setProperty("role", ...)` ＋ `gui/styles.py` のグローバル QSS で表現してください。デザイン改修の方針は `docs/DESIGN_STYLE_PLAN.md` を参照。
@@ -92,7 +99,8 @@
 ├── requirements-lock.txt       # 動作確認済みの固定バージョン
 ├── AGENTS.md / CLAUDE.md       # 複数AI並行開発の共通ルール（作業場所・担当ファイル・マージ手順）
 ├── QA_REPORT_2026-10-31.md     # 総合品質管理チェック報告書（欠陥一覧・修正状況・backlog）
-├── docs/                       # UI/UX レビュー（UI_UX_REVIEW_*.md）、デザイン改修計画（DESIGN_STYLE_PLAN.md）、画面証跡 ui_review/*.png
+├── assets/icons/               # 新UIの SVG アイコン（コンボ/スピンの矢印・チェック）。spec の datas で同梱
+├── docs/                       # UI/UX レビュー（UI_UX_REVIEW_*.md）、デザイン改修計画（DESIGN_STYLE_PLAN.md）、画面証跡 ui_review/（新UI）, ui_review/before/（改修前）, ui_review/classic/（従来UIモード）
 ├── tools/                      # 開発補助: capture_ui_screens.py（実画面スクリーンショット）、check_contrast.py（コントラスト比）
 ├── .gitattributes              # 改行コード固定（.py/.md 等は LF、.bat は CRLF、.e57 はバイナリ）
 │
@@ -107,6 +115,10 @@
 │   ├── gl_viewer.py            # OpenGL 3D点群ビューア（カメラ、VBO、色分け、ギズモ、手動選択）
 │   ├── worker_thread.py        # バックグラウンドワーカスレッド（非同期読み込み・処理・保存、汎用 FunctionWorker）
 │   ├── layer_history.py        # 差分ベースのレイヤー Undo/Redo 履歴（メモリは変化点数に比例）
+│   ├── ui_mode.py              # UI モード（modern / classic）の解決と保存（起動引数・環境変数・設定）
+│   ├── design_tokens.py        # 新UIのデザイントークンと QSS 生成（色・文字サイズ・角丸・間隔の唯一の定義）
+│   ├── modern_ui.py            # 新UIアダプタ（従来UIに後付け: 作業順・メニュー/ステータスバー・空状態カード・絵文字除去）
+│   ├── flow_layout.py          # 折り返しレイアウト（狭い画面で上部/下部バーのボタンが切れないようにする）
 │   ├── progress_dialog.py      # キャンセル対応モダン進捗ダイアログ（ApplicationModal）
 │   ├── styles.py               # モダンダークテーマQSSスタイルシート
 │   └── preview_dialog.py       # プレビュー用補助ダイアログ
@@ -208,7 +220,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - `.git/hooks/pre-commit` に全ゲートが登録済みで、コミット時に自動実行されます（NG ならコミット不可）。hooks は全 worktree で共有されるため `--install-hook` を再実行する必要はありません。
 - ゲートはリポジトリ内にファイルを残しません（一時ファイルは OS の一時ディレクトリ）。
 
-### テスト内容（全5段階・単体テスト 55 件）
+### テスト内容（全5段階・単体テスト 66 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）

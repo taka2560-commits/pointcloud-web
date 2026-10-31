@@ -40,6 +40,17 @@ class ModernProgressDialog(QDialog):
 
         self._init_ui()
 
+        # 新UIではインライン QSS を外し、トークン生成 QSS（アプリ全体）で描く
+        try:
+            from gui.ui_mode import is_modern
+
+            if is_modern():
+                from gui.modern_ui import restyle_progress_dialog
+
+                restyle_progress_dialog(self)
+        except Exception:
+            pass
+
         # 滑らかな数値・フィル補間アニメーション用タイマー (60FPS)
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_smooth_progress)

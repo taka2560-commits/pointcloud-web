@@ -8,6 +8,8 @@ datas = [
     ('ノイズフィルター設定ガイド_初心者向け完全マニュアル.md', '.'),
     ('ノイズフィルター設定ガイド_初心者向け完全マニュアル.txt', '.'),
     ('README.md', '.'),
+    # 新UIのアイコン（コンボ/スピンの矢印・チェックマーク）。実行時は _internal/assets/icons 配下
+    ('assets', 'assets'),
 ]
 binaries = []
 hiddenimports = []
