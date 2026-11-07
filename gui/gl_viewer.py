@@ -152,6 +152,9 @@ class PointCloudViewer(QOpenGLWidget):
     ], dtype=np.float32)
 
     # 選択形状
+    # 断面ボックス内の全点表示の上限。この PC（内蔵 GPU）で 1,000 万点は約 130ms/フレーム、VBO 転送は約 3 秒
+    SECTION_DETAIL_MAX_POINTS = 10_000_000
+
     SELECT_RECT = "rect"
     SELECT_CIRCLE = "circle"
     SELECT_POLYGON = "polygon"
@@ -210,6 +213,10 @@ class PointCloudViewer(QOpenGLWidget):
         self._preview_base_points = None  # スライダープレビュー用ベース配列 (ヌルヌル追従用)
         self._preview_base_colors = None  # スライダープレビュー用ベース配列
         self.point_budget = 2000000   # 初期値: 200万点 (0で無制限)
+        # 断面ボックス内の全点表示: 断面有効中はボックス内の点を表示予算で間引かず描く（上限 SECTION_DETAIL_MAX_POINTS）
+        self.section_full_detail: bool = True
+        self.section_box_count: int = 0          # 直近の確定再構築でボックス内にあった点数（断面無効時は 0）
+        self.section_detail_capped: bool = False  # ボックス内が上限を超えて間引いたか
         self._vbo_points = None
         self._vbo_colors = None
         self._vbo_points_dirty = True
@@ -970,7 +977,13 @@ class PointCloudViewer(QOpenGLWidget):
                 guide_tag = " (厚み枠OFF / B:切替)"
             else:
                 guide_tag = " (黄枠=基点 / 水色枠=厚み)"
-            sec_text = f"📐 断面シーク中{guide_tag}  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点"
+            if self.section_detail_capped:
+                detail_tag = f" (ボックス内{self.section_box_count:,}点を上限{self.SECTION_DETAIL_MAX_POINTS // 10000:,}万点で間引き)"
+            elif self.section_full_detail and self.point_budget > 0:
+                detail_tag = " (ボックス内全点)"
+            else:
+                detail_tag = ""
+            sec_text = f"📐 断面シーク中{guide_tag}  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点{detail_tag}"
 
             font_sec = QFont("Segoe UI", 9, QFont.Bold)
             painter.setFont(font_sec)
@@ -1651,7 +1664,13 @@ class PointCloudViewer(QOpenGLWidget):
             self._preview_base_colors = self.display_colors
             return
 
+        # 断面有効中はボックス内の点を表示予算で間引かず描く（上限 SECTION_DETAIL_MAX_POINTS。表示予算「無制限」はそのまま）
         budget = self.point_budget
+        section_active = self.is_section_active()
+        self.section_box_count = n_surv if section_active else 0
+        if section_active and self.section_full_detail and budget > 0:
+            budget = max(budget, int(self.SECTION_DETAIL_MAX_POINTS))
+        self.section_detail_capped = bool(section_active and self.section_full_detail and budget > 0 and n_surv > budget)
         if budget <= 0 or n_surv <= budget:
             sampled_idx = surviving_indices
         else:
@@ -2289,6 +2308,20 @@ class PointCloudViewer(QOpenGLWidget):
         self.point_budget = budget
         self._update_display_arrays()
         self.update()
+
+    def is_section_active(self) -> bool:
+        """XYZ 断面または 2 点斜め壁スライスのいずれかが有効か"""
+        return bool(self.clip_x_enabled or self.clip_y_enabled or self.clip_z_enabled or self.clip_wall_enabled)
+
+    def set_section_full_detail(self, enabled: bool):
+        """断面ボックス内の全点表示（表示予算で間引かない。上限 SECTION_DETAIL_MAX_POINTS）の ON/OFF"""
+        enabled = bool(enabled)
+        if self.section_full_detail == enabled:
+            return
+        self.section_full_detail = enabled
+        if self.is_section_active():
+            self._update_display_arrays()
+            self.update()
 
     def fit_to_screen(self):
         """全体フィット (F)"""

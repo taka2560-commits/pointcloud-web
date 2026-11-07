@@ -760,6 +760,16 @@ class MainWindow(QMainWindow):
         sec_guide_row.addStretch()
         sec_layout.addLayout(sec_guide_row)
 
+        # 断面ボックス内の全点表示（表示点数の上限で間引かない）
+        self.chk_sec_full_detail = QCheckBox("🔬 ボックス内は間引かず全点表示 (上限1,000万点)")
+        self.chk_sec_full_detail.setChecked(True)
+        self.chk_sec_full_detail.setToolTip(
+            "ONにすると、断面シーク中は断面ボックス内の点を「表示点数」の上限で間引かず、読み込んだ点をすべて描きます"
+            "（上限1,000万点。超えた場合は間引き、HUDに表示）。回転が重いときはOFFにしてください"
+        )
+        self.chk_sec_full_detail.toggled.connect(self._on_section_full_detail_toggled)
+        sec_layout.addWidget(self.chk_sec_full_detail)
+
         # ② 現在見ている場所/選択点を一発でシーク基点にセット & シーク時のカメラ追従
         sec_focus_row = QHBoxLayout()
         sec_focus_row.setSpacing(4)
@@ -3121,6 +3131,8 @@ class MainWindow(QMainWindow):
             s.setValue("wasd_speed", self.slider_wasd_speed.value())
         if hasattr(self, "combo_sec_step"):
             s.setValue("sec_step_idx", self.combo_sec_step.currentIndex())
+        if hasattr(self, "chk_sec_full_detail"):
+            s.setValue("sec_full_detail", self.chk_sec_full_detail.isChecked())
         if hasattr(self, "combo_load_budget"):
             s.setValue("load_budget_idx", self.combo_load_budget.currentIndex())
         if hasattr(self, "combo_undo_limit"):
@@ -3201,6 +3213,9 @@ class MainWindow(QMainWindow):
                 self.combo_sec_step.setCurrentIndex(sec_idx)
                 self._on_sec_step_changed(sec_idx)
 
+            if hasattr(self, "chk_sec_full_detail"):
+                self.chk_sec_full_detail.setChecked(s.value("sec_full_detail", True, type=bool))
+
             undo_idx = s.value("undo_limit_idx", 1, type=int)
             if hasattr(self, "combo_undo_limit") and 0 <= undo_idx < self.combo_undo_limit.count():
                 self.combo_undo_limit.setCurrentIndex(undo_idx)
@@ -3270,6 +3285,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "combo_sec_step"):
             self.combo_sec_step.setCurrentIndex(2)
             self._on_sec_step_changed(2)
+
+        if hasattr(self, "chk_sec_full_detail"):
+            self.chk_sec_full_detail.setChecked(True)
 
         if hasattr(self, "combo_load_budget"):
             self.combo_load_budget.setCurrentIndex(0)
@@ -4115,6 +4133,13 @@ class MainWindow(QMainWindow):
         """GUIチェックボックスからビューアの基点枠・厚み枠表示を更新"""
         self.viewer.set_show_section_origin_plane(self.chk_sec_show_origin.isChecked())
         self.viewer.set_show_section_box(self.chk_sec_show_box.isChecked())
+
+    def _on_section_full_detail_toggled(self, checked: bool):
+        """断面ボックス内の全点表示 ON/OFF（断面有効中は即時再構築）"""
+        self.viewer.set_section_full_detail(checked)
+        if self.viewer.is_section_active():
+            n_disp = len(self.viewer.display_points) if self.viewer.display_points is not None else 0
+            self.show_toast(f"🔬 断面ボックス内の全点表示: {'ON' if checked else 'OFF'}（表示 {n_disp:,} 点）")
 
     def _on_viewer_section_guides_changed(self, show_origin: bool, show_box: bool):
         """ビューア側（Bキーなど）の枠表示状態をGUIチェックボックスへ反映"""
