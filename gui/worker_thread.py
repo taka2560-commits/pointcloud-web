@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any, Callable
 from PySide6.QtCore import QThread, Signal
 import numpy as np
 
-from core.logger import log_exception, log_info
+from core.logger import log_exception, log_info, log_warning
 
 from core.processor import (
     FilterConfig,
@@ -21,12 +21,14 @@ from core.processor import (
     ProcessSummary,
     transform_scan_coordinate_system,
     restore_scan_original_coordinates,
+    inverse_transform_coordinate_system,
     is_identity_coord_mode,
     scan_display_points,
     scan_pose_transform,
 )
 from core.filters import keep_largest_clusters
-from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
+from core.e57_io import E57ScanData, E57StreamWriter, file_signature, read_e57_scans, write_e57_scans
+from core.fullres_transfer import ORPHAN_LABEL, TransferStats, estimate_stride, labels_from_masks, transfer_labels
 
 
 def collect_e57_files(path: str) -> List[str]:
@@ -663,6 +665,240 @@ class FileSaveWorker(QThread):
 
 
 
+
+
+def split_output_path(base_path: str, ext: str, layer_name: str, idx: int, used: set) -> str:
+    """全レイヤー分割保存のファイル名（FileSaveWorker と FullResolutionSaveWorker で共通）"""
+    safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in layer_name).strip("_")
+    if not safe_name:
+        safe_name = f"layer_{idx}"
+    out_file = f"{base_path}_{safe_name}{ext}"
+    if out_file in used:
+        out_file = f"{base_path}_{safe_name}_{idx}{ext}"
+    used.add(out_file)
+    return out_file
+
+
+class FullResolutionSaveWorker(QThread):
+    """
+    全点転写保存: 間引き読込（1 億点超のメモリ保護）で決めたノイズ判定を、元ファイルの全点へ写して E57 出力する。
+
+    手順（スキャンごとに繰り返すので、メモリは「読み込んでいる間引き点群 + 1 スキャンの全点」で済む）
+      1. 元ファイルからそのスキャンだけを全点で読み直す（read_e57_scans(scan_indices=[...])）
+      2. 読み込んでいる間引き点群（判定点）のラベルを、最近傍の判定点から全点へ写す（core.fullres_transfer）
+      3. 保存対象の点だけを抜き出して E57StreamWriter で追記する（生の整数・スケール・pose はそのまま）
+    判定点の座標は取り込み時の座標系変換を外してから使う（元ファイルと同じローカル座標で照合する）。
+    元ファイルが読込後に変更されていたら（サイズか更新時刻の不一致）保存しない。
+    中止は転写のチャンク境界とスキャン境界で反映され、書きかけの一時ファイルは消される。
+    """
+
+    progress_changed = Signal(int, str, str)  # (0-100%, メインメッセージ, サブメッセージ)
+    finished_success = Signal(int, int, str)  # (保存総点数, 除外点数, 保存先パス説明)
+    finished_error = Signal(str)
+
+    KEEP_LABEL = 1
+
+    def __init__(
+        self,
+        output_path: str,
+        scans: List[E57ScanData],
+        layer_mask: np.ndarray,
+        split_masks: Optional[Dict[str, np.ndarray]] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.output_path = output_path
+        self.scans = list(scans)
+        self.layer_mask = np.asarray(layer_mask, dtype=bool).copy()
+        self.split_masks = (
+            {k: np.asarray(v, dtype=bool).copy() for k, v in split_masks.items() if int(np.sum(v)) > 0}
+            if split_masks
+            else None
+        )
+        self._is_cancelled = False
+        self.scan_stats: List[Any] = []  # (スキャン名, TransferStats) の一覧（検証・ログ用）
+        self.total_orphans = 0
+        self.total_full_points = 0
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def _check_cancelled(self):
+        if self._is_cancelled:
+            raise InterruptedError("保存がユーザーによって中止されました。")
+
+    def _validate_sources(self) -> None:
+        n_all = sum(len(s.points) for s in self.scans)
+        if len(self.layer_mask) != n_all:
+            raise ValueError(f"レイヤーマスクの長さ {len(self.layer_mask):,} が読み込み点数 {n_all:,} と一致しません。")
+        for s in self.scans:
+            if not s.source_file or s.source_scan_index is None:
+                raise ValueError(
+                    f"スキャン「{s.name}」に読み込み元ファイルの記録がないため全点転写保存はできません。"
+                    "「間引いたまま保存」を使ってください。"
+                )
+            if not os.path.isfile(s.source_file):
+                raise FileNotFoundError(f"読み込み元ファイルが見つかりません: {s.source_file}")
+            if s.source_signature is not None and file_signature(s.source_file) != tuple(s.source_signature):
+                raise RuntimeError(
+                    f"読み込み元ファイルが読込後に変更されています（サイズか更新時刻が異なります）: {s.source_file}\n"
+                    "元ファイルを開き直してから保存してください。"
+                )
+
+    def run(self):
+        try:
+            self._run_save()
+        except Exception as e:
+            log_exception(f"{type(self).__name__} でエラー: {e}")
+            self.finished_error.emit(str(e))
+
+    def _run_save(self):
+        t0 = time.perf_counter()
+        self._validate_sources()
+
+        # 判定点のラベル: 単一ファイルは 1=保存 / 0=除外、分割保存はレイヤー番号（どれにも入らなければ除外）
+        if self.split_masks:
+            layer_names = list(self.split_masks.keys())
+            labels_all = labels_from_masks([self.split_masks[k] for k in layer_names], len(self.layer_mask))
+        else:
+            layer_names = []
+            labels_all = self.layer_mask.astype(np.int32)
+            if int(np.sum(self.layer_mask)) == 0:
+                raise ValueError("保存対象レイヤーの点数が 0 点のため出力できません。")
+
+        base_path, ext = os.path.splitext(self.output_path)
+        if not ext:
+            ext = ".e57"
+        writers: Dict[int, E57StreamWriter] = {}
+        writer_paths: Dict[int, str] = {}
+        used_out_files: set = set()
+        total_saved = 0
+        total_excluded = 0
+        self.total_full_points = sum(int(getattr(s, "original_point_count", len(s.points))) for s in self.scans)
+        done_full = 0
+        offset = 0
+
+        def pct_of(done: int) -> int:
+            return int(5 + 90 * (done / max(1, self.total_full_points)))
+
+        try:
+            for s in self.scans:
+                n_j = len(s.points)
+                labels_j = labels_all[offset : offset + n_j]
+                offset += n_j
+                self._check_cancelled()
+                name = s.name or f"Scan {s.scan_index}"
+                n_orig = int(getattr(s, "original_point_count", n_j))
+
+                self.progress_changed.emit(
+                    pct_of(done_full), f"スキャン「{name}」を全点で読み直し中...", f"{n_orig:,} 点 / 判定点 {n_j:,} 点"
+                )
+                full_list = read_e57_scans(s.source_file, point_budget=None, scan_indices=[int(s.source_scan_index)])
+                if not full_list:
+                    raise RuntimeError(f"読み込み元ファイルにスキャン #{s.source_scan_index} が見つかりません: {s.source_file}")
+                full = full_list[0]
+                del full_list
+                n_full = len(full.points)
+                if s._name:
+                    full.name = s._name  # 複数ファイル統合時の「ファイル名 / スキャン名」を引き継ぐ
+
+                self._check_cancelled()
+                base_pct = pct_of(done_full)
+                span = max(1, pct_of(done_full + n_full) - base_pct)
+                if n_j == 0:
+                    log_warning(f"全点転写: スキャン「{name}」は判定点が 0 点のため、{n_full:,} 点すべてを除外します。")
+                    labels_full = np.full(n_full, ORPHAN_LABEL, dtype=np.int32)
+                    stats = TransferStats(n_full=n_full, n_judged=0, n_orphan=n_full)
+                else:
+                    judged_local = (
+                        s.points
+                        if is_identity_coord_mode(getattr(s, "coord_mode", "cartesian"))
+                        else inverse_transform_coordinate_system(s.points, s.coord_mode)
+                    )
+
+                    def on_transfer_progress(done_pts: int, total_pts: int, _b=base_pct, _s=span, _n=name):
+                        self.progress_changed.emit(
+                            int(_b + _s * 0.6 * done_pts / max(1, total_pts)),
+                            f"スキャン「{_n}」の判定を全点へ転写中...",
+                            f"{done_pts:,} / {total_pts:,} 点",
+                        )
+
+                    labels_full, stats = transfer_labels(
+                        judged_local,
+                        labels_j,
+                        full.points,
+                        stride=estimate_stride(n_orig, n_j),
+                        is_cancelled=lambda: self._is_cancelled,
+                        progress=on_transfer_progress,
+                    )
+                    del judged_local
+                self.scan_stats.append((name, stats))
+                self.total_orphans += int(stats.n_orphan)
+
+                self.progress_changed.emit(
+                    int(base_pct + span * 0.7),
+                    f"スキャン「{name}」を E57 に書き込み中...",
+                    f"孤立点 {stats.n_orphan:,} 点を除外",
+                )
+                kept_in_scan = 0
+                if self.split_masks:
+                    for li, layer_name in enumerate(layer_names):
+                        keep_idx = np.flatnonzero(labels_full == li)
+                        if len(keep_idx) == 0:
+                            continue
+                        if li not in writers:
+                            out_file = split_output_path(base_path, ext, layer_name, li, used_out_files)
+                            writer_paths[li] = out_file
+                            writers[li] = E57StreamWriter(out_file)
+                        writers[li].add_scan(full.filter_by_indices(keep_idx))
+                        kept_in_scan += len(keep_idx)
+                else:
+                    keep_idx = np.flatnonzero(labels_full == self.KEEP_LABEL)
+                    if len(keep_idx) > 0:
+                        if 0 not in writers:
+                            writer_paths[0] = self.output_path
+                            writers[0] = E57StreamWriter(self.output_path)
+                        writers[0].add_scan(full.filter_by_indices(keep_idx))
+                        kept_in_scan += len(keep_idx)
+
+                total_saved += kept_in_scan
+                total_excluded += n_full - kept_in_scan
+                done_full += n_full
+                log_info(
+                    f"全点転写: 「{name}」 元 {n_full:,} 点 / 判定点 {n_j:,} 点 (間引き k={stats.stride}, 許容半径 {stats.factor:.0f}×点間隔)"
+                    f" → 保存 {kept_in_scan:,} 点, 除外 {n_full - kept_in_scan:,} 点 (うち孤立点 {stats.n_orphan:,} 点,"
+                    f" 引き継ぎ最大距離 {stats.max_inherit_distance:.3f}m)"
+                )
+                del full, labels_full
+                import gc
+
+                gc.collect()
+
+            if not writers:
+                raise ValueError("保存対象レイヤーの点数が 0 点のため出力できません。")
+
+            self._check_cancelled()
+            self.progress_changed.emit(96, "出力ファイルを検証中...", f"{len(writers)} ファイル")
+            for li in list(writers.keys()):
+                writers[li].close()
+        except BaseException:
+            for w in writers.values():
+                w.abort()
+            raise
+
+        elapsed = time.perf_counter() - t0
+        log_info(
+            f"全点転写保存 完了: 元 {self.total_full_points:,} 点 → 保存 {total_saved:,} 点, 除外 {total_excluded:,} 点"
+            f" (孤立点 {self.total_orphans:,} 点), {len(writers)} ファイル, {elapsed:.1f} 秒"
+        )
+        if self.split_masks:
+            parts = [f"{os.path.basename(writer_paths[li])} ({writers[li].point_count:,}点)" for li in writers]
+            summary = f"{len(parts)} ファイル ({', '.join(parts)})"
+            self.progress_changed.emit(100, "全レイヤー分割保存完了！", f"{len(parts)} ファイルを出力")
+            self.finished_success.emit(total_saved, total_excluded, summary)
+        else:
+            self.progress_changed.emit(100, "保存完了！", f"保存点数: {total_saved:,} 点")
+            self.finished_success.emit(total_saved, total_excluded, self.output_path)
 
 
 class FunctionWorker(QThread):

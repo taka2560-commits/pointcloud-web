@@ -63,6 +63,7 @@ from gui.worker_thread import (
     PreloadedData,
     MemoryFilterWorker,
     FileSaveWorker,
+    FullResolutionSaveWorker,
     KeepMainClusterWorker,
     FunctionWorker,
     collect_e57_files,
@@ -5491,20 +5492,32 @@ class MainWindow(QMainWindow):
                 if reply != QMessageBox.Yes:
                     return
 
-        # 実務安全保護②: メモリ保護による間引き読み込みデータが含まれている場合の確認
+        # 実務安全保護②: メモリ保護による間引き読み込みデータが含まれている場合は保存方法を選ぶ
+        # 既定は「全点で保存」: 元ファイルを全点で読み直し、画面で決めた判定を全点へ写して出力する（FullResolutionSaveWorker）
+        use_fullres = False
         if any(getattr(s, "is_subsampled", False) for s in self.current_scans):
             orig_sum = sum(getattr(s, "original_point_count", s.point_count) for s in self.current_scans)
             cur_sum = sum(s.point_count for s in self.current_scans)
-            reply = QMessageBox.question(
-                self,
-                "間引き読み込みデータの保存確認",
-                f"現在読み込まれている点群は、メモリ保護のため元データ（{orig_sum:,} 点）から "
-                f"{cur_sum:,} 点にサブサンプリング（間引き）されています。\n\n"
-                f"このまま保存すると、間引かれた {cur_sum:,} 点のみが出力されます。保存を続行しますか？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("間引き読み込みデータの保存方法")
+            box.setText(
+                f"現在の点群は、メモリ保護のため元データ {orig_sum:,} 点を {cur_sum:,} 点に間引いて読み込んでいます。"
             )
-            if reply != QMessageBox.Yes:
+            box.setInformativeText(
+                "【全点で保存】 元ファイルを全点で読み直し、この画面で決めたノイズ判定を全点へ写して出力します。"
+                "出力は元データと同じ点密度になります（1 億点で数分〜十数分）。\n\n"
+                f"【間引いたまま保存】 読み込んでいる {cur_sum:,} 点だけを出力します。"
+            )
+            btn_full = box.addButton("全点で保存（推奨）", QMessageBox.AcceptRole)
+            btn_sub = box.addButton("間引いたまま保存", QMessageBox.DestructiveRole)
+            box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(btn_full)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_full:
+                use_fullres = True
+            elif clicked is not btn_sub:
                 return
 
         if self.save_worker and self.save_worker.isRunning():
@@ -5512,15 +5525,21 @@ class MainWindow(QMainWindow):
 
         self.save_manual_btn.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.status_label.setText("E57書き出し中 (元の座標精度・属性形式を維持して抽出)...")
+        self.status_label.setText(
+            "E57書き出し中 (元ファイルを全点で読み直して判定を転写)..." if use_fullres
+            else "E57書き出し中 (元の座標精度・属性形式を維持して抽出)..."
+        )
 
         if self.progress_dialog:
             self.progress_dialog.close()
-        self.progress_dialog = ModernProgressDialog("E57点群データ保存中", self)
+        self.progress_dialog = ModernProgressDialog("E57点群データ保存中（全点転写）" if use_fullres else "E57点群データ保存中", self)
         self.progress_dialog.set_progress(5, "保存データの準備中...", f"保存先: {os.path.basename(out_path)}")
         self.progress_dialog.show()
 
-        self.save_worker = FileSaveWorker(out_path, self.current_scans, layer_mask, split_masks=split_masks)
+        if use_fullres:
+            self.save_worker = FullResolutionSaveWorker(out_path, self.current_scans, layer_mask, split_masks=split_masks)
+        else:
+            self.save_worker = FileSaveWorker(out_path, self.current_scans, layer_mask, split_masks=split_masks)
 
         def on_save_progress(percent: int, msg: str, sub_msg: str):
             if self.progress_dialog:

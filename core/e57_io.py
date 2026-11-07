@@ -264,8 +264,15 @@ class E57ScanData:
         name: Optional[str] = None,
         original_point_count: Optional[int] = None,
         is_subsampled: bool = False,
+        source_file: Optional[str] = None,
+        source_scan_index: Optional[int] = None,
+        source_signature: Optional[Tuple[int, int]] = None,
     ):
         self.scan_index = scan_index
+        # 読み込み元（全点転写保存で元ファイルを読み直すために使う）。合成データでは None
+        self.source_file: Optional[str] = source_file
+        self.source_scan_index: Optional[int] = source_scan_index
+        self.source_signature: Optional[Tuple[int, int]] = source_signature  # (サイズ, 更新時刻 ns)
         pts_arr = np.asarray(points, dtype=np.float64)
         if pts_arr.ndim == 1 and pts_arr.size == 0:
             pts_arr = np.empty((0, 3), dtype=np.float64)
@@ -459,6 +466,9 @@ class E57ScanData:
             name=self._name,
             original_point_count=self.original_point_count,
             is_subsampled=self.is_subsampled,
+            source_file=self.source_file,
+            source_scan_index=self.source_scan_index,
+            source_signature=self.source_signature,
         )
         # 取り込み時の座標系変換状態を引き継ぐ（抽出後も「変換済み」であることを失わないため）
         filtered.coord_mode = getattr(self, "coord_mode", "cartesian")
@@ -531,11 +541,18 @@ def _extract_pose_safely(scan_node: libe57.StructureNode) -> Tuple[bool, Optiona
     return True, rotation, translation
 
 
+def file_signature(file_path: str) -> Tuple[int, int]:
+    """ファイルの (サイズ, 更新時刻 ns)。読込後に元ファイルが差し替えられていないかの照合に使う"""
+    st = os.stat(file_path)
+    return (int(st.st_size), int(st.st_mtime_ns))
+
+
 def read_e57_scans(
     file_path: str,
     progress_callback: Optional[Any] = None,
     point_budget: Optional[int] = None,
     chunk_size: int = 500000,
+    scan_indices: Optional[Any] = None,
 ) -> List[E57ScanData]:
     """
     E57ファイルをロスレスで読み込み、各スキャンの点群データオブジェクトのリストを返す。
@@ -546,7 +563,23 @@ def read_e57_scans(
     :param progress_callback: 進捗コールバック関数 (ratio: float, msg: str)
     :param point_budget: 最大表示点数 (None または <=0 の場合は全点ロスレス読み込み)
     :param chunk_size: ストリーミング読み込み時のチャンクサイズ (デフォルト50万点=約10MB)
+    :param scan_indices: 読み込むスキャン番号の集合 (None なら全スキャン)。間引き率は全スキャンの総点数から決める
     :return: E57ScanData のリスト
+    """
+    return list(iter_e57_scans(file_path, progress_callback, point_budget, chunk_size, scan_indices))
+
+
+def iter_e57_scans(
+    file_path: str,
+    progress_callback: Optional[Any] = None,
+    point_budget: Optional[int] = None,
+    chunk_size: int = 500000,
+    scan_indices: Optional[Any] = None,
+):
+    """
+    read_e57_scans のジェネレータ版。スキャンを 1 つ読み終えるごとに返すので、
+    全点転写保存のように「1 スキャンずつ読んで処理して書き出す」用途でもメモリは 1 スキャン分で済む。
+    各スキャンには読み込み元 (source_file / source_scan_index / source_signature) を記録する。
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"ファイルが見つかりません: {file_path}")
@@ -554,7 +587,9 @@ def read_e57_scans(
     if progress_callback:
         progress_callback(0.05, f"E57ヘッダー解析中: {os.path.basename(file_path)}")
 
-    scans: List[E57ScanData] = []
+    wanted = set(int(i) for i in scan_indices) if scan_indices is not None else None
+    source_abs = os.path.abspath(file_path)
+    source_sig = file_signature(file_path)
     imf = libe57.ImageFile(file_path, "r")
     try:
         root = imf.root()
@@ -571,7 +606,7 @@ def read_e57_scans(
             coordinate_metadata = str(get_node(root, "coordinateMetadata").value())
 
         if not root.isDefined("data3D"):
-            return []
+            return
 
         data3d = get_node(root, "data3D")
         scan_count = data3d.childCount()
@@ -595,6 +630,8 @@ def read_e57_scans(
             global_step = max(1, int(math.ceil(total_file_points / point_budget)))
 
         for i in range(scan_count):
+            if wanted is not None and i not in wanted:
+                continue
             n_points = scan_counts[i]
             if progress_callback:
                 progress_callback(
@@ -852,15 +889,16 @@ def read_e57_scans(
                 is_spherical_only=is_spherical_only,
                 original_point_count=n_points,
                 is_subsampled=(global_step > 1),
+                source_file=source_abs,
+                source_scan_index=i,
+                source_signature=source_sig,
             )
-            scans.append(scan_data)
+            yield scan_data
     finally:
         imf.close()
 
     if progress_callback:
         progress_callback(0.95, "点群データの統合中...")
-
-    return scans
 
 
 def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode, scan: E57ScanData, scan_idx: int) -> None:
@@ -1097,13 +1135,21 @@ def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode
         writer.close()
 
 
-def _verify_written_e57_file(file_path: str, expected_scans: List[E57ScanData]) -> None:
+def _verify_written_e57_file(file_path: str, expected_scans: List[Any]) -> None:
     """
     書き出し完了直後のE57ファイルを実際にリードモードで再オープンし、
     ヘッダ構造・スキャン数・各スキャンのレコード点数・必須座標属性が1点の狂いもなく書き込まれているかを厳格検証する。
+    expected_scans は E57ScanData か、(点数, is_spherical_only) のタプル（ストリーム書込ではスキャン本体を保持しないため）。
     """
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
         raise RuntimeError(f"出力ベリファイ失敗: 出力ファイルが空または存在しません ({file_path})")
+
+    expected: List[Tuple[int, bool]] = []
+    for item in expected_scans:
+        if isinstance(item, E57ScanData):
+            expected.append((len(item.points), bool(item.is_spherical_only)))
+        else:
+            expected.append((int(item[0]), bool(item[1])))
 
     verify_imf = libe57.ImageFile(file_path, "r")
     try:
@@ -1112,25 +1158,24 @@ def _verify_written_e57_file(file_path: str, expected_scans: List[E57ScanData]) 
             raise RuntimeError("出力ベリファイ失敗: E57ルートに data3D ノードが存在しません。")
         data3d = get_node(root, "data3D")
         actual_scan_count = data3d.childCount()
-        if actual_scan_count != len(expected_scans):
+        if actual_scan_count != len(expected):
             raise RuntimeError(
-                f"出力ベリファイ失敗: スキャン数が一致しません (期待: {len(expected_scans)}, 実際: {actual_scan_count})"
+                f"出力ベリファイ失敗: スキャン数が一致しません (期待: {len(expected)}, 実際: {actual_scan_count})"
             )
 
-        for idx, exp_scan in enumerate(expected_scans):
+        for idx, (expected_pts, spherical_only) in enumerate(expected):
             s_node = get_node(data3d, idx)
             if not s_node.isDefined("points"):
                 raise RuntimeError(f"出力ベリファイ失敗: スキャン #{idx} に points ノードが存在しません。")
             pts_node = get_node(s_node, "points")
             actual_pts = pts_node.childCount()
-            expected_pts = len(exp_scan.points)
             if actual_pts != expected_pts:
                 raise RuntimeError(
                     f"出力ベリファイ失敗: スキャン #{idx} の書き出し点数が一致しません (期待: {expected_pts:,} 点, 実際: {actual_pts:,} 点)"
                 )
             proto = libe57.StructureNode(pts_node.prototype())
             fields = set(get_fields(proto))
-            if not exp_scan.is_spherical_only:
+            if not spherical_only:
                 if not {"cartesianX", "cartesianY", "cartesianZ"}.issubset(fields):
                     raise RuntimeError(
                         f"出力ベリファイ失敗: スキャン #{idx} に必須座標フィールド (cartesianX/Y/Z) が欠落しています。"
@@ -1144,6 +1189,120 @@ def _verify_written_e57_file(file_path: str, expected_scans: List[E57ScanData]) 
         verify_imf.close()
 
 
+class E57StreamWriter:
+    """
+    スキャンを 1 つずつ追記できる E57 ロスレス書込。
+    1 億点超の全点転写保存では全スキャンをメモリに持てないため、
+    「1 スキャン読む → 判定を写す → add_scan() で書く」を繰り返す。
+
+    - 一時ファイルへ書き、close() で再オープン検証 (_verify_written_e57_file) に合格したときだけ
+      出力先へアトミック置換する。途中で abort() / 例外なら一時ファイルを消し、既存の出力先は無傷。
+    - 拡張名前空間は add_scan() のたびに未登録分を追加する。
+    - coordinateMetadata は最初に見つかったスキャンの値を使う。
+    """
+
+    def __init__(self, file_path: str):
+        self.file_path = os.path.abspath(file_path)
+        output_dir = os.path.dirname(self.file_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        self.temp_path = f"{self.file_path}.tmp_{os.getpid()}_{uuid.uuid4().hex[:6]}.e57"
+        self._expected: List[Tuple[int, bool]] = []
+        self._added_prefixes = {""}
+        self._coord_meta: Optional[str] = None
+        self._closed = False
+
+        self._imf = libe57.ImageFile(self.temp_path, "w")
+        try:
+            root = self._imf.root()
+            self._imf.extensionsAdd("", libe57.E57_V1_0_URI)
+            root.set("formatName", libe57.StringNode(self._imf, "ASTM E57 3D Imaging Data File"))
+            root.set("guid", libe57.StringNode(self._imf, "{%s}" % uuid.uuid4()))
+            root.set("versionMajor", libe57.IntegerNode(self._imf, libe57.E57_FORMAT_MAJOR))
+            root.set("versionMinor", libe57.IntegerNode(self._imf, libe57.E57_FORMAT_MINOR))
+            root.set("e57LibraryVersion", libe57.StringNode(self._imf, libe57.E57_LIBRARY_ID))
+            creation_date_time = libe57.StructureNode(self._imf)
+            creation_date_time.set("dateTimeValue", libe57.FloatNode(self._imf, 0.0, libe57.E57_DOUBLE))
+            creation_date_time.set("isAtomicClockReferenced", libe57.IntegerNode(self._imf, 0))
+            root.set("creationDateTime", creation_date_time)
+            self._data3d = libe57.VectorNode(self._imf, True)
+            root.set("data3D", self._data3d)
+            root.set("images2D", libe57.VectorNode(self._imf, True))
+        except Exception:
+            self.abort()
+            raise
+
+    @property
+    def scan_count(self) -> int:
+        return len(self._expected)
+
+    @property
+    def point_count(self) -> int:
+        return sum(n for n, _ in self._expected)
+
+    def add_scan(self, scan: E57ScanData) -> None:
+        """スキャンを検証してから追記する。失敗したら一時ファイルを消して例外を再送出する"""
+        if self._closed:
+            raise RuntimeError("E57StreamWriter は既に閉じられています。")
+        try:
+            scan.validate()
+            for prefix, uri in scan.root_extensions:
+                if prefix not in self._added_prefixes:
+                    try:
+                        self._imf.extensionsAdd(prefix, uri)
+                    except Exception:
+                        pass
+                    self._added_prefixes.add(prefix)
+            if self._coord_meta is None and scan.coordinate_metadata:
+                self._coord_meta = scan.coordinate_metadata
+            _write_single_scan_lossless(self._imf, self._data3d, scan, len(self._expected))
+            self._expected.append((len(scan.points), bool(scan.is_spherical_only)))
+        except Exception:
+            self.abort()
+            raise
+
+    def close(self) -> None:
+        """書き終えて検証し、合格なら出力先へアトミック置換する"""
+        if self._closed:
+            return
+        try:
+            if self.scan_count == 0:
+                raise ValueError("書き込むスキャンデータが空です。")
+            self._imf.root().set("coordinateMetadata", libe57.StringNode(self._imf, self._coord_meta or ""))
+            self._imf.close()
+            self._imf = None
+            _verify_written_e57_file(self.temp_path, self._expected)
+            os.replace(self.temp_path, self.file_path)
+            self._closed = True
+        except Exception:
+            self.abort()
+            raise
+
+    def abort(self) -> None:
+        """書込を中止して一時ファイルを消す（既存の出力先には触れない）"""
+        self._closed = True
+        if getattr(self, "_imf", None) is not None:
+            try:
+                self._imf.close()
+            except Exception:
+                pass
+            self._imf = None
+        if os.path.exists(self.temp_path):
+            try:
+                os.remove(self.temp_path)
+            except Exception:
+                pass
+
+    def __enter__(self) -> "E57StreamWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
+
+
 def write_e57_scans(file_path: str, scans: List[E57ScanData]) -> None:
     """
     複数のスキャンデータを新しいE57ファイルにロスレス（元の形式・精度・座標値を完全保持）で書き出す。
@@ -1151,7 +1310,7 @@ def write_e57_scans(file_path: str, scans: List[E57ScanData]) -> None:
     2. 一時ファイルへの書き込み
     3. 書き込み後の再オープン自動ベリファイ (_verify_written_e57_file)
     4. 検証合格後のアトミック置換 (os.replace)
-    により、破損ファイルや点数欠損ファイルの生成を100%防止する。
+    により、破損ファイルや点数欠損ファイルの生成を100%防止する。実体は E57StreamWriter。
 
     :param file_path: 出力先E57ファイルのパス
     :param scans: 書き込むE57ScanDataオブジェクトのリスト
@@ -1159,79 +1318,11 @@ def write_e57_scans(file_path: str, scans: List[E57ScanData]) -> None:
     if not scans:
         raise ValueError("書き込むスキャンデータが空です。")
 
-    # 1. 書き込み前の事前バリデーション
+    # 1. 書き込み前の事前バリデーション（1 つでも不正なら一時ファイルを作る前に止める）
     for scan in scans:
         scan.validate()
 
-    abs_path = os.path.abspath(file_path)
-    output_dir = os.path.dirname(abs_path)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir, exist_ok=True)
-
-    # アトミック書き込み用の一時ファイルパス
-    temp_path = f"{abs_path}.tmp_{os.getpid()}_{uuid.uuid4().hex[:6]}.e57"
-
-    imf = None
-    try:
-        imf = libe57.ImageFile(temp_path, "w")
-        root = imf.root()
-
-        # 標準E57名前空間および元ファイルの拡張名前空間を登録
-        imf.extensionsAdd("", libe57.E57_V1_0_URI)
-        added_prefixes = {""}
-        for scan in scans:
-            for prefix, uri in scan.root_extensions:
-                if prefix not in added_prefixes:
-                    try:
-                        imf.extensionsAdd(prefix, uri)
-                        added_prefixes.add(prefix)
-                    except Exception:
-                        pass
-
-        # ルートヘッダ属性の設定
-        root.set("formatName", libe57.StringNode(imf, "ASTM E57 3D Imaging Data File"))
-        root.set("guid", libe57.StringNode(imf, "{%s}" % uuid.uuid4()))
-        root.set("versionMajor", libe57.IntegerNode(imf, libe57.E57_FORMAT_MAJOR))
-        root.set("versionMinor", libe57.IntegerNode(imf, libe57.E57_FORMAT_MINOR))
-        root.set("e57LibraryVersion", libe57.StringNode(imf, libe57.E57_LIBRARY_ID))
-
-        coord_meta = ""
-        for scan in scans:
-            if scan.coordinate_metadata:
-                coord_meta = scan.coordinate_metadata
-                break
-        root.set("coordinateMetadata", libe57.StringNode(imf, coord_meta))
-
-        creation_date_time = libe57.StructureNode(imf)
-        creation_date_time.set("dateTimeValue", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE))
-        creation_date_time.set("isAtomicClockReferenced", libe57.IntegerNode(imf, 0))
-        root.set("creationDateTime", creation_date_time)
-
-        data3d = libe57.VectorNode(imf, True)
-        root.set("data3D", data3d)
-        root.set("images2D", libe57.VectorNode(imf, True))
-
-        for idx, scan in enumerate(scans):
-            _write_single_scan_lossless(imf, data3d, scan, idx)
-
-        imf.close()
-        imf = None
-
-        # 3. 書き込み後の自動ベリファイ（スキャン数・点数・必須属性の完全一致検証）
-        _verify_written_e57_file(temp_path, scans)
-
-        # 4. 検証合格後、ターゲットファイルへアトミックに置換
-        os.replace(temp_path, abs_path)
-
-    except Exception as e:
-        if imf is not None:
-            try:
-                imf.close()
-            except Exception:
-                pass
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-        raise e
+    writer = E57StreamWriter(file_path)
+    for scan in scans:
+        writer.add_scan(scan)
+    writer.close()
