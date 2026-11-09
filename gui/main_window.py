@@ -48,6 +48,7 @@ from core.processor import (
     scan_display_origin, scan_display_points, scan_pose_transform,
 )
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
+from core.section_reload import SectionBox, reload_section_points
 from core.logger import log_info, log_warning, log_error, log_exception, open_log_folder
 from core.filters import (
     segment_ground_points,
@@ -769,6 +770,26 @@ class MainWindow(QMainWindow):
         )
         self.chk_sec_full_detail.toggled.connect(self._on_section_full_detail_toggled)
         sec_layout.addWidget(self.chk_sec_full_detail)
+
+        # 断面ボックス内を元ファイルから全点で読み直して重ね描き（表示専用。間引き読込でもボックス内の本当の点密度を見る）
+        sec_reload_row = QHBoxLayout()
+        sec_reload_row.setSpacing(4)
+        self.btn_sec_reload = QPushButton("元ファイルから全点で読み直す")
+        self.btn_sec_reload.setProperty("role", "outline")
+        self.btn_sec_reload.setToolTip(
+            "断面ボックスに入る点を、読み込み元の E57 から全点で読み直して重ね描きします（表示専用。選択・ノイズ移動の対象にはなりません）。\n"
+            "1 億点超のファイルは間引いて読み込んでいるため、ボックス内の本当の点密度を見たいときに使います。\n"
+            "ボックスを動かす・断面を解除する・別のファイルを開くと重ね描きは消えます。上限 1,000 万点。"
+            "元ファイルは読込後に動かさないでください（ファイル全体を流し読みするので 1 億点で 10〜20 秒程度）"
+        )
+        self.btn_sec_reload.clicked.connect(self._on_section_reload_clicked)
+        sec_reload_row.addWidget(self.btn_sec_reload, 1)
+        self.btn_sec_reload_clear = QPushButton("重ね描きを消す")
+        self.btn_sec_reload_clear.setProperty("role", "outline")
+        self.btn_sec_reload_clear.setToolTip("元ファイルから読み直した重ね描きを消します（ボックスを動かしても自動で消えます）")
+        self.btn_sec_reload_clear.clicked.connect(self._on_section_overlay_clear_clicked)
+        sec_reload_row.addWidget(self.btn_sec_reload_clear)
+        sec_layout.addLayout(sec_reload_row)
 
         # ② 現在見ている場所/選択点を一発でシーク基点にセット & シーク時のカメラ追従
         sec_focus_row = QHBoxLayout()
@@ -4140,6 +4161,61 @@ class MainWindow(QMainWindow):
         if self.viewer.is_section_active():
             n_disp = len(self.viewer.display_points) if self.viewer.display_points is not None else 0
             self.show_toast(f"🔬 断面ボックス内の全点表示: {'ON' if checked else 'OFF'}（表示 {n_disp:,} 点）")
+
+    def _on_section_reload_clicked(self):
+        """
+        断面ボックス内を元ファイルから全点で読み直し、表示専用に重ね描きする（バックグラウンド・中止可）。
+        読み込み済みの点は変わらない（編集は読み込み済みの点で行い、保存時の全点転写が全点へ写す）。
+        """
+        if self.viewer.points_raw is None or len(self.viewer.points_raw) == 0 or not self.current_scans:
+            self.show_toast("先に点群データを読み込んでください")
+            return
+        spec = self.viewer.section_box_spec()
+        if spec is None:
+            self.show_toast("X / Y / Z か斜め壁の断面を有効にしてから読み直してください")
+            return
+        if not all(getattr(s, "source_file", None) for s in self.current_scans):
+            self.show_toast("読み込み元ファイルの記録が無いため読み直せません（ファイルから開いた点群だけが対象です）")
+            return
+        box = SectionBox(**spec)
+        max_points = int(self.viewer.SECTION_DETAIL_MAX_POINTS)
+        if not any(getattr(s, "is_subsampled", False) for s in self.current_scans):
+            self.show_toast("この点群は全点で読み込まれているため、読み直しても点密度は変わりません（確認のために実行します）", 4000)
+
+        def on_done(result):
+            if self.viewer.section_box_spec() != spec:
+                self.show_toast("⚠️ 断面ボックスが変わったため、読み直した点は表示しませんでした")
+                return
+            self.viewer.set_section_overlay(
+                result.points, result.colors, result.intensities, result.scan_ids,
+                n_in_box=result.n_in_box, capped=result.capped,
+            )
+            cap_txt = f"（上限 {max_points // 10000:,} 万点で間引き）" if result.capped else ""
+            msg = (
+                f"元ファイルから {result.n_points:,} 点を重ね描き{cap_txt}: ボックス内 {result.n_in_box:,} 点 / 走査 {result.n_read:,} 点, "
+                f"{result.n_scans_read} スキャン読込・{result.n_scans_skipped} スキャン範囲外, {result.elapsed_sec:.1f} 秒"
+            )
+            self.log_text.append(msg)
+            self.show_toast(f"🔍 {msg}", 5000)
+
+        self._run_in_background(
+            "断面ボックスの読み直し",
+            f"{box.describe()} を元ファイルから全点で読み直しています",
+            reload_section_points,
+            self.current_scans,
+            box,
+            max_points=max_points,
+            on_success=on_done,
+        )
+
+    def _on_section_overlay_clear_clicked(self):
+        """元ファイルから読み直した重ね描きを消す"""
+        if not self.viewer.has_section_overlay:
+            self.show_toast("重ね描きはありません")
+            return
+        self.viewer.clear_section_overlay()
+        self.viewer.update()
+        self.show_toast("🔍 元ファイルの重ね描きを消しました")
 
     def _on_viewer_section_guides_changed(self, show_origin: bool, show_box: bool):
         """ビューア側（Bキーなど）の枠表示状態をGUIチェックボックスへ反映"""

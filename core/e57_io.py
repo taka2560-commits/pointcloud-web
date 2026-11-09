@@ -901,6 +901,97 @@ def iter_e57_scans(
         progress_callback(0.95, "点群データの統合中...")
 
 
+def iter_e57_point_chunks(
+    file_path: str,
+    scan_index: int,
+    fields: Optional[Any] = None,
+    chunk_size: int = 1_000_000,
+):
+    """
+    1 スキャンの点をチャンク単位で流し読みするジェネレータ（断面ボックスの元ファイル読み直しなど、
+    全点をメモリに載せずに走査したい用途向け）。
+
+    各チャンクは {フィールド名: ndarray} の辞書。ScaledInteger は scale/offset を掛けた float64、
+    Float / Integer はファイルの dtype のまま。配列は毎回新しく確保するので呼び出し側で保持してよい。
+    fields に無いフィールド名、またはプロトタイプに無いフィールド名は黙って無視する
+    （呼び出し側は読み込み済みスキャンの field_schemas で有無を確認できる）。
+    fields が None なら cartesianX/Y/Z のみ。スキャンが無い・points が無いときは ValueError。
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"ファイルが見つかりません: {file_path}")
+    wanted = list(fields) if fields is not None else ["cartesianX", "cartesianY", "cartesianZ"]
+    chunk_size = max(1, int(chunk_size))
+
+    imf = libe57.ImageFile(file_path, "r")
+    reader = None
+    try:
+        root = imf.root()
+        if not root.isDefined("data3D"):
+            raise ValueError(f"E57 に data3D がありません: {file_path}")
+        data3d = get_node(root, "data3D")
+        if scan_index < 0 or scan_index >= data3d.childCount():
+            raise ValueError(f"スキャン #{scan_index} は存在しません（スキャン数 {data3d.childCount()}）: {file_path}")
+        scan_node = get_node(data3d, scan_index)
+        if not scan_node.isDefined("points"):
+            raise ValueError(f"スキャン #{scan_index} に points がありません: {file_path}")
+        points_node = get_node(scan_node, "points")
+        n_points = points_node.childCount()
+        if n_points <= 0:
+            return
+        proto_node = libe57.StructureNode(points_node.prototype())
+        c_size = min(chunk_size, n_points)
+
+        buffers = libe57.VectorSourceDestBuffer()
+        bufs: Dict[str, np.ndarray] = {}
+        scaled: Dict[str, Tuple[float, float]] = {}
+        for f_idx in range(proto_node.childCount()):
+            f_node = get_node(proto_node, f_idx)
+            f_name = f_node.elementName()
+            if f_name not in wanted:
+                continue
+            if isinstance(f_node, libe57.FloatNode):
+                dtype = np.float32 if f_node.precision() == libe57.E57_SINGLE else np.float64
+                arr = np.empty(c_size, dtype=dtype)
+                buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, True))
+            elif isinstance(f_node, libe57.ScaledIntegerNode):
+                arr = np.empty(c_size, dtype=np.int64)
+                buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, False))
+                scaled[f_name] = (float(f_node.scale()), float(f_node.offset()))
+            elif isinstance(f_node, libe57.IntegerNode):
+                arr = np.empty(c_size, dtype=_optimal_integer_dtype(int(f_node.minimum()), int(f_node.maximum())))
+                buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, True))
+            else:
+                continue
+            bufs[f_name] = arr
+        if not bufs:
+            return
+
+        reader = points_node.reader(buffers)
+        while True:
+            read_pts = reader.read()
+            if read_pts <= 0:
+                break
+            chunk: Dict[str, np.ndarray] = {}
+            for f_name, arr in bufs.items():
+                if f_name in scaled:
+                    sc, off = scaled[f_name]
+                    vals = arr[:read_pts].astype(np.float64)
+                    vals *= sc
+                    if off != 0.0:
+                        vals += off
+                    chunk[f_name] = vals
+                else:
+                    chunk[f_name] = arr[:read_pts].copy()
+            yield chunk
+    finally:
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
+        imf.close()
+
+
 def _write_single_scan_lossless(imf: libe57.ImageFile, data3d: libe57.VectorNode, scan: E57ScanData, scan_idx: int) -> None:
     """
     単一スキャンデータを元のスキーマ・精度・メタデータを完全保持したままImageFileに書き込む
