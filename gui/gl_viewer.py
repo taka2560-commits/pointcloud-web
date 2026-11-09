@@ -200,6 +200,8 @@ class PointCloudViewer(QOpenGLWidget):
         self._cached_normalized_heights: Optional[np.ndarray] = None
         self._cached_normalized_intensities: Optional[np.ndarray] = None
         self._cached_shading_factors: Optional[np.ndarray] = None
+        self._cached_height_range: Optional[Tuple[float, float]] = None      # 高さ色分けの (z_min, z_max)
+        self._cached_intensity_stretch: Optional[Tuple[float, float]] = None  # 反射強度の (p2, p98)
 
         # 3D表示強化設定 (① 凹凸・陰影強調 / ② 距離連動ポイントサイズ)
         self.shading_enabled: bool = True
@@ -222,6 +224,18 @@ class PointCloudViewer(QOpenGLWidget):
         self._vbo_points_dirty = True
         self._vbo_colors_dirty = True
         self._vbo_count = 0
+        # 断面ボックスの元ファイル読み直し（表示専用の重ね描き。core/section_reload.py の結果を set_section_overlay() で受け取る）
+        # 現在の断面ボックスに紐づき、ボックスが変わる・断面を解除する・点群を入れ替えると自動で消える
+        self.overlay_points: Optional[np.ndarray] = None   # (M, 3) float32 中心オフセット済み
+        self.overlay_colors: Optional[np.ndarray] = None   # (M, 3) float32
+        self._overlay_source = None                        # (points_centered, rgb, intensities, scan_ids) 配色変更時の再着色用
+        self.overlay_box_total: int = 0                    # ボックス内にあった元ファイルの点数（間引き前）
+        self.overlay_capped: bool = False                  # 上限で間引いたか
+        self._overlay_box_key = None                       # 重ね描きを作ったときの断面ボックス
+        self._vbo_overlay = None
+        self._vbo_overlay_colors = None
+        self._vbo_overlay_dirty = True
+        self._vbo_overlay_count = 0
 
         # 表示設定
         self.point_size = 2.0
@@ -488,6 +502,9 @@ class PointCloudViewer(QOpenGLWidget):
                 gl.glVertexPointer(3, gl.GL_FLOAT, 0, self.display_points)
                 gl.glColorPointer(3, gl.GL_FLOAT, 0, self.display_colors)
                 gl.glDrawArrays(gl.GL_POINTS, 0, len(self.display_points))
+
+            # 4.5. 断面ボックスの元ファイル読み直し（表示専用の重ね描き）を同じ点サイズ・フォグで描く
+            self._draw_section_overlay()
 
             gl.glDisableClientState(gl.GL_COLOR_ARRAY)
             gl.glDisableClientState(gl.GL_VERTEX_ARRAY)
@@ -983,7 +1000,12 @@ class PointCloudViewer(QOpenGLWidget):
                 detail_tag = " (ボックス内全点)"
             else:
                 detail_tag = ""
-            sec_text = f"📐 断面シーク中{guide_tag}  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点{detail_tag}"
+            overlay_tag = ""
+            if self.overlay_points is not None and len(self.overlay_points) > 0:
+                overlay_tag = f"  ｜  🔍 元ファイルから{len(self.overlay_points):,}点を重ね描き"
+                if self.overlay_capped:
+                    overlay_tag += f" (ボックス内{self.overlay_box_total:,}点を上限で間引き)"
+            sec_text = f"📐 断面シーク中{guide_tag}  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点{detail_tag}{overlay_tag}"
 
             font_sec = QFont("Segoe UI", 9, QFont.Bold)
             painter.setFont(font_sec)
@@ -1174,6 +1196,7 @@ class PointCloudViewer(QOpenGLWidget):
     ):
         """点群データを設定する"""
         self._clear_color_cache()
+        self.clear_section_overlay()  # 重ね描きは前の点群・前のボックスのもの
         self.clear_measure_points()  # 前の点群の計測点は新しい点群では無効
         if points is None or len(points) == 0:
             self.coord_mode = "cartesian"
@@ -1261,6 +1284,7 @@ class PointCloudViewer(QOpenGLWidget):
     def set_preloaded_data(self, preloaded, reset_camera: bool = True):
         """バックグラウンドで前処理済みのデータを0ミリ秒で超高速バインド (UIフリーズ皆無)"""
         self._clear_color_cache()
+        self.clear_section_overlay()
         if preloaded is None or preloaded.points_raw is None or len(preloaded.points_raw) == 0:
             self.set_point_cloud(None)
             return
@@ -1321,6 +1345,8 @@ class PointCloudViewer(QOpenGLWidget):
         self._cached_normalized_heights = None
         self._cached_normalized_intensities = None
         self._cached_shading_factors = None
+        self._cached_height_range = None
+        self._cached_intensity_stretch = None
 
     def _compute_shading_factors(self) -> np.ndarray:
         """
@@ -1335,7 +1361,17 @@ class PointCloudViewer(QOpenGLWidget):
             self._cached_shading_factors = res
             return res
 
-        pts = self.points_centered
+        iv_norm = self._normalize_intensities() if (self.intensities_raw is not None and len(self.intensities_raw) == n) else None
+        res = self._shading_factors_of(self.points_centered, iv_norm)
+        self._cached_shading_factors = res
+        return res
+
+    @staticmethod
+    def _shading_factors_of(pts: np.ndarray, iv_norm: Optional[np.ndarray]) -> np.ndarray:
+        """陰影係数の本体（点列 pts と正規化済み反射強度から算出。重ね描きにも同じ式を使う）"""
+        n = len(pts)
+        if n < 4:
+            return np.ones(n, dtype=np.float32)
         v1 = np.empty_like(pts)
         v1[:-1] = pts[1:] - pts[:-1]
         v1[-1] = v1[-2]
@@ -1364,13 +1400,23 @@ class PointCloudViewer(QOpenGLWidget):
         shade = (0.68 + 0.44 * light_dot) * edge_factor
 
         # 反射強度がある場合は微細な表面テクスチャ陰影を15%ブレンド
-        if self.intensities_raw is not None and len(self.intensities_raw) == n:
-            iv_norm = self._normalize_intensities()
+        if iv_norm is not None and len(iv_norm) == n:
             shade = shade * (0.90 + 0.20 * iv_norm)
 
-        res = np.clip(shade, 0.50, 1.15).astype(np.float32)
-        self._cached_shading_factors = res
-        return res
+        return np.clip(shade, 0.50, 1.15).astype(np.float32)
+
+    def _height_range(self) -> Tuple[float, float]:
+        """高さ色分けの (z_min, z_max)（中心オフセット済み座標）。任意高さレンジ有効時はその範囲、無効時は点群全体の範囲"""
+        if getattr(self, "custom_height_enabled", False):
+            # 任意高さ範囲が有効な場合: ワールド標高基準から中心オフセットを引いたローカル座標で正規化
+            cz = float(self.center_offset[2]) if self.center_offset is not None else 0.0
+            return float(self.custom_height_min - cz), float(self.custom_height_max - cz)
+        if self._cached_height_range is None:
+            if self.points_centered is None or len(self.points_centered) == 0:
+                return 0.0, 1.0
+            z = self.points_centered[:, 2]
+            self._cached_height_range = (float(np.min(z)), float(np.max(z)))
+        return self._cached_height_range
 
     def _normalize_heights(self) -> np.ndarray:
         """点群のZ高さを 0.0〜1.0 に正規化 (キャッシュ利用で2回目以降0ms即時参照、任意高さレンジ対応)"""
@@ -1380,17 +1426,27 @@ class PointCloudViewer(QOpenGLWidget):
         if self.points_centered is None or n == 0:
             return np.zeros(0, dtype=np.float32)
         z = self.points_centered[:, 2]
-        if getattr(self, "custom_height_enabled", False):
-            # 任意高さ範囲が有効な場合: ワールド標高基準から中心オフセットを引いたローカル座標で正規化
-            cz = float(self.center_offset[2]) if self.center_offset is not None else 0.0
-            z_min = float(self.custom_height_min - cz)
-            z_max = float(self.custom_height_max - cz)
-        else:
-            z_min, z_max = float(np.min(z)), float(np.max(z))
+        z_min, z_max = self._height_range()
         diff = max(1e-5, z_max - z_min)
         res = np.clip((z - z_min) / diff, 0.0, 1.0).astype(np.float32)
         self._cached_normalized_heights = res
         return res
+
+    def _intensity_stretch(self) -> Tuple[float, float]:
+        """反射強度ストレッチの (p_low, p_high)（2%〜98% パーセンタイル）。重ね描きも同じ値で正規化する"""
+        if self._cached_intensity_stretch is not None:
+            return self._cached_intensity_stretch
+        if self.intensities_raw is None or len(self.intensities_raw) == 0:
+            return 0.0, 1.0
+        iv = self.intensities_raw
+        if len(iv) > 10:
+            p_low, p_high = np.percentile(iv, [2.0, 98.0])
+            if p_high - p_low < 1e-6:
+                p_low, p_high = float(np.min(iv)), float(np.max(iv))
+        else:
+            p_low, p_high = float(np.min(iv)), float(np.max(iv))
+        self._cached_intensity_stretch = (float(p_low), float(p_high))
+        return self._cached_intensity_stretch
 
     def _normalize_intensities(self) -> np.ndarray:
         """点群の反射強度を 2%〜98% パーセンタイルでストレッチ正規化 (キャッシュ利用で50〜150msのラグ解消)"""
@@ -1400,16 +1456,63 @@ class PointCloudViewer(QOpenGLWidget):
         if self.intensities_raw is None or n == 0:
             return np.zeros(0, dtype=np.float32)
         iv = self.intensities_raw
-        if len(iv) > 10:
-            p_low, p_high = np.percentile(iv, [2.0, 98.0])
-            if p_high - p_low < 1e-6:
-                p_low, p_high = float(np.min(iv)), float(np.max(iv))
-        else:
-            p_low, p_high = float(np.min(iv)), float(np.max(iv))
+        p_low, p_high = self._intensity_stretch()
         diff = max(1e-5, p_high - p_low)
         res = np.clip((iv - p_low) / diff, 0.0, 1.0).astype(np.float32)
         self._cached_normalized_intensities = res
         return res
+
+    def _is_height_mode(self, mode: str) -> bool:
+        return "高さ" in mode or mode in (
+            self.COLOR_MODE_HEIGHT,
+            self.COLOR_MODE_HEIGHT_VIRIDIS,
+            self.COLOR_MODE_HEIGHT_JET,
+            self.COLOR_MODE_HEIGHT_PLASMA,
+            self.COLOR_MODE_HEIGHT_TERRAIN,
+            self.COLOR_MODE_HEIGHT_HEAT,
+            self.COLOR_MODE_HEIGHT_COOLWARM,
+        )
+
+    def _is_intensity_mode(self, mode: str) -> bool:
+        return "反射強度" in mode or mode in (
+            self.COLOR_MODE_INTENSITY,
+            self.COLOR_MODE_INTENSITY_HEAT,
+            self.COLOR_MODE_INTENSITY_PLASMA,
+            self.COLOR_MODE_INTENSITY_TURBO,
+            self.COLOR_MODE_INTENSITY_VIRIDIS,
+        )
+
+    def _height_colormap(self, t: np.ndarray, mode: str) -> np.ndarray:
+        """高さ (Z) 系モードのパレット選択 (Turbo, Viridis, Jet, Plasma, Terrain, Heat, Cool-Warm, Grayscale)"""
+        if "Viridis" in mode or self.color_palette == self.PALETTE_VIRIDIS:
+            return self._colormap_viridis(t)
+        if "Jet" in mode or self.color_palette == self.PALETTE_JET:
+            return self._colormap_jet(t)
+        if "Plasma" in mode or self.color_palette == self.PALETTE_PLASMA:
+            return self._colormap_plasma(t)
+        if "地形" in mode or "Terrain" in mode or self.color_palette == self.PALETTE_TERRAIN:
+            return self._colormap_terrain(t)
+        if "Heat" in mode or "温熱" in mode or self.color_palette == self.PALETTE_HEAT:
+            return self._colormap_heat(t)
+        if "Cool-Warm" in mode or "青白赤" in mode or self.color_palette == self.PALETTE_COOLWARM:
+            return self._colormap_coolwarm(t)
+        if self.color_palette == self.PALETTE_GRAYSCALE:
+            return self._colormap_grayscale(t)
+        # 標準の高さ (Z) -> 従来と同じ Turbo レインボー！
+        return self._colormap_turbo(t)
+
+    def _intensity_colormap(self, t: np.ndarray, mode: str) -> np.ndarray:
+        """反射強度系モードのパレット選択 (白黒, Heat, Plasma, Turbo, Viridis)"""
+        if "Heat" in mode or "温熱" in mode or self.color_palette == self.PALETTE_HEAT:
+            return self._colormap_heat(t)
+        if "Plasma" in mode or self.color_palette == self.PALETTE_PLASMA:
+            return self._colormap_plasma(t)
+        if "Turbo" in mode or "レインボー" in mode or self.color_palette == self.PALETTE_TURBO:
+            return self._colormap_turbo(t)
+        if "Viridis" in mode or self.color_palette == self.PALETTE_VIRIDIS:
+            return self._colormap_viridis(t)
+        # 従来の標準「反射強度」-> 白黒グレースケール！
+        return self._colormap_grayscale(t)
 
     def _update_active_colors(self):
         """原本全体のカラー配列を生成（カラーマップ・レイヤー色・スキャン別色分け・反射強度ストレッチ対応）"""
@@ -1434,55 +1537,13 @@ class PointCloudViewer(QOpenGLWidget):
                 self.active_colors = self._colormap_turbo(t)
 
         # 2. 高さ (Z) 系カラーマップ (Turbo, Viridis, Jet, Plasma, Terrain, Heat, Cool-Warm)
-        elif "高さ" in mode or mode in (
-            self.COLOR_MODE_HEIGHT,
-            self.COLOR_MODE_HEIGHT_VIRIDIS,
-            self.COLOR_MODE_HEIGHT_JET,
-            self.COLOR_MODE_HEIGHT_PLASMA,
-            self.COLOR_MODE_HEIGHT_TERRAIN,
-            self.COLOR_MODE_HEIGHT_HEAT,
-            self.COLOR_MODE_HEIGHT_COOLWARM,
-        ):
-            t = self._normalize_heights()
-            if "Viridis" in mode or self.color_palette == self.PALETTE_VIRIDIS:
-                self.active_colors = self._colormap_viridis(t)
-            elif "Jet" in mode or self.color_palette == self.PALETTE_JET:
-                self.active_colors = self._colormap_jet(t)
-            elif "Plasma" in mode or self.color_palette == self.PALETTE_PLASMA:
-                self.active_colors = self._colormap_plasma(t)
-            elif "地形" in mode or "Terrain" in mode or self.color_palette == self.PALETTE_TERRAIN:
-                self.active_colors = self._colormap_terrain(t)
-            elif "Heat" in mode or "温熱" in mode or self.color_palette == self.PALETTE_HEAT:
-                self.active_colors = self._colormap_heat(t)
-            elif "Cool-Warm" in mode or "青白赤" in mode or self.color_palette == self.PALETTE_COOLWARM:
-                self.active_colors = self._colormap_coolwarm(t)
-            elif self.color_palette == self.PALETTE_GRAYSCALE:
-                self.active_colors = self._colormap_grayscale(t)
-            else:
-                # 標準の高さ (Z) -> 従来と同じ Turbo レインボー！
-                self.active_colors = self._colormap_turbo(t)
+        elif self._is_height_mode(mode):
+            self.active_colors = self._height_colormap(self._normalize_heights(), mode)
 
         # 3. 反射強度系カラーマップ (白黒, Heat, Plasma, Turbo, Viridis)
-        elif "反射強度" in mode or mode in (
-            self.COLOR_MODE_INTENSITY,
-            self.COLOR_MODE_INTENSITY_HEAT,
-            self.COLOR_MODE_INTENSITY_PLASMA,
-            self.COLOR_MODE_INTENSITY_TURBO,
-            self.COLOR_MODE_INTENSITY_VIRIDIS,
-        ):
+        elif self._is_intensity_mode(mode):
             if self.intensities_raw is not None:
-                t = self._normalize_intensities()
-                if "Heat" in mode or "温熱" in mode or self.color_palette == self.PALETTE_HEAT:
-                    self.active_colors = self._colormap_heat(t)
-                elif "Plasma" in mode or self.color_palette == self.PALETTE_PLASMA:
-                    self.active_colors = self._colormap_plasma(t)
-                elif "Turbo" in mode or "レインボー" in mode or self.color_palette == self.PALETTE_TURBO:
-                    self.active_colors = self._colormap_turbo(t)
-                elif "Viridis" in mode or self.color_palette == self.PALETTE_VIRIDIS:
-                    self.active_colors = self._colormap_viridis(t)
-                else:
-                    # 従来の標準「反射強度」-> 白黒グレースケール！
-                    self.active_colors = self._colormap_grayscale(t)
+                self.active_colors = self._intensity_colormap(self._normalize_intensities(), mode)
             else:
                 # 反射強度データがない場合は高さでフォールバック
                 t = self._normalize_heights()
@@ -1527,6 +1588,9 @@ class PointCloudViewer(QOpenGLWidget):
             self.active_colors[valid] = [1.0, 0.9, 0.1]
 
         self.active_colors = np.ascontiguousarray(self.active_colors, dtype=np.float32)
+        # 重ね描き（元ファイル読み直し）も同じ配色で作り直す
+        if self._overlay_source is not None:
+            self._recolor_overlay()
 
     def _get_layer_and_scan_visibility_mask(self) -> np.ndarray:
         """現在のマルチレイヤー表示設定およびスキャン(器械点)表示設定を統合した可視マスクを返す"""
@@ -1604,6 +1668,7 @@ class PointCloudViewer(QOpenGLWidget):
         現在表示されている点群(100〜200万点)に対してわずか数ミリ秒で即時断面プレビューを反映。
         スライダーの動きに断面が吸い付くように60fpsでヌルヌル追従します。
         """
+        self._drop_overlay_if_box_changed()
         if self._preview_base_points is None or len(self._preview_base_points) == 0:
             self._update_display_arrays()
             return
@@ -1638,6 +1703,7 @@ class PointCloudViewer(QOpenGLWidget):
     def _update_display_arrays(self):
         """断面スライス・レイヤー可視性・スキャン可視性・Point Budgetを適用して描画バッファを生成"""
         self._vbo_dirty = True
+        self._drop_overlay_if_box_changed()
         if self.points_raw is None or len(self.points_raw) == 0:
             self.display_points = None
             self.display_colors = None
@@ -1724,6 +1790,14 @@ class PointCloudViewer(QOpenGLWidget):
             assert self.display_orig_indices is not None and len(self.display_orig_indices) == n_disp, "display_pointsとdisplay_orig_indicesの長さが不一致です"
             assert not np.any(np.isnan(self.display_points)), "display_pointsにNaNが含まれています"
             assert not np.any(np.isnan(self.display_colors)), "display_colorsにNaNが含まれています"
+
+        if self.overlay_points is not None:
+            n_ov = len(self.overlay_points)
+            assert self.overlay_points.shape == (n_ov, 3), f"overlay_pointsの形状が不正です: {self.overlay_points.shape}"
+            assert self.overlay_colors is not None and len(self.overlay_colors) == n_ov, "overlay_pointsとoverlay_colorsの長さが不一致です"
+            assert not np.any(np.isnan(self.overlay_points)), "overlay_pointsにNaNが含まれています"
+            assert self.is_section_active(), "断面が無効なのに重ね描き(overlay_points)が残っています"
+            assert self._overlay_box_key == self._section_box_key(), "重ね描きが現在の断面ボックスと一致していません"
 
     # --- レイヤー管理メソッド (マルチレイヤー・ロック・スキャン・プロジェクト保存対応) ---
     def _emit_layer_counts(self):
@@ -2322,6 +2396,180 @@ class PointCloudViewer(QOpenGLWidget):
         if self.is_section_active():
             self._update_display_arrays()
             self.update()
+
+    # --- 断面ボックスの元ファイル読み直し（表示専用の重ね描き） ---
+    def section_box_spec(self) -> Optional[dict]:
+        """
+        現在の断面ボックスを表示座標系（pose 適用後・座標系変換後のワールド座標）で返す。
+        core.section_reload.SectionBox(**spec) にそのまま渡せる。断面が無効なら None。
+        """
+        if not self.is_section_active():
+            return None
+        spec: dict = {"x_range": None, "y_range": None, "z_range": None, "wall": None}
+        if self.clip_x_enabled:
+            spec["x_range"] = (float(self.clip_x_range[0]), float(self.clip_x_range[1]))
+        if self.clip_y_enabled:
+            spec["y_range"] = (float(self.clip_y_range[0]), float(self.clip_y_range[1]))
+        if self.clip_z_enabled:
+            spec["z_range"] = (float(self.clip_z_range[0]), float(self.clip_z_range[1]))
+        if self.clip_wall_enabled and self.wall_align_angle_deg is not None and self.wall_align_center_world is not None:
+            spec["wall"] = (
+                float(self.wall_align_angle_deg),
+                float(self.wall_align_center_world[0]),
+                float(self.wall_align_center_world[1]),
+                float(self.clip_wall_range[0]),
+                float(self.clip_wall_range[1]),
+            )
+        return spec
+
+    def _section_box_key(self):
+        """重ね描きがどの断面ボックスのものかを比べるためのキー（断面無効なら None）"""
+        spec = self.section_box_spec()
+        if spec is None:
+            return None
+        return (spec["x_range"], spec["y_range"], spec["z_range"], spec["wall"])
+
+    @property
+    def has_section_overlay(self) -> bool:
+        return self.overlay_points is not None and len(self.overlay_points) > 0
+
+    def set_section_overlay(
+        self,
+        points_world: np.ndarray,
+        colors: Optional[np.ndarray] = None,
+        intensities: Optional[np.ndarray] = None,
+        scan_ids: Optional[np.ndarray] = None,
+        n_in_box: int = 0,
+        capped: bool = False,
+    ):
+        """
+        断面ボックスを元ファイルから全点で読み直した点（表示座標）を、表示専用に重ね描きする。
+        現在の断面ボックスに紐づき、ボックスが変わる・断面を解除する・点群を入れ替えると自動で消える。
+        選択・ノイズ移動・計測の対象にはならない。
+        """
+        if self.points_centered is None or points_world is None or len(points_world) == 0 or not self.is_section_active():
+            self.clear_section_overlay()
+            self.update()
+            return
+        pts_c = np.ascontiguousarray(np.asarray(points_world, dtype=np.float64) - self.center_offset, dtype=np.float32)
+        n = len(pts_c)
+        rgb = np.asarray(colors, dtype=np.float32) if colors is not None else None
+        if rgb is not None and (rgb.ndim != 2 or rgb.shape != (n, 3)):
+            rgb = None
+        ints = np.asarray(intensities, dtype=np.float32) if intensities is not None else None
+        if ints is not None and ints.shape != (n,):
+            ints = None
+        sids = np.asarray(scan_ids, dtype=np.int32) if scan_ids is not None else None
+        if sids is not None and sids.shape != (n,):
+            sids = None
+        self._overlay_source = (pts_c, rgb, ints, sids)
+        self.overlay_points = pts_c
+        self.overlay_box_total = int(n_in_box)
+        self.overlay_capped = bool(capped)
+        self._overlay_box_key = self._section_box_key()
+        self._recolor_overlay()
+        self.update()
+
+    def clear_section_overlay(self):
+        """重ね描きを消す（断面ボックスの変更・断面解除・点群入替・ユーザー操作）"""
+        if self.overlay_points is None and self._overlay_source is None:
+            return
+        self.overlay_points = None
+        self.overlay_colors = None
+        self._overlay_source = None
+        self.overlay_box_total = 0
+        self.overlay_capped = False
+        self._overlay_box_key = None
+        self._vbo_overlay_dirty = True
+
+    def _drop_overlay_if_box_changed(self):
+        """断面ボックスが重ね描きを作ったときと違えば消す（表示配列の再構築・プレビューのたびに確認）"""
+        if self._overlay_source is not None and self._section_box_key() != self._overlay_box_key:
+            self.clear_section_overlay()
+
+    def _recolor_overlay(self):
+        """重ね描きの色を現在の配色モード（RGB / 高さ / 反射強度 / スキャン別 / 単色）と陰影に合わせて作り直す"""
+        if self._overlay_source is None:
+            return
+        pts_c, rgb, ints, sids = self._overlay_source
+        n = len(pts_c)
+        mode = self.color_mode
+
+        def _t_height() -> np.ndarray:
+            z_min, z_max = self._height_range()
+            return np.clip((pts_c[:, 2] - z_min) / max(1e-5, z_max - z_min), 0.0, 1.0).astype(np.float32)
+
+        def _t_int() -> np.ndarray:
+            p_low, p_high = self._intensity_stretch()
+            return np.clip((ints - p_low) / max(1e-5, p_high - p_low), 0.0, 1.0).astype(np.float32)
+
+        if mode in (self.COLOR_MODE_RGB, "RGB", "RGB (実色写真)"):
+            if rgb is not None:
+                cols = rgb.copy()
+            elif ints is not None:
+                cols = self._colormap_grayscale(_t_int())
+            else:
+                cols = self._colormap_turbo(_t_height())
+        elif self._is_height_mode(mode):
+            cols = self._height_colormap(_t_height(), mode)
+        elif self._is_intensity_mode(mode):
+            cols = self._intensity_colormap(_t_int(), mode) if ints is not None else self._colormap_turbo(_t_height())
+        elif mode in (self.COLOR_MODE_SCAN, "スキャン別 (器械点)") and sids is not None:
+            cols = self.SCAN_PALETTE[np.mod(np.maximum(0, sids), len(self.SCAN_PALETTE))].copy()
+        elif mode in (self.COLOR_MODE_LAYER, "レイヤー別色分け") and self.LAYER_NORMAL in self.layers:
+            cols = np.tile(np.asarray(self.layers[self.LAYER_NORMAL].color, dtype=np.float32), (n, 1))
+        else:
+            cols = np.tile(np.asarray([0.3, 0.8, 0.95], dtype=np.float32), (n, 1))
+
+        if getattr(self, "shading_enabled", False):
+            shade = self._shading_factors_of(pts_c, _t_int() if ints is not None else None)
+            factor = 1.0 + (shade - 1.0) * float(getattr(self, "shading_strength", 0.65))
+            cols = np.clip(cols * factor[:, np.newaxis], 0.0, 1.0)
+
+        # 通常レイヤーの固有色（use_layer_color）は本体でもレイヤー別以外で上書きされるので合わせる
+        normal_layer = self.layers.get(self.LAYER_NORMAL)
+        if normal_layer is not None and normal_layer.use_layer_color and self.color_mode != self.COLOR_MODE_LAYER:
+            cols[:] = np.asarray(normal_layer.color, dtype=np.float32)
+
+        self.overlay_colors = np.ascontiguousarray(cols, dtype=np.float32)
+        self._vbo_overlay_dirty = True
+
+    def _draw_section_overlay(self):
+        """
+        重ね描き（元ファイル読み直し）を点群と同じ点サイズ・フォグで描く。
+        paintGL の点群描画ブロック内（VERTEX/COLOR ClientState 有効）から呼ばれる前提。VBO が使えなければクライアント配列で描く。
+        """
+        pts = self.overlay_points
+        cols = self.overlay_colors
+        if pts is None or cols is None or len(pts) == 0 or len(cols) != len(pts):
+            return
+        try:
+            if self._vbo_overlay is None:
+                self._vbo_overlay = gl.glGenBuffers(1)
+                self._vbo_overlay_colors = gl.glGenBuffers(1)
+                self._vbo_overlay_dirty = True
+            if self._vbo_overlay_dirty:
+                self._vbo_overlay_count = len(pts)
+                gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_overlay)
+                gl.glBufferData(gl.GL_ARRAY_BUFFER, pts.nbytes, pts, gl.GL_DYNAMIC_DRAW)
+                gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_overlay_colors)
+                gl.glBufferData(gl.GL_ARRAY_BUFFER, cols.nbytes, cols, gl.GL_DYNAMIC_DRAW)
+                self._vbo_overlay_dirty = False
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_overlay)
+            gl.glVertexPointer(3, gl.GL_FLOAT, 0, None)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_overlay_colors)
+            gl.glColorPointer(3, gl.GL_FLOAT, 0, None)
+            # 点群本体と同じく、回転・パン中は点数を半減して追従を軽くする
+            render_count = self._vbo_overlay_count
+            if (self.is_rotating or self.is_panning) and render_count > 800000:
+                render_count = max(400000, render_count // 2)
+            gl.glDrawArrays(gl.GL_POINTS, 0, render_count)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+        except Exception:
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+            gl.glVertexPointer(3, gl.GL_FLOAT, 0, pts)
+            gl.glColorPointer(3, gl.GL_FLOAT, 0, cols)
+            gl.glDrawArrays(gl.GL_POINTS, 0, len(pts))
 
     def fit_to_screen(self):
         """全体フィット (F)"""
