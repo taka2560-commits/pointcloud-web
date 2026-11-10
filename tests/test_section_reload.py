@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication
 
 from core.e57_io import iter_e57_point_chunks, read_e57_scans
 from core.processor import scan_display_points, transform_scan_coordinate_system
+from core.section_cache import remove_cache
 from core.section_reload import (
     SectionBox,
     color_divisor,
@@ -55,11 +56,12 @@ def _to_raw(pts):
     return [np.round((pts[:, i] - OFFSETS[i]) / SCALE).astype(np.int64) for i in range(3)]
 
 
-def _write_e57(path, scans):
+def _write_e57(path, scans, float_xyz=False):
     """
     scans: list of dict(points, name, guid, pose=(rot_wxyz, trans) or None, colors uint8 (N,3), intensity float32 (N,),
                         bounds=True/False)
-    ScaledInteger XYZ + color (Integer 0..255) + intensity (Float single)。bounds=True なら cartesianBounds を書く。
+    ScaledInteger XYZ（float_xyz=True なら倍精度 Float XYZ）+ color (Integer 0..255) + intensity (Float single)。
+    bounds=True なら cartesianBounds を書く。
     """
     imf = libe57.ImageFile(path, "w")
     imf.extensionsAdd("", libe57.E57_V1_0_URI)
@@ -95,7 +97,10 @@ def _write_e57(path, scans):
             scan.set("cartesianBounds", bb)
         proto = libe57.StructureNode(imf)
         for i, ax in enumerate("XYZ"):
-            proto.set(f"cartesian{ax}", libe57.ScaledIntegerNode(imf, 0, -100000000, 100000000, SCALE, OFFSETS[i]))
+            if float_xyz:
+                proto.set(f"cartesian{ax}", libe57.FloatNode(imf, 0.0, libe57.E57_DOUBLE, -1e6, 1e6))
+            else:
+                proto.set(f"cartesian{ax}", libe57.ScaledIntegerNode(imf, 0, -100000000, 100000000, SCALE, OFFSETS[i]))
         for c in ("colorRed", "colorGreen", "colorBlue"):
             proto.set(c, libe57.IntegerNode(imf, 0, 0, 255))
         proto.set("intensity", libe57.FloatNode(imf, 0.0, libe57.E57_SINGLE, 0.0, 1.0))
@@ -104,12 +109,16 @@ def _write_e57(path, scans):
         scan.set("points", cv)
         data3d.append(scan)
 
-        raw = _to_raw(pts)
+        if float_xyz:
+            raw = [np.ascontiguousarray(pts[:, i], dtype=np.float64) for i in range(3)]
+        else:
+            raw = _to_raw(pts)
         colors = spec["colors"]
         inten = np.ascontiguousarray(spec["intensity"], dtype=np.float32)
         bufs = libe57.VectorSourceDestBuffer()
         for i, ax in enumerate("XYZ"):
-            bufs.append(libe57.SourceDestBuffer(imf, f"cartesian{ax}", raw[i], n, True, False))
+            # ScaledInteger は生整数をそのまま書く（doScaling=False）。Float は値のまま
+            bufs.append(libe57.SourceDestBuffer(imf, f"cartesian{ax}", raw[i], n, True, bool(float_xyz)))
         color_cols = [np.ascontiguousarray(colors[:, i]) for i in range(3)]
         for i, c in enumerate(("colorRed", "colorGreen", "colorBlue")):
             bufs.append(libe57.SourceDestBuffer(imf, c, color_cols[i], n, True, True))
@@ -172,6 +181,13 @@ class _Scene(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
+
+    def setUp(self):
+        # 読み直しキャッシュ（<ファイル>.cache）がテスト間で持ち越されないようにする。キャッシュ自体の検証は test_section_cache.py
+        remove_cache(self.path)
+
+    def tearDown(self):
+        remove_cache(self.path)
 
     def _subsampled(self, coord_mode="cartesian"):
         scans = read_e57_scans(self.path, point_budget=self.load_budget)
@@ -509,6 +525,7 @@ class TestMainWindowReload(_Scene):
     def setUp(self):
         from gui.main_window import MainWindow
 
+        super().setUp()
         self.win = MainWindow()
         self.win._reset_app_settings()
         self.win.show()
@@ -518,6 +535,7 @@ class TestMainWindowReload(_Scene):
         self.win.close()
         self.win.deleteLater()
         QApplication.processEvents()
+        super().tearDown()
 
     def test_button_guards_without_data_or_section(self):
         win = self.win

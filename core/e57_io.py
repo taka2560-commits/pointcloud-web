@@ -901,11 +901,82 @@ def iter_e57_scans(
         progress_callback(0.95, "点群データの統合中...")
 
 
+def _open_points_node(imf: libe57.ImageFile, file_path: str, scan_index: int):
+    """スキャンの points ノードとプロトタイプを返す（スキャンが無い・points が無いときは ValueError）"""
+    root = imf.root()
+    if not root.isDefined("data3D"):
+        raise ValueError(f"E57 に data3D がありません: {file_path}")
+    data3d = get_node(root, "data3D")
+    if scan_index < 0 or scan_index >= data3d.childCount():
+        raise ValueError(f"スキャン #{scan_index} は存在しません（スキャン数 {data3d.childCount()}）: {file_path}")
+    scan_node = get_node(data3d, scan_index)
+    if not scan_node.isDefined("points"):
+        raise ValueError(f"スキャン #{scan_index} に points がありません: {file_path}")
+    points_node = get_node(scan_node, "points")
+    proto_node = libe57.StructureNode(points_node.prototype())
+    return points_node, proto_node
+
+
+def _schema_of_proto_field(f_node: Any) -> Optional[FieldSchema]:
+    """プロトタイプの 1 フィールドを FieldSchema にする（Float / ScaledInteger / Integer 以外は None）"""
+    f_name = f_node.elementName()
+    if isinstance(f_node, libe57.FloatNode):
+        return FieldSchema(
+            name=f_name,
+            node_type="Float",
+            precision=f_node.precision(),
+            minimum=float(f_node.minimum()),
+            maximum=float(f_node.maximum()),
+            default_value=float(f_node.value()),
+        )
+    if isinstance(f_node, libe57.ScaledIntegerNode):
+        return FieldSchema(
+            name=f_name,
+            node_type="ScaledInteger",
+            minimum=int(f_node.minimum()),
+            maximum=int(f_node.maximum()),
+            scale=float(f_node.scale()),
+            offset=float(f_node.offset()),
+            default_value=int(f_node.rawValue()),
+        )
+    if isinstance(f_node, libe57.IntegerNode):
+        return FieldSchema(
+            name=f_name,
+            node_type="Integer",
+            minimum=int(f_node.minimum()),
+            maximum=int(f_node.maximum()),
+            default_value=int(f_node.value()),
+        )
+    return None
+
+
+def e57_point_field_schemas(file_path: str, scan_index: int) -> Dict[str, FieldSchema]:
+    """
+    ファイルの 1 スキャンの点フィールド定義（名前 → FieldSchema）をヘッダだけ読んで返す。
+    読み込み済みスキャンの field_schemas は座標系変換で cartesianX/Y/Z が入れ替わっていることがあるので、
+    元ファイルそのものの定義が要るとき（読み直しキャッシュ）はこちらを使う。
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"ファイルが見つかりません: {file_path}")
+    imf = libe57.ImageFile(file_path, "r")
+    try:
+        _, proto_node = _open_points_node(imf, file_path, scan_index)
+        schemas: Dict[str, FieldSchema] = {}
+        for f_idx in range(proto_node.childCount()):
+            sch = _schema_of_proto_field(get_node(proto_node, f_idx))
+            if sch is not None:
+                schemas[sch.name] = sch
+        return schemas
+    finally:
+        imf.close()
+
+
 def iter_e57_point_chunks(
     file_path: str,
     scan_index: int,
     fields: Optional[Any] = None,
     chunk_size: int = 1_000_000,
+    raw_fields: Optional[Any] = None,
 ):
     """
     1 スキャンの点をチャンク単位で流し読みするジェネレータ（断面ボックスの元ファイル読み直しなど、
@@ -913,6 +984,8 @@ def iter_e57_point_chunks(
 
     各チャンクは {フィールド名: ndarray} の辞書。ScaledInteger は scale/offset を掛けた float64、
     Float / Integer はファイルの dtype のまま。配列は毎回新しく確保するので呼び出し側で保持してよい。
+    raw_fields に挙げた ScaledInteger フィールドは scale/offset を掛けずに生の int64 で返す
+    （読み直しキャッシュが生整数のまま保持して、全点読込と同じ式で座標を復元するため）。
     fields に無いフィールド名、またはプロトタイプに無いフィールド名は黙って無視する
     （呼び出し側は読み込み済みスキャンの field_schemas で有無を確認できる）。
     fields が None なら cartesianX/Y/Z のみ。スキャンが無い・points が無いときは ValueError。
@@ -920,25 +993,16 @@ def iter_e57_point_chunks(
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"ファイルが見つかりません: {file_path}")
     wanted = list(fields) if fields is not None else ["cartesianX", "cartesianY", "cartesianZ"]
+    raw_set = set(raw_fields) if raw_fields is not None else set()
     chunk_size = max(1, int(chunk_size))
 
     imf = libe57.ImageFile(file_path, "r")
     reader = None
     try:
-        root = imf.root()
-        if not root.isDefined("data3D"):
-            raise ValueError(f"E57 に data3D がありません: {file_path}")
-        data3d = get_node(root, "data3D")
-        if scan_index < 0 or scan_index >= data3d.childCount():
-            raise ValueError(f"スキャン #{scan_index} は存在しません（スキャン数 {data3d.childCount()}）: {file_path}")
-        scan_node = get_node(data3d, scan_index)
-        if not scan_node.isDefined("points"):
-            raise ValueError(f"スキャン #{scan_index} に points がありません: {file_path}")
-        points_node = get_node(scan_node, "points")
+        points_node, proto_node = _open_points_node(imf, file_path, scan_index)
         n_points = points_node.childCount()
         if n_points <= 0:
             return
-        proto_node = libe57.StructureNode(points_node.prototype())
         c_size = min(chunk_size, n_points)
 
         buffers = libe57.VectorSourceDestBuffer()
@@ -956,7 +1020,8 @@ def iter_e57_point_chunks(
             elif isinstance(f_node, libe57.ScaledIntegerNode):
                 arr = np.empty(c_size, dtype=np.int64)
                 buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, False))
-                scaled[f_name] = (float(f_node.scale()), float(f_node.offset()))
+                if f_name not in raw_set:
+                    scaled[f_name] = (float(f_node.scale()), float(f_node.offset()))
             elif isinstance(f_node, libe57.IntegerNode):
                 arr = np.empty(c_size, dtype=_optimal_integer_dtype(int(f_node.minimum()), int(f_node.maximum())))
                 buffers.append(libe57.SourceDestBuffer(imf, f_name, arr, c_size, True, True))
