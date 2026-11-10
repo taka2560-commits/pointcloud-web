@@ -4191,9 +4191,14 @@ class MainWindow(QMainWindow):
                 n_in_box=result.n_in_box, capped=result.capped,
             )
             cap_txt = f"（上限 {max_points // 10000:,} 万点で間引き）" if result.capped else ""
+            cache_txt = ""
+            if result.cache_used_scans:
+                cache_txt += f", キャッシュから {result.n_chunks_read:,}/{result.n_chunks_total:,} チャンク"
+            if result.cache_built_scans:
+                cache_txt += f", キャッシュ作成 {result.cache_bytes / 1e9:.2f}GB（次回から高速）"
             msg = (
                 f"元ファイルから {result.n_points:,} 点を重ね描き{cap_txt}: ボックス内 {result.n_in_box:,} 点 / 走査 {result.n_read:,} 点, "
-                f"{result.n_scans_read} スキャン読込・{result.n_scans_skipped} スキャン範囲外, {result.elapsed_sec:.1f} 秒"
+                f"{result.n_scans_read} スキャン読込・{result.n_scans_skipped} スキャン範囲外{cache_txt}, {result.elapsed_sec:.1f} 秒"
             )
             self.log_text.append(msg)
             self.show_toast(f"🔍 {msg}", 5000)
