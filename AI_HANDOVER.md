@@ -86,6 +86,9 @@
   - **パネルの小窓化**（`gui/popout_panels.py`）: 左パネルのグループ（ウィジェットそのもの）を `Qt.Tool` の小窓へ移す。閉じると決まった並び順の位置へ戻す（Gate4 の「作業順」検査を崩さない）。小窓に出ている間は `_set_sidebar_workflow_tab` の後で再表示する。左パネル格納時は 3D 画面の左端にパネルドックを出す（格納の判定は `isHidden()`。`isVisible()` はウィンドウ表示前に False になるので使わない）。
   - **モード別の操作ガイド**（`gui/mode_hints.py`）: ビューアの状態を 250ms ごとに見て右上に案内を出す（マウス透過）。QSettings `mode_hints_enabled`。
   - **操作説明書**（`gui/manual.py`）: 本文は `TOPICS`。`[[cmd:ID]]` / `[[key:…]]` / `[[topic:ID]]` の記法でコマンド表の題名とショートカットを埋め込む（`tests/test_ui_extras.py` が、本文が参照する ID の実在を検査）。`QTextBrowser` はグローバル QSS の `QTextEdit`（ログ用の等幅フォント）を継ぐので、`QTextBrowser#manual_view` でフォントを上書きしている。
+  - **ヒント**（`gui/hints.py`）: 状況に応じたヒントは、画面の状態 `HintState` から純粋関数 `next_suggestion(state, hidden)` が 1 つ選ぶ（優先順は `_suggestions` の並び）。`HintEngine` が 500ms ごとに見て、同じ状態が `STABLE_MS` 続いたら右上にカードを出す。ツール使用中・選択中は出さない（操作ガイドと重ならない）。「閉じる」はその起動中、「今後表示しない」は QSettings `hints_never` に残る。ヒント集は `TIPS`（コマンド ID と説明書の項目 ID を持つ。実在はテストが検査）。QSettings `hints_enabled`。
+  - **ボタンの役割と状態**（`gui/button_kit.py`、2026-11-10。「UIボタン20選」を参考）: ボタンは**役割**（`ROLE_GUIDE`: primary=主操作・1 つの場所に 1 つ / outline=補助 / soft=低優先 / ghost=文字だけ / danger=点を消す・赤 + ごみ箱 / segment=切り替え / pill=検索・小さな選択）で `role` を付け、見た目は `design_tokens.py: _button_states_qss()`（QSS の最後。役割ごとに hover・押下・無効・選択中をそろえる）。QSS で出せない**状態**はこのモジュールが後付けする: アイコン+文字（`BUTTON_ICONS`。`gui/icons.py` が `assets/icons/ui/*.svg` の `currentColor` をテーマの色に差し替えて描く。**絵文字は使わない**）、処理中/完了（`BusyBinding`: 本体が `setEnabled(False)` → `True` とするのを見て「保存中…」→ 元へ。保存成功は `_set_dirty(False)` の直前に処理中から戻ったことで判定し「保存済み」）、無効の理由（`DISABLED_REASONS`。無効のあいだだけツールチップを差し替える）、キーボードの現在位置（`KeyboardFocusRing`: Tab で移ったときだけ `kbfocus="true"`。マウスでは出さない）、オン/オフの印（`ToggleMark`）、分割ボタン（`SplitButton`。保存の右の矢印）。**新しいボタンを足したら、役割を 1 つ決めて `role` を付け、処理のあいだ無効にするなら `DISABLED_REASONS` に理由を書く**。
+  - **状態表示**（`gui/status_feedback.py`、「UIの状態表示20選」を参考）: 通知は `ToastHost`（印 + 文 + 次の一手のボタン）で 3D 画面の右下に浮かせる（下部バーの中に置くと出るたびにバーが 2 段になって画面が動くため）。種類は `classify_message`（success / warning / error / info）で印と枠の色を変える。`_push_layer_undo_state` を数えておき、編集の直後に出た「○○ 点を…しました」の通知には「元に戻す」を付けて 6 秒出す。未保存は `UnsavedPill`（ステータスバー。`_set_dirty` を包む）。入力の誤りは `FieldErrors`（確定時に調べ、欄を赤い枠にして理由を下に出す）。**状態は色だけでなく文字と印でも伝える**。通信・ログイン・権限・承認待ちなど、手元のファイルだけを扱うこのツールに無い状態は作らない。
   - 見た目は `gui/design_tokens.py: _extras_qss()`。新しい文字色と背景の組は `text_background_pairs()` に足してコントラスト検査を通す。
 
 ### ⑥ 【UI スタイル】セレクタ無しのインライン QSS を書かない
@@ -153,6 +156,10 @@
 │   ├── popout_panels.py        # パネルの小窓化（見出しの「別窓」、左パネル格納時のパネルドック）
 │   ├── mode_hints.py           # モード別の操作ガイド（3D 画面の右上）
 │   ├── manual.py               # 操作説明書（設定の「説明書」タブ、F1 の別ウィンドウ。本文もここ）
+│   ├── hints.py                # ヒント（状況に応じたヒントのカード HintEngine、ヒント集 TIPS / TipsDialog）
+│   ├── button_kit.py           # ボタンの役割と状態（ROLE_GUIDE、アイコン+文字、処理中/完了、無効の理由、キーボードの現在位置、分割ボタン）
+│   ├── status_feedback.py      # 状態表示（通知 ToastHost と「元に戻す」、未保存の印、入力の誤り）
+│   ├── icons.py                # アイコン（assets/icons/ui/*.svg をテーマの色で描いて QIcon にする）
 │   ├── lod_controller.py       # 視点連動の高精細表示（LOD）の制御
 │   ├── flow_layout.py          # 折り返しレイアウト（狭い画面で上部/下部バーのボタンが切れないようにする）
 │   ├── progress_dialog.py      # キャンセル対応モダン進捗ダイアログ（ApplicationModal）
@@ -269,12 +276,12 @@ python -m unittest discover tests -v     # 単体テストのみ
 - `.git/hooks/pre-commit` に全ゲートが登録済みで、コミット時に自動実行されます（NG ならコミット不可）。hooks は全 worktree で共有されるため `--install-hook` を再実行する必要はありません。
 - ゲートはリポジトリ内にファイルを残しません（一時ファイルは OS の一時ディレクトリ）。
 
-### テスト内容（全5段階・単体テスト 210 件）
+### テスト内容（全5段階・単体テスト 239 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
 4. **Gate 4: 実機 OpenGL & GUI シナリオ**（MainWindow 起動、VBO 描画、レイヤー操作、Undo/Redo、保存、レシピ、座標系、断面、壁アライン。バックグラウンド処理は `_wait_for_background()` で完了待ち）
-5. **Gate 5: unittest スイート**（`tests/` を discover。E57 ロスレス、フィルタ安全性、座標系往復、読込点数照合、レイヤー統合、UI/設定、全点転写保存、断面ボックス内の全点表示、断面ボックスの元ファイル読み直しとそのキャッシュ、LOD ストアと視点連動の高精細表示、新UIの操作まわりの追加機能）
+5. **Gate 5: unittest スイート**（`tests/` を discover。E57 ロスレス、フィルタ安全性、座標系往復、読込点数照合、レイヤー統合、UI/設定、全点転写保存、断面ボックス内の全点表示、断面ボックスの元ファイル読み直しとそのキャッシュ、LOD ストアと視点連動の高精細表示、新UIの操作まわりの追加機能、ボタンの役割と状態・状態表示・ヒント）
 
 ※ 配布EXE・ZIP の存在確認はゲートに含まれません。配布前に `EXE配布パッケージ作成.bat` を実行し、`dist/E57_PointCloud_Tool/` にマニュアル3点が同梱されていることを目視確認してください。
 

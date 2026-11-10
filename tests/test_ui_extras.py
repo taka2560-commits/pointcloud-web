@@ -26,7 +26,7 @@ from gui.mode_hints import current_hint
 from gui.modern_ui import has_emoji
 from gui.popout_panels import PANELS
 
-_SETTING_KEYS = ("launcher_recent", "mode_hints_enabled")
+_SETTING_KEYS = ("launcher_recent", "mode_hints_enabled", "hints_enabled", "hints_never")
 
 
 def _points(n=4000):
@@ -60,7 +60,7 @@ class TestSearchNormalization(unittest.TestCase):
     def test_manual_refers_only_to_existing_commands(self):
         from gui.ui_extras import UiExtras  # noqa: F401  （追加ぶんの ID は下で足す）
 
-        ids = {c.id for c in build_commands(None)} | {"help.manual", "help.keys", "help.mode_hints", "panel.restore_all"}
+        ids = {c.id for c in build_commands(None)} | {"help.manual", "help.keys", "help.mode_hints", "help.tips", "help.hints", "panel.restore_all"}
         ids |= {f"panel.{k}" for k, _a, _s, _t in PANELS}
         missing = sorted(set(command_ids_in_manual()) - ids)
         self.assertFalse(missing, f"説明書が存在しないコマンドを参照しています: {missing}")

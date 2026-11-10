@@ -202,10 +202,12 @@ class EmptyStateCard(QFrame):
         btn_open.setProperty("role", "primary")
         btn_open.clicked.connect(win._browse_input_file)
         row.addWidget(btn_open)
+        self.btn_open = btn_open
         btn_folder = QPushButton("フォルダを一括で開く")
         btn_folder.setProperty("role", "outline")
         btn_folder.clicked.connect(win._browse_input_folder)
         row.addWidget(btn_folder)
+        self.btn_folder = btn_folder
         lay.addLayout(row)
 
         self._recent_title = QLabel("最近使ったファイル")
@@ -337,6 +339,38 @@ def _assign_roles_and_names(win) -> None:
         if b is not None:
             b.setProperty("role", "danger")
 
+    # 役割の見直し（「役割」と「状態」で選ぶ。一覧は gui/button_kit.py の ROLE_GUIDE）
+    #   下部バー: 選んだ点への主操作は「ノイズ削除」。レイヤー移動は補助にして、塗りつぶしを 1 つにする
+    #   全て展開 / 全て折りたたみ: いちばん軽い操作なので文字だけ
+    #   断面のピック: オン/オフの切り替え
+    for name, role in (
+        ("floating_move_btn", "outline"),
+        ("btn_expand_all", "ghost"),
+        ("btn_collapse_all", "ghost"),
+        ("btn_sec_wall_pick", "segment"),
+        ("btn_poly_confirm", "outline"),
+    ):
+        b = g(name)
+        if b is not None:
+            b.setProperty("role", role)
+    for b in win.findChildren(QPushButton):
+        if b.property("role") or b.property("tone") or b.objectName():
+            continue
+        text = b.text()
+        if "ログフォルダ" in text:
+            b.setProperty("role", "soft")  # 使う回数の少ない操作は淡い塗り
+    # 断面の厚みの候補（0.1m / 0.5m / 1m …）は、その場で値を選ぶ小さなボタンなのでピル型
+    sec = g("section_group")
+    if sec is not None:
+        for b in sec.findChildren(QPushButton):
+            if re.fullmatch(r"\d+(\.\d+)?m", b.text().strip()):
+                b.setProperty("role", "pill")
+
+    # 断面枠の切替: 幅 52px に「切替(Shift+B)」は収まらず文字が切れる。短くしてショートカットはツールチップへ
+    b = g("btn_toggle_sec_guides")
+    if b is not None:
+        b.setText("切替")
+
     # プリセット名は短く（詳細はツールチップ）。サイドバー幅 320px でも 3 つ並ぶようにする
     for name, label, tip in (
         ("btn_preset_rough", "大まか", "大まか（粗取り）: 浮遊塊除去 + 標準 SOR。まず全体のゴミを落とすとき"),
@@ -426,9 +460,13 @@ def _reorganize_sidebar(win) -> None:
     save_group = group_cls("保存")
     _name_collapsible(save_group)  # 後から作る箱なので、インライン QSS 無効化と命名をここで行う
     save_group.toggled_collapse.connect(win._on_panel_collapse_toggled)
-    sl = QHBoxLayout(save_group.content_widget)
-    sl.setContentsMargins(6, 4, 6, 4)
+    # 1 段目: 保存対象、2 段目: 保存ボタン（全幅。作業の最後の主導線をはっきり見せる）
+    vl = QVBoxLayout(save_group.content_widget)
+    vl.setContentsMargins(6, 4, 6, 6)
+    vl.setSpacing(6)
+    sl = QHBoxLayout()
     sl.setSpacing(6)
+    vl.addLayout(sl)
     file_layout = win.file_group.content_widget.layout()
     lbl_target = _find_label(win.file_group.content_widget, "保存対象:")
     for w in (lbl_target, win.export_mode_combo, win.save_manual_btn):
@@ -445,7 +483,27 @@ def _reorganize_sidebar(win) -> None:
     win.save_manual_btn.setMaximumWidth(16777215)
     win.save_manual_btn.setMinimumWidth(96)
     win.save_manual_btn.setText("保存 (Ctrl+S)")
-    sl.addWidget(win.save_manual_btn)
+    try:
+        from gui.button_kit import SplitButton, tokens_for
+        from gui.status_feedback import save_as
+
+        split = SplitButton(
+            win.save_manual_btn,
+            [
+                ("E57 を保存\tCtrl+S", lambda: win._save_current_scans()),
+                ("保存先を選んで保存...", lambda: save_as(win)),
+                None,
+                ("作業の状態を保存 (.npz)...", lambda: win._on_save_layer_project()),
+            ],
+            lambda: tokens_for(win),
+            arrow_tip="保存に関連する操作（保存先を選んで保存・作業の状態を保存）",
+            parent=save_group.content_widget,
+        )
+        vl.addWidget(split)
+        win.save_split = split
+    except Exception as exc:  # 分割ボタンを作れなくても、保存ボタンそのものは置く
+        log_warning(f"新UI: 保存の分割ボタンを作れませんでした: {exc}")
+        vl.addWidget(win.save_manual_btn)
     win.save_group = save_group
     lay.insertWidget(lay.indexOf(win.log_group), save_group)
 
@@ -687,50 +745,103 @@ def _install_behaviors(win) -> None:
 
     # トースト: 内容から種類を判定し、:kind プロパティで色分け。絵文字は除去。
     #   出現 = フェード＋スライド（オーバーシュート）、警告 = エラーシェイク、退出 = フェード
+    #   印（成功・注意・失敗・お知らせ）と枠の色で種類を示す。色だけに頼らない
+    #   点を動かした直後の通知には「元に戻す」を付け、押す時間が取れるように長めに出す
+    from gui.status_feedback import ACTION_TOAST_MS, UNDO_ACTION_TEXT, classify_message, is_edit_report
+
     orig_toast = win.show_toast
+    toast_host = getattr(win, "toast_host", None)
+    toast_box = toast_host if toast_host is not None else win.toast_label  # 出し入れ・動きを付ける相手
     try:
         win._toast_timer.timeout.disconnect()
     except Exception:
         pass
-    win._toast_timer.timeout.connect(lambda: fade_out_then_hide(win.toast_label))
+    win._toast_timer.timeout.connect(lambda: fade_out_then_hide(toast_box))
 
-    def classify(msg: str) -> str:
-        m = msg or ""
-        if any(k in m for k in ("エラー", "失敗", "⚠", "中止", "破棄", "見つかりません", "できません")):
-            return "warning"
-        if any(k in m for k in ("完了", "保存しました", "✅", "復元", "除去しました", "移動しました", "消去", "合格")):
-            return "success"
-        return "info"
+    # 編集のたびに数える（「前の通知のあとで点が動いたか」を知るため）
+    edit_state = {"edits": 0, "seen": 0}
+    orig_push_undo = win._push_layer_undo_state
 
-    def show_toast(message: str, duration_ms: int = 2600):
-        cancel_fade_out(win.toast_label)  # 前の通知の退場中でも、新しい通知を巻き込んで消さない
-        kind = classify(message)
+    def push_undo(*args, **kwargs):
+        edit_state["edits"] += 1
+        return orig_push_undo(*args, **kwargs)
+
+    win._push_layer_undo_state = push_undo  # type: ignore[assignment]
+
+    def can_undo() -> bool:
+        try:
+            return bool(win.layer_history.can_undo())
+        except Exception:
+            return False
+
+    def show_toast(message: str, duration_ms: int = 2600, action=None):
+        cancel_fade_out(toast_box)  # 前の通知の退場中でも、新しい通知を巻き込んで消さない
+        text = strip_emoji(message)
+        kind = classify_message(message)
+        fresh_edit = edit_state["edits"] != edit_state["seen"]
+        edit_state["seen"] = edit_state["edits"]
+        if action is None and fresh_edit and is_edit_report(text) and can_undo():
+            action = (UNDO_ACTION_TEXT, lambda: win._undo_action(), "直前の操作を取り消します (Ctrl+Z)")
+        if action is not None:
+            duration_ms = max(int(duration_ms), ACTION_TOAST_MS)
         win.toast_label.setProperty("kind", kind)
         _repolish(win.toast_label)
-        was_visible = win.toast_label.isVisible()
-        orig_toast(strip_emoji(message), duration_ms)
-        if kind == "warning":
+        if toast_host is not None:
+            toast_host.set_kind(kind)
+            if action is not None:
+                toast_host.set_action(action[0], action[1], action[2] if len(action) > 2 else "")
+            else:
+                toast_host.clear_action()
+        was_visible = toast_box.isVisible()
+        orig_toast(text, duration_ms)
+        if toast_host is not None:
+            toast_host.setVisible(True)
+            toast_host.place()
+        if kind in ("warning", "error"):
             if not was_visible:
-                fade_in(win.toast_label)
-            shake(win.toast_label)
+                fade_in(toast_box)
+            shake(toast_box)
         elif not was_visible:
-            fade_slide_in(win.toast_label, overshoot=True)
+            fade_slide_in(toast_box, overshoot=True)
 
     win.show_toast = show_toast  # type: ignore[assignment]
 
+    # 未保存の変更: タイトルの「*」に加えて、ステータスバーに「未保存の変更あり」を出す（押すと保存）
+    #   保存が成功した直後（保存ボタンが処理中から戻ってすぐ）なら、ボタンを「保存済み」にする
+    orig_set_dirty = win._set_dirty
+
+    def set_dirty(dirty: bool) -> None:
+        orig_set_dirty(dirty)
+        pill = getattr(win, "unsaved_pill", None)
+        if pill is not None:
+            pill.setVisible(bool(win._dirty))
+        kit = getattr(win, "button_kit", None)
+        binding = kit.busy.get("save_manual_btn") if kit is not None else None
+        if not dirty and binding is not None and binding.just_finished():
+            binding.flash_done("保存済み")
+
+    win._set_dirty = set_dirty  # type: ignore[assignment]
+
     # 選択バッジ: 選択中は active プロパティで強調。選択が始まった瞬間に 1 回だけ跳ねる
     orig_update_bar = win._update_floating_selection_bar
+
+    #   未選択のときは「なぜ下のボタンが押せないか」を短く書く（長い文だとバーが 2 段になる）
+    idle_badge_text = "未選択: 点を囲むと右の操作が使えます"
 
     def update_bar(count: int):
         badge = win.floating_sel_badge
         was_active = bool(badge.property("active"))
         orig_update_bar(count)
+        if count <= 0:
+            badge.setText(idle_badge_text)
         badge.setProperty("active", bool(count > 0))
         _repolish(badge)
         if count > 0 and not was_active:
             bounce(badge)
 
     win._update_floating_selection_bar = update_bar  # type: ignore[assignment]
+    if not bool(win.floating_sel_badge.property("active")):
+        win.floating_sel_badge.setText(idle_badge_text)
 
     # 点数ピル: 数値ティッカー（前の値から新しい値へ数え上げ。桁幅固定）
     if getattr(win, "point_count_label", None) is not None:
@@ -762,7 +873,7 @@ def _install_behaviors(win) -> None:
             return
         fade_out_then_hide(card)
         if exec_btn is not None:
-            QTimer.singleShot(350, lambda: focus_pulse(exec_btn, pulse_color()))
+            QTimer.singleShot(350, exec_btn, lambda: focus_pulse(exec_btn, pulse_color()))  # ボタンが消えたら発火しない
 
     win.viewer.bounds_ready.connect(on_first_points)
 
@@ -821,6 +932,10 @@ def on_theme_changed(win, theme: str) -> None:
     extras = getattr(win, "ui_extras", None)
     if extras is not None:
         extras.refresh_theme()  # 操作説明書の本文の色をテーマに合わせ直す
+    for attr in ("button_kit", "status_feedback"):
+        part = getattr(win, attr, None)
+        if part is not None:
+            part.refresh_theme()  # アイコン・印をテーマの色で描き直す
     win.update()
 
 
@@ -833,13 +948,43 @@ def apply_modern_ui(win) -> None:
     _reorganize_sidebar(win)
     _install_status_bar(win)
     _install_menu_bar(win)
+    # 状態表示（通知の入れ物・未保存の印・入力の誤り）。下部バーを流し込みレイアウトへ替える前に入れる
+    from gui.status_feedback import install_status_feedback
+
+    install_status_feedback(win)
     _convert_bars_to_flow(win)
     _install_behaviors(win)
+
+    # ボタンの役割と状態（アイコン+文字・処理中/完了・無効の理由・キーボードの現在位置・オン/オフの印）
+    kit = None
+    try:
+        from gui.button_kit import apply_button_kit, bind_busy
+
+        kit = apply_button_kit(win)
+        split = getattr(win, "save_split", None)
+        if split is not None:
+            kit.add_split(split)
+            if "save_manual_btn" in kit.busy:
+                kit.busy["save_manual_btn"].followers.append(split.arrow_btn)
+        # 設定を保存: 押したら「保存済み」を少しのあいだ出す
+        btn_set = getattr(win, "btn_save_settings", None)
+        if btn_set is not None:
+            set_binding = bind_busy(btn_set, "保存中…", kit.tokens, "保存済み")
+            kit.busy["btn_save_settings"] = set_binding
+            btn_set.clicked.connect(lambda _checked=False, b=set_binding: b.flash_done())
+        card = getattr(win, "empty_state_card", None)
+        if card is not None:
+            kit.set_icon(card.btn_open, "open-file")
+            kit.set_icon(card.btn_folder, "folder")
+    except Exception as exc:  # 見た目の補助なので、失敗しても本体は動かす
+        log_warning(f"新UI: ボタンの役割と状態の組み込みに失敗しました: {exc}")
 
     # 操作まわりの追加機能（コマンドランチャー・右クリックのパレット・パネルの小窓・操作ガイド・操作説明書）
     from gui.ui_extras import install_ui_extras
 
-    install_ui_extras(win)
+    extras = install_ui_extras(win)
+    if kit is not None and extras is not None and extras.nav_launcher_btn is not None:
+        kit.set_icon(extras.nav_launcher_btn, "search")
 
     # 既定タブは「①自動」（初めての人が最初に行う作業）
     try:

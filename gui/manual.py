@@ -96,6 +96,39 @@ TOPICS: List[Topic] = [
 </ul>
 <h3>操作ガイド</h3>
 <p>ブラシや計測などのツールを選ぶと、3D 画面の右上に「次に何をすればよいか」が出ます。慣れたら、この説明書の下にあるチェックで消せます。</p>
+<h3>ヒント</h3>
+<ul>
+<li><b>状況に応じたヒント</b>: 画面の状態を見て、次にやるとよいことを 3D 画面の右上にカードで出します（例: 自動処理の後に「消した点を赤で表示して確認」）。カードのボタンを押すとその場で実行します。「閉じる」はこの起動中だけ、「今後表示しない」は以後ずっと出しません。設定の「説明書」タブの「閉じたヒントを戻す」で元に戻せます。</li>
+<li><b>ヒント集</b>: 知っていると便利な操作をまとめています。[[cmd:help.tips]] で開き、「試す」でその機能が動きます。</li>
+</ul>
+""",
+    ),
+    Topic(
+        "legend",
+        "ボタンと表示の見方",
+        "ボタンの形の意味、処理中・完了・押せないときの表示、通知と「元に戻す」",
+        """
+<p>ボタンは「役割」で形を、「状態」で表示を変えています。色だけに頼らず、文字と印（アイコン）でも分かるようにしています。</p>
+<h3>ボタンの形（役割）</h3>
+[[roles]]
+<p class="tip">迷ったら、その場でいちばん目立つ塗りつぶしのボタンが「次に押すもの」です。赤いボタンは点を消す操作なので、押す前に範囲を確かめてください（消した点はノイズレイヤーに残り、[[cmd:edit.undo]] で戻せます）。</p>
+<h3>状態の表示</h3>
+<table>
+<tr><td><b>処理中</b></td><td>ボタンの文字が「保存中…」「実行中…」に変わり、回る印が出ます。終わるまで押せません。</td></tr>
+<tr><td><b>完了</b></td><td>保存が終わると、ボタンがしばらく「保存済み」とチェックの印になります。</td></tr>
+<tr><td><b>押せない</b></td><td>薄い表示のボタンは今は使えません。マウスを置くと「点を選ぶと使えます」のように理由が出ます。</td></tr>
+<tr><td><b>選択中</b></td><td>選んでいる道具やタブは塗りつぶしと太字になります。オン/オフのボタンは、オンでチェック、オフで丸の印が付きます。</td></tr>
+<tr><td><b>キーボードの現在位置</b></td><td>Tab キーで移動すると、今いるボタンに太い枠が出ます。Space か Enter で押せます。</td></tr>
+</table>
+<h3>通知と「元に戻す」</h3>
+<p>操作の結果は 3D 画面の右下に出ます。印で種類が分かります（チェック = できた、三角 = 注意、丸に ! = 失敗、丸に i = お知らせ）。</p>
+<p>点を動かした直後の通知には<b>「元に戻す」</b>が付きます。押すとその操作だけを取り消します（[[key:Ctrl+Z]] と同じ）。数秒で消えますが、消えたあとも [[cmd:edit.undo]] で戻せます。</p>
+<h3>未保存の変更</h3>
+<p>保存していない編集があると、画面の右下（状態の行）に<b>「未保存の変更あり」</b>が出て、ウィンドウの題名に「*」が付きます。押すと保存します（[[cmd:file.save]]）。</p>
+<h3>入力の誤り</h3>
+<p>入力 E57 や出力 E57 の欄に、無い場所を書いて確定すると、欄が赤い枠になり、すぐ下に理由が出ます。直すと消えます。</p>
+<h3>保存ボタンの右の矢印</h3>
+<p>「保存」の右の小さな矢印を押すと、保存に関連する操作（保存先を選んで保存・作業の状態を保存）を選べます。</p>
 """,
     ),
     Topic(
@@ -384,6 +417,7 @@ TOPICS: List[Topic] = [
 TOPIC_KEYWORDS: Dict[str, str] = {
     "start": "はじめに がめん みかた ながれ きほん てじゅん",
     "quick": "けんさく みぎくりっく こまど べつまど らんちゃー ぱれっと がいど すばやく",
+    "legend": "ぼたん みかた ひょうじ じょうたい しょりちゅう かんりょう おせない むこう つうち もとにもどす みほぞん あいこん しるし",
     "open": "ひらく よみこみ ふぁいる ふぉるだ ざひょうけい さいきん",
     "nav": "してん かいてん いどう かくだい しゅくしょう とうし せいしゃえい ふぃっと",
     "auto": "じどう のいず じょきょ ふぃるた ぷりせっと れしぴ じっこう",
@@ -491,9 +525,21 @@ td {{ padding: 3px 10px 3px 0px; vertical-align: top; }}
 """
 
 
+def _roles_table() -> str:
+    """ボタンの役割の一覧（gui/button_kit.py の ROLE_GUIDE をそのまま表にする。説明書と実装がずれないように）"""
+    from gui.button_kit import ROLE_GUIDE
+
+    rows = "".join(
+        f"<tr><td><b>{html.escape(look)}</b></td><td>{html.escape(usage)}</td></tr>" for _role, look, usage in ROLE_GUIDE
+    )
+    return f"<table>{rows}</table>"
+
+
 def render_topic(topic: Topic, commands: List[Command]) -> str:
     by_id = {c.id: c for c in commands}
     body = _keys_body(commands) if topic.id == "keys" else _expand(topic.body, by_id)
+    if "[[roles]]" in body:
+        body = body.replace("[[roles]]", _roles_table())
     return f'<h2>{html.escape(topic.title)}</h2><p class="summary">{html.escape(topic.summary)}</p>{body}'
 
 
@@ -677,9 +723,13 @@ class ManualTab(QWidget):
     """設定パネルに足す「説明書」タブ（小さな説明書 ＋ 別ウィンドウで開く ＋ 操作ガイドの表示切替）"""
 
     open_window_requested = Signal()
-    hints_toggled = Signal(bool)
+    hints_toggled = Signal(bool)          # モード別の操作ガイド
+    tips_toggled = Signal(bool)           # 状況に応じたヒント
+    open_tips_requested = Signal()        # ヒント集を開く
+    reset_hints_requested = Signal()      # 閉じたヒントをもう一度出す
 
-    def __init__(self, win, commands_provider: Callable[[], List[Command]], hints_enabled: bool = True, parent=None):
+    def __init__(self, win, commands_provider: Callable[[], List[Command]], hints_enabled: bool = True,
+                 tips_enabled: bool = True, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 6, 4, 6)
@@ -694,3 +744,20 @@ class ManualTab(QWidget):
         self.chk_hints.setChecked(bool(hints_enabled))
         self.chk_hints.toggled.connect(self.hints_toggled.emit)
         lay.addWidget(self.chk_hints)
+        self.chk_tips = QCheckBox("状況に応じたヒントを 3D 画面に表示する", self)
+        self.chk_tips.setToolTip("「次にやるとよいこと」を 3D 画面の右上にカードで出します（ツールを使っている間は出しません）")
+        self.chk_tips.setChecked(bool(tips_enabled))
+        self.chk_tips.toggled.connect(self.tips_toggled.emit)
+        lay.addWidget(self.chk_tips)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self.btn_tips = QPushButton("ヒント集を開く", self)
+        self.btn_tips.setProperty("role", "outline")
+        self.btn_tips.clicked.connect(lambda _=False: self.open_tips_requested.emit())
+        row.addWidget(self.btn_tips, 1)
+        self.btn_reset_hints = QPushButton("閉じたヒントを戻す", self)
+        self.btn_reset_hints.setProperty("role", "outline")
+        self.btn_reset_hints.setToolTip("「閉じる」「今後表示しない」にしたヒントを、もう一度出るようにします")
+        self.btn_reset_hints.clicked.connect(lambda _=False: self.reset_hints_requested.emit())
+        row.addWidget(self.btn_reset_hints, 1)
+        lay.addLayout(row)
