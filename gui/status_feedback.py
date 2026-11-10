@@ -26,11 +26,14 @@ TOAST_ICON_PX = 14
 ACTION_TOAST_MS = 6000      # 次の一手のボタンが付く通知は、押す時間が取れるように長めに出す
 UNDO_ACTION_TEXT = "元に戻す"
 
-_WARNING_WORDS = ("⚠", "中止", "中断", "破棄", "見つかりません", "できません", "ありません", "使えません", "読み直せません")
+# 「…はありませんでした」（ノイズが無かった等）は良い結果なので、注意にはしない
+_WARNING_WORDS = ("⚠", "中止", "中断", "破棄", "見つかりません", "できません", "使えません", "読み直せません")
 _ERROR_WORDS = ("エラー", "失敗", "開けませんでした")
 _SUCCESS_WORDS = ("完了", "保存しました", "✅", "復元", "除去しました", "移動しました", "消去", "合格", "追加しました", "コピーしました")
 _POINT_COUNT_RE = re.compile(r"\d\s*点")
 _NOT_UNDOABLE_WORDS = ("元に戻しました", "やり直しました", "選択しました", "読み込みました")
+# 点を動かしたことを知らせる言い方（本体の通知の文に合わせる。新しい編集の通知を足したらここにも足す）
+_EDIT_WORDS = ("移動しました", "除去しました", "消去しました", "抽出しました", "検出しました", "復元しました", "分離完了")
 
 
 def classify_message(message: str) -> str:
@@ -46,9 +49,14 @@ def classify_message(message: str) -> str:
 
 
 def is_edit_report(message: str) -> bool:
-    """点を動かした結果を知らせる文か（「○○ 点を…しました」。取り消し・やり直し・選択・読み込みの報告は除く）"""
+    """
+    点を動かした結果を知らせる文か（「○○ 点を…へ移動しました」など）。
+    「表示 768 点」「元ファイル 5,000 点」のように点数が出てくるだけの文、取り消し・やり直し・選択・読み込みの報告は除く。
+    """
     m = message or ""
-    return bool(_POINT_COUNT_RE.search(m)) and not any(k in m for k in _NOT_UNDOABLE_WORDS)
+    if not _POINT_COUNT_RE.search(m) or any(k in m for k in _NOT_UNDOABLE_WORDS):
+        return False
+    return any(k in m for k in _EDIT_WORDS)
 
 
 def _tokens_of(win) -> Tokens:
@@ -211,9 +219,17 @@ def install_unsaved_pill(win) -> Optional[UnsavedPill]:
 
 
 # ----------------------------------------------------------------------------- 入力の誤り
+def clean_path_text(text: str) -> str:
+    """前後の空白と、エクスプローラーの「パスのコピー」で付く前後の引用符を外す"""
+    path = (text or "").strip()
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        path = path[1:-1].strip()
+    return path
+
+
 def validate_input_path(text: str) -> Optional[str]:
     """入力 E57 の欄。問題があれば理由の文、無ければ None"""
-    path = (text or "").strip().strip('"')
+    path = clean_path_text(text)
     if not path:
         return None
     if not os.path.exists(path):
@@ -225,14 +241,20 @@ def validate_input_path(text: str) -> Optional[str]:
 
 def validate_output_path(text: str) -> Optional[str]:
     """出力 E57 の欄。問題があれば理由の文、無ければ None"""
-    path = (text or "").strip().strip('"')
+    path = clean_path_text(text)
     if not path:
         return None
-    folder = os.path.dirname(path)
-    if folder and not os.path.isdir(folder):
-        return "出力 E57: 保存先のフォルダがありません。「参照」で選び直してください"
     if os.path.isdir(path):
         return "出力 E57: フォルダではなく、ファイル名（○○.e57）まで指定してください"
+    # まだ無いフォルダは保存のときに作られる（core/e57_io.py）。作れない場所だけを誤りにする
+    probe = os.path.dirname(os.path.abspath(path))
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:  # いちばん上まで来ても無い = ドライブや共有の場所が無い
+            return "出力 E57: 保存先のドライブまたは場所が見つかりません。「参照」で選び直してください"
+        probe = parent
+    if probe and not os.path.isdir(probe):
+        return "出力 E57: 保存先の途中がフォルダではなくファイルです。「参照」で選び直してください"
     return None
 
 
@@ -247,13 +269,28 @@ class FieldErrors(QObject):
         self.row = row
         self._fields: List[Tuple[QLineEdit, Callable[[str], Optional[str]]]] = []
         self._errors: Dict[int, str] = {}
+        self._after_clean: Dict[int, Optional[Callable[[], None]]] = {}
 
-    def watch(self, edit: QLineEdit, validator: Callable[[str], Optional[str]]) -> None:
+    def watch(self, edit: QLineEdit, validator: Callable[[str], Optional[str]],
+              after_clean: Optional[Callable[[], None]] = None) -> None:
+        """after_clean: 引用符を外して欄を書き直したあとに呼ぶ（入力欄なら読み込みをやり直す）"""
         self._fields.append((edit, validator))
+        self._after_clean[id(edit)] = after_clean
         edit.editingFinished.connect(lambda e=edit, v=validator: self.check(e, v))
         edit.textChanged.connect(lambda _t, e=edit, v=validator: self._recheck_if_flagged(e, v))
 
     def check(self, edit: QLineEdit, validator: Callable[[str], Optional[str]]) -> Optional[str]:
+        raw = edit.text()
+        cleaned = clean_path_text(raw)
+        if cleaned != raw.strip():
+            # 「"C:\…\a.e57"」のように貼られた。本体は引用符付きのままでは読めないので、欄を直してからやり直す
+            edit.setText(cleaned)
+            fn = self._after_clean.get(id(edit))
+            if fn is not None:
+                try:
+                    fn()
+                except Exception as exc:
+                    log_warning(f"新UI: 引用符を外したあとの処理に失敗しました: {exc}")
         msg = validator(edit.text())
         self._set(edit, msg)
         return msg
@@ -312,7 +349,7 @@ def install_field_errors(win) -> Optional[FieldErrors]:
     row.setVisible(False)
     errors = FieldErrors(win, label, icon, row)
     errors.refresh_theme()
-    errors.watch(win.input_edit, validate_input_path)
+    errors.watch(win.input_edit, validate_input_path, after_clean=lambda: win._on_input_edit_finished())
     if getattr(win, "output_edit", None) is not None:
         errors.watch(win.output_edit, validate_output_path)
     win.field_errors = errors

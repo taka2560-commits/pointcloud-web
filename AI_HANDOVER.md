@@ -89,6 +89,13 @@
   - **ヒント**（`gui/hints.py`）: 状況に応じたヒントは、画面の状態 `HintState` から純粋関数 `next_suggestion(state, hidden)` が 1 つ選ぶ（優先順は `_suggestions` の並び）。`HintEngine` が 500ms ごとに見て、同じ状態が `STABLE_MS` 続いたら右上にカードを出す。ツール使用中・選択中は出さない（操作ガイドと重ならない）。「閉じる」はその起動中、「今後表示しない」は QSettings `hints_never` に残る。ヒント集は `TIPS`（コマンド ID と説明書の項目 ID を持つ。実在はテストが検査）。QSettings `hints_enabled`。
   - **ボタンの役割と状態**（`gui/button_kit.py`、2026-11-10。「UIボタン20選」を参考）: ボタンは**役割**（`ROLE_GUIDE`: primary=主操作・1 つの場所に 1 つ / outline=補助 / soft=低優先 / ghost=文字だけ / danger=点を消す・赤 + ごみ箱 / segment=切り替え / pill=検索・小さな選択）で `role` を付け、見た目は `design_tokens.py: _button_states_qss()`（QSS の最後。役割ごとに hover・押下・無効・選択中をそろえる）。QSS で出せない**状態**はこのモジュールが後付けする: アイコン+文字（`BUTTON_ICONS`。`gui/icons.py` が `assets/icons/ui/*.svg` の `currentColor` をテーマの色に差し替えて描く。**絵文字は使わない**）、処理中/完了（`BusyBinding`: 本体が `setEnabled(False)` → `True` とするのを見て「保存中…」→ 元へ。保存成功は `_set_dirty(False)` の直前に処理中から戻ったことで判定し「保存済み」）、無効の理由（`DISABLED_REASONS`。無効のあいだだけツールチップを差し替える）、キーボードの現在位置（`KeyboardFocusRing`: Tab で移ったときだけ `kbfocus="true"`。マウスでは出さない）、オン/オフの印（`ToggleMark`）、分割ボタン（`SplitButton`。保存の右の矢印）。**新しいボタンを足したら、役割を 1 つ決めて `role` を付け、処理のあいだ無効にするなら `DISABLED_REASONS` に理由を書く**。
   - **状態表示**（`gui/status_feedback.py`、「UIの状態表示20選」を参考）: 通知は `ToastHost`（印 + 文 + 次の一手のボタン）で 3D 画面の右下に浮かせる（下部バーの中に置くと出るたびにバーが 2 段になって画面が動くため）。種類は `classify_message`（success / warning / error / info）で印と枠の色を変える。`_push_layer_undo_state` を数えておき、編集の直後に出た「○○ 点を…しました」の通知には「元に戻す」を付けて 6 秒出す。未保存は `UnsavedPill`（ステータスバー。`_set_dirty` を包む）。入力の誤りは `FieldErrors`（確定時に調べ、欄を赤い枠にして理由を下に出す）。**状態は色だけでなく文字と印でも伝える**。通信・ログイン・権限・承認待ちなど、手元のファイルだけを扱うこのツールに無い状態は作らない。
+  - **2026-11-11 の点検で決めた約束**（破ると同じ不具合が戻る。`tests/test_buttons_and_states.py: TestBugCheck20261111` が検査）:
+    - オン/オフの印は `toggled` シグナルで差し替えない。本体は `blockSignals` の中で `setChecked` することがあり、印だけが取り残される。1 つの `QIcon` にオン用・オフ用の絵を登録して Qt に描き分けさせる（`ToggleMark`）。
+    - 通知の「元に戻す」は、**編集と同じ処理の中で出た、編集の報告**（`status_feedback._EDIT_WORDS` の言い方 + 点数）にだけ付ける。編集の印はイベントループへ戻ったら下ろす（通知を出さない編集＝断面外のクロップなど＝の印が、あとの無関係な通知に付くのを防ぐ）。**編集の通知の文を足したら `_EDIT_WORDS` にも足す**。
+    - 「元に戻す」付きの通知は、モーダルのダイアログが開いているあいだは消さない（自動ノイズ処理は通知の直後に完了ダイアログを出す）。
+    - 処理中・完了から戻るときのアイコンは、覚えておいた絵ではなく `icon_name` から今のテーマの色で描き直す。
+    - 出力欄の検査は「保存できない場所」だけを誤りにする。まだ無いフォルダは保存のときに作られる（`core/e57_io.py`）ので誤りではない。引用符付きで貼られたパスは、確定時に欄の文字を直す。
+    - アイコンを描けなかったときは警告をログに 1 回残す（`icons.failed_icons()`）。配布 EXE の起動確認ではログにこの警告が無いことを見る。
   - 見た目は `gui/design_tokens.py: _extras_qss()`。新しい文字色と背景の組は `text_background_pairs()` に足してコントラスト検査を通す。
 
 ### ⑥ 【UI スタイル】セレクタ無しのインライン QSS を書かない
@@ -275,8 +282,10 @@ python -m unittest discover tests -v     # 単体テストのみ
 
 - `.git/hooks/pre-commit` に全ゲートが登録済みで、コミット時に自動実行されます（NG ならコミット不可）。hooks は全 worktree で共有されるため `--install-hook` を再実行する必要はありません。
 - ゲートはリポジトリ内にファイルを残しません（一時ファイルは OS の一時ディレクトリ）。
+- **テストとゲートは、この PC の本番アプリの保存設定を書き換えません**（2026-11-11 から）。MainWindow は閉じるときに設定を自動保存するため、以前はテストを回すたびに保存設定が初期値へ戻り、「最近使ったファイル」にテスト用の一時ファイルが入っていました。MainWindow を作るテスト・`quality_gate.py`・`tools/capture_ui_screens.py` は、最初に `tests/settings_sandbox.py: use_sandbox_settings()` を呼んで、保存設定を一時フォルダの INI へ向けます。**MainWindow を作るテストを足すときは、モジュールの先頭でこれを呼ぶこと**。確認用のスクリプトを書くときも同じです。
+- UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 239 件）
+### テスト内容（全5段階・単体テスト 247 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）

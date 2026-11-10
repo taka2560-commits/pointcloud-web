@@ -504,6 +504,12 @@ QListWidget#manual_topics::item:selected {{
 """
 
 
+def _with_alpha(hex_color: str, alpha: float) -> str:
+    """#rrggbb を rgba(r, g, b, alpha) にする"""
+    h = hex_color.lstrip("#")
+    return f"rgba({int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}, {alpha})"
+
+
 def _button_states_qss(t: Tokens) -> str:
     """
     ボタンの役割と状態、状態表示の部品（「UIボタン20選」「UIの状態表示20選」を参考にした一覧）。
@@ -516,6 +522,7 @@ def _button_states_qss(t: Tokens) -> str:
     色だけに頼らない: 状態は文字（「保存中…」「保存済み」）と印（アイコン）でも伝える。gui/button_kit.py が付ける
     """
     ring = t.accent_soft
+    band_pressed = _with_alpha(t.band_text, 0.16)  # 帯の上で押している間の地（帯の文字色を薄く重ねる）
     return f"""
 /* ===== 役割の追加: 淡い塗り（低優先） ===== */
 QPushButton[role="soft"] {{
@@ -606,6 +613,11 @@ QPushButton[role="danger-toggle"]:disabled {{
 QPushButton[role="segment"]:pressed {{
     background-color: {t.pressed_bg};
 }}
+/* 選択中のものを押している間は、選択中の色のままにする（地だけ押下の色になると、白い文字が薄い地に乗って読めない） */
+QPushButton[role="segment"]:checked:pressed, QPushButton[role="pill"]:checked:pressed {{
+    background-color: {t.on_bg};
+    color: {t.on_text};
+}}
 QPushButton[role="segment"]:disabled {{
     color: {t.text_disabled};
     border-color: {t.border_subtle};
@@ -633,6 +645,21 @@ QWidget#bottom_bar QPushButton:disabled {{
     background-color: transparent;
     color: {t.band_muted};
     border: 1px solid transparent;
+}}
+/* 帯の上の押下・ホバー（帯用の指定は強いので、役割ごとの :pressed / :hover は帯の上では効かない。ここで別に書く） */
+QWidget#nav_bar QPushButton[role="segment"]:pressed, QWidget#nav_bar QPushButton[role="outline"]:pressed,
+QWidget#nav_bar QPushButton[role="danger-toggle"]:pressed, QWidget#bottom_bar QPushButton[role="outline"]:pressed {{
+    background-color: {band_pressed};
+}}
+QWidget#nav_bar QPushButton[role="segment"]:checked:pressed {{
+    background-color: {t.on_bg};
+    color: {t.on_text};
+}}
+QWidget#nav_bar QPushButton[role="danger-toggle"]:hover {{
+    border-color: {t.danger_base};
+}}
+QWidget#nav_bar QPushButton[role="danger-toggle"]:checked:pressed {{
+    background-color: {t.danger_hover};
 }}
 
 /* ===== キーボードで移動中の現在位置（Tab / Shift+Tab）。マウスで押しただけでは出さない ===== */
@@ -699,6 +726,9 @@ QPushButton[split="arrow"] {{
 QPushButton[split="arrow"]::menu-indicator {{
     image: none;
     width: 0px;
+}}
+QPushButton[split="arrow"][kbfocus="true"] {{
+    padding: 3px 4px;
 }}
 
 /* ===== 通知（下部バーの右）: 印 + 文 + 次の一手（「元に戻す」など） ===== */

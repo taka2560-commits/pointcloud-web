@@ -11,7 +11,7 @@
 """
 
 import random
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from PySide6.QtCore import QObject, QPoint, Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut

@@ -16,6 +16,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
+from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+
+use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
+
 import numpy as np
 from PySide6.QtCore import QCoreApplication, QElapsedTimer, QSettings, QThread
 from PySide6.QtGui import QVector3D

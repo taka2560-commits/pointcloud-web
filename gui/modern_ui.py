@@ -756,14 +756,40 @@ def _install_behaviors(win) -> None:
         win._toast_timer.timeout.disconnect()
     except Exception:
         pass
-    win._toast_timer.timeout.connect(lambda: fade_out_then_hide(toast_box))
+    toast_hold = {"after_modal": False}
+
+    def on_toast_timeout() -> None:
+        # 次の一手のボタン（「元に戻す」）が付いた通知は、モーダルのダイアログが開いているあいだは消さない。
+        # 自動ノイズ処理は通知の直後に完了ダイアログを出すので、裏で時間が過ぎると押す前に消えてしまう。
+        # 閉じたあと、あらためて押す時間を取ってから消す
+        has_action = toast_host is not None and toast_host.has_action()
+        if has_action and QApplication.activeModalWidget() is not None:
+            toast_hold["after_modal"] = True
+            win._toast_timer.start(300)
+            return
+        if has_action and toast_hold["after_modal"]:
+            toast_hold["after_modal"] = False
+            win._toast_timer.start(ACTION_TOAST_MS)
+            return
+        toast_hold["after_modal"] = False
+        fade_out_then_hide(toast_box)
+
+    win._toast_timer.timeout.connect(on_toast_timeout)
 
     # 編集のたびに数える（「前の通知のあとで点が動いたか」を知るため）
     edit_state = {"edits": 0, "seen": 0}
     orig_push_undo = win._push_layer_undo_state
 
+    def expire_edit_mark(mark: int) -> None:
+        if edit_state["seen"] < mark:
+            edit_state["seen"] = mark
+
     def push_undo(*args, **kwargs):
         edit_state["edits"] += 1
+        # 「編集の直後」として扱うのは、この編集と同じ処理の中で出た通知だけ。
+        # 通知を出さない編集（断面外のクロップなど）の印が残ると、あとの無関係な通知に「元に戻す」が付いてしまうので、
+        # いまの処理が終わったら（イベントループへ戻ったら）印を下ろす
+        QTimer.singleShot(0, win, lambda m=edit_state["edits"]: expire_edit_mark(m))
         return orig_push_undo(*args, **kwargs)
 
     win._push_layer_undo_state = push_undo  # type: ignore[assignment]
@@ -776,6 +802,7 @@ def _install_behaviors(win) -> None:
 
     def show_toast(message: str, duration_ms: int = 2600, action=None):
         cancel_fade_out(toast_box)  # 前の通知の退場中でも、新しい通知を巻き込んで消さない
+        toast_hold["after_modal"] = False
         text = strip_emoji(message)
         kind = classify_message(message)
         fresh_edit = edit_state["edits"] != edit_state["seen"]
@@ -817,8 +844,12 @@ def _install_behaviors(win) -> None:
             pill.setVisible(bool(win._dirty))
         kit = getattr(win, "button_kit", None)
         binding = kit.busy.get("save_manual_btn") if kit is not None else None
-        if not dirty and binding is not None and binding.just_finished():
+        if binding is None:
+            return
+        if not dirty and binding.just_finished():
             binding.flash_done("保存済み")
+        elif dirty:
+            binding.clear_done()  # 「保存済み」と「未保存の変更あり」を同時に出さない
 
     win._set_dirty = set_dirty  # type: ignore[assignment]
 

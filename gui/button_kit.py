@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.design_tokens import Tokens, get_tokens
-from gui.icons import blank_pixmap, icon_pixmap, icon_size, themed_icon
+from gui.icons import icon_pixmap, icon_size, themed_icon
 
 # 役割の一覧: (role, 見た目, 使いどころ)。説明書の「ボタンと表示の見方」とテストが参照する
 ROLE_GUIDE: Tuple[Tuple[str, str, str], ...] = (
@@ -297,7 +297,11 @@ class BusyBinding(QObject):
         self.btn.setProperty("busy", False)
         self.btn.setProperty("done", False)
         self.btn.setText(self._normal_text)
-        self.btn.setIcon(self._normal_icon)
+        if self.btn.property("icon_name"):
+            # 処理中・完了のあいだにテーマが替わっていても、今のテーマの色で描き直す
+            refresh_button_icon(self.btn, self._tokens())
+        else:
+            self.btn.setIcon(self._normal_icon)
         self.btn.setMinimumWidth(self._normal_min_w)
         self._state = "idle"
         repolish(self.btn)
@@ -357,6 +361,11 @@ class BusyBinding(QObject):
         repolish(self.btn)
         self._done_timer.start(self._hold_ms)
 
+    def clear_done(self) -> None:
+        """「保存済み」などの完了の表示を、待たずに元へ戻す（完了の直後にまた編集が入ったとき）"""
+        if self._state == "done":
+            self._restore_normal()
+
     def _end_done(self) -> None:
         if self._state != "done":
             return
@@ -386,13 +395,17 @@ def bind_busy(btn: QAbstractButton, busy_text: str, tokens_provider: Callable[[]
 
 # ----------------------------------------------------------------------------- オン/オフの印
 class ToggleMark(QObject):
-    """オン/オフのボタンに印を付ける: 選択中はチェック、そうでなければ丸（印の有無で幅は変わらない）"""
+    """
+    オン/オフのボタンに印を付ける: 選択中はチェック、そうでなければ丸（印の有無で幅は変わらない）。
+    1 つの QIcon にオン用とオフ用の絵を登録し、どちらを描くかは Qt がボタンの状態から決める。
+    toggled シグナルで差し替える方式にしないこと: 本体は blockSignals の中で setChecked することがあり、
+    そのとき印だけが古い状態のまま残る（N キーのノイズ専用、Esc でのピック終了などで起きた）。
+    """
 
     def __init__(self, btn: QAbstractButton, tokens_provider: Callable[[], Tokens]):
         super().__init__(btn)
         self.btn = btn
         self._tokens = tokens_provider
-        btn.toggled.connect(lambda _checked: self.refresh())
         self.refresh()
 
     def _colors(self, t: Tokens) -> Tuple[str, str]:
@@ -407,17 +420,21 @@ class ToggleMark(QObject):
         return on, off
 
     def refresh(self) -> None:
+        """テーマの色でオン用・オフ用の絵を作り直す（テーマ切り替えのときに呼ぶ）"""
         t = self._tokens()
         on, off = self._colors(t)
-        checked = self.btn.isChecked()
-        pm = icon_pixmap("check" if checked else "circle", on if checked else off, ICON_PX)
+        pm_on = icon_pixmap("check", on, ICON_PX)
+        pm_off = icon_pixmap("circle", off, ICON_PX)
         icon = QIcon()
-        for mode in (QIcon.Normal, QIcon.Active, QIcon.Disabled):
-            icon.addPixmap(pm, mode, QIcon.Off)
-            icon.addPixmap(pm, mode, QIcon.On)
+        for mode in (QIcon.Normal, QIcon.Active, QIcon.Disabled, QIcon.Selected):
+            icon.addPixmap(pm_off, mode, QIcon.Off)
+            icon.addPixmap(pm_on, mode, QIcon.On)
         self.btn.setIcon(icon)
         self.btn.setIconSize(icon_size(ICON_PX))
-        self.btn.setProperty("toggle_mark", "on" if checked else "off")
+
+    def mark(self) -> str:
+        """いま出ている印（"on" = チェック / "off" = 丸）。ボタンの状態そのものから決まる"""
+        return "on" if self.btn.isChecked() else "off"
 
 
 def install_toggle_mark(btn: QAbstractButton, tokens_provider: Callable[[], Tokens]) -> ToggleMark:
@@ -468,9 +485,19 @@ class SplitButton(QWidget):
             act.triggered.connect(lambda _checked=False, f=fn: f())
             self.actions_by_title[title] = act
         self.arrow_btn.setMenu(self.menu)
+        # 矢印を押すとメニューが開き、マウスを離す合図はメニューへ行く。そのままだと押下の見た目（沈み・半透明）が
+        # 残るので、メニューが閉じたら「離れた」合図を送って元に戻す
+        self.menu.aboutToHide.connect(self._release_arrow)
         lay.addWidget(self.arrow_btn, 0)
         self.refresh_theme()
         main_btn.show()
+
+    def _release_arrow(self) -> None:
+        try:
+            QApplication.sendEvent(self.arrow_btn, QEvent(QEvent.Leave))
+            self.arrow_btn.setDown(False)
+        except RuntimeError:
+            pass  # ウィンドウを閉じている最中
 
     def refresh_theme(self) -> None:
         set_button_icon(self.arrow_btn, "chevron-down", self._tokens(), 12)

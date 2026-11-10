@@ -15,8 +15,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+
+use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
+
 import numpy as np
-from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QTabWidget
 
@@ -92,6 +96,9 @@ class _WinCase(unittest.TestCase):
         self.win._set_dirty(False)
         self.win.close()
         self.win.deleteLater()
+        # processEvents() だけでは deleteLater() が実行されず、閉じたウィンドウが残り続けて後のテストが遅くなる。
+        # ここで本当に破棄する（破棄後にタイマーなどが例外を出さないことの確認にもなる）
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         QApplication.processEvents()
         s = QSettings("E57PointCloudTool", "Settings")
         for k, v in self._backup.items():
