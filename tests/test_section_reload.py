@@ -18,6 +18,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+
+use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
+
 import numpy as np
 from pye57 import libe57
 from PySide6.QtWidgets import QApplication

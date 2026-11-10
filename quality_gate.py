@@ -971,6 +971,10 @@ fi
 
 
 def main() -> int:
+    # この PC の本番アプリの保存設定を、ゲートで書き換えない（MainWindow は閉じるときに設定を自動保存する）
+    from tests.settings_sandbox import use_sandbox_settings
+
+    use_sandbox_settings()
     if "--install-hook" in sys.argv:
         install_git_pre_commit_hook()
         return 0

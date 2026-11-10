@@ -16,8 +16,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+
+use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
+
 import numpy as np
-from PySide6.QtCore import QEvent, QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -48,6 +52,10 @@ class TestMessagesAndValidation(unittest.TestCase):
         self.assertEqual(classify_message("LOD データを開けませんでした"), "error")
         self.assertEqual(classify_message("視点回転モード (V)"), "info")
         self.assertEqual(classify_message(""), "info")
+        # 「…はありませんでした」は良い結果。注意（揺れる通知）にしない
+        self.assertEqual(classify_message("周囲に浮遊塊ノイズはありませんでした"), "info")
+        self.assertEqual(classify_message("選択範囲内に微細ノイズはありませんでした"), "info")
+        self.assertEqual(classify_message("読み込み元ファイルの記録が無いため高精細表示は使えません"), "warning")
 
     def test_edit_report(self):
         self.assertTrue(is_edit_report("5,000 点をノイズレイヤーへ移動しました (Ctrl+Zで取消可)"))
@@ -56,8 +64,18 @@ class TestMessagesAndValidation(unittest.TestCase):
         self.assertFalse(is_edit_report("連結塊 300 点を一括選択しました"))
         self.assertFalse(is_edit_report("3 スキャン (9,000 点) を読み込みました"))
         self.assertFalse(is_edit_report("視点回転モード (V)"))
+        for msg in ("地面 1,234 点を自動抽出しました", "主平面 900 点を自動検出しました", "5 点を即消去しました",
+                    "浮遊塊 77 点を一括除去しました", "全ノイズ 40 点を通常レイヤーへ復元しました"):
+            self.assertTrue(is_edit_report(msg), msg)
+        # 点数が出てくるだけの文は、編集の報告ではない（「元に戻す」を付けない）
+        for msg in ("断面ボックス内の全点表示: OFF（表示 768 点）", "元ファイルから 8,705,925 点を重ね描き",
+                    "検出ノイズ 0 点（除去対象なし）", "大容量保護: 5,000,000 点を高速表示 (メモリ圧迫防止)",
+                    "高精細表示 (LOD): ON（元ファイル 538,377,435 点。視点が止まると読み込みます）"):
+            self.assertFalse(is_edit_report(msg), msg)
 
     def test_path_validation(self):
+        from gui.status_feedback import clean_path_text
+
         self.assertIsNone(validate_input_path(""))
         self.assertIn("見つかりません", validate_input_path(os.path.join(tempfile.gettempdir(), "no_such_dir_e57", "a.e57")))
         with tempfile.TemporaryDirectory() as d:
@@ -70,8 +88,19 @@ class TestMessagesAndValidation(unittest.TestCase):
             self.assertIsNone(validate_input_path(d), "フォルダの指定は誤りではない")
             self.assertIn(".e57", validate_input_path(txt))
             self.assertIsNone(validate_output_path(os.path.join(d, "out.e57")))
-            self.assertIn("フォルダがありません", validate_output_path(os.path.join(d, "none", "out.e57")))
+            # まだ無いフォルダは保存のときに作られるので、誤りにしない（何段あっても同じ）
+            self.assertIsNone(validate_output_path(os.path.join(d, "none", "out.e57")))
+            self.assertIsNone(validate_output_path(os.path.join(d, "a", "b", "c", "out.e57")))
+            # 作れない場所だけを誤りにする: 途中がファイル
+            self.assertIn("ファイルです", validate_output_path(os.path.join(txt, "out.e57")))
             self.assertIn("ファイル名", validate_output_path(d))
+            # エクスプローラーの「パスのコピー」で付く引用符は外して調べる
+            self.assertEqual(clean_path_text(f'  "{e57}"  '), e57)
+            self.assertEqual(clean_path_text('"'), '"')
+            self.assertIsNone(validate_input_path(f'"{e57}"'))
+        free = [c for c in "ZYXWVUTSRQ" if not os.path.exists(f"{c}:\\")]
+        if free and os.name == "nt":
+            self.assertIn("見つかりません", validate_output_path(f"{free[0]}:\\none\\out.e57"))
         self.assertIsNone(validate_output_path(""))
 
 
@@ -98,6 +127,10 @@ class TestQssRolesAndStates(unittest.TestCase):
                 'QWidget#bottom_bar QPushButton[role="outline"]',
                 "QWidget#bottom_bar QPushButton:disabled",
                 "QFrame#hint_card",
+                'QPushButton[role="segment"]:checked:pressed',
+                'QWidget#nav_bar QPushButton[role="segment"]:checked:pressed',
+                'QWidget#nav_bar QPushButton[role="danger-toggle"]:hover',
+                'QPushButton[split="arrow"][kbfocus="true"]',
             ):
                 self.assertIn(selector, qss, f"[{t.name}] QSS に {selector} がありません")
 
@@ -175,6 +208,9 @@ class _WinCase(unittest.TestCase):
         self.win._set_dirty(False)
         self.win.close()
         self.win.deleteLater()
+        # processEvents() だけでは deleteLater() が実行されず、閉じたウィンドウが残り続けて後のテストが遅くなる。
+        # ここで本当に破棄する（破棄後にタイマーなどが例外を出さないことの確認にもなる）
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         QApplication.processEvents()
         s = QSettings("E57PointCloudTool", "Settings")
         for k, v in self._backup.items():
@@ -207,6 +243,10 @@ class TestIcons(_WinCase):
             self.assertTrue(all(c.red() > 200 and c.green() < 60 and c.blue() < 60 for c in painted), f"色が違います: {name}")
         blank = icon_pixmap("no-such-icon", "#ff0000", 16).toImage()
         self.assertEqual(blank.pixelColor(8, 8).alpha(), 0, "無いアイコンは空（文字だけで表示される）")
+        from gui.icons import failed_icons
+
+        self.assertIn("no-such-icon", failed_icons(), "描けなかったことを黙って流さない（警告をログに残す）")
+        self.assertFalse(set(failed_icons()) & set(ICON_NAMES), "本物のアイコンは全部描ける")
 
 
 class TestButtonRolesAndIcons(_WinCase):
@@ -263,23 +303,61 @@ class TestButtonRolesAndIcons(_WinCase):
         self.assertEqual(win.auto_undo_btn.toolTip(), DISABLED_REASONS["auto_undo_btn"])
 
     def test_toggle_marks(self):
-        from gui.button_kit import install_toggle_mark
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QIcon
+
+        from gui.button_kit import ToggleMark, install_toggle_mark
 
         win = self.win
         btn = win.btn_instant_del
-        self.assertEqual(btn.property("toggle_mark"), "off")
-        self.assertFalse(btn.icon().isNull())
-        btn.setChecked(True)
-        self.assertEqual(btn.property("toggle_mark"), "on")
-        self.assertFalse(btn.icon().isNull())
-        btn.setChecked(False)
-        self.assertEqual(btn.property("toggle_mark"), "off")
+        mark = btn._toggle_mark
+        self.assertEqual(mark.mark(), "off")
+        icon = btn.icon()
+        on_img = icon.pixmap(QSize(14, 14), QIcon.Normal, QIcon.On).toImage()
+        off_img = icon.pixmap(QSize(14, 14), QIcon.Normal, QIcon.Off).toImage()
+        self.assertNotEqual(on_img, off_img, "オン用とオフ用の絵を 1 つのアイコンに登録する")
+
+        # 本体は blockSignals の中で setChecked する（N キーのノイズ専用、Esc でのピック終了など）。印が取り残されないこと
+        win._toggle_clean_focus_mode(True)
+        self.assertTrue(win.btn_clean_mode.isChecked() and win.btn_instant_del.isChecked())
+        self.assertEqual(win.btn_clean_mode._toggle_mark.mark(), "on")
+        self.assertEqual(mark.mark(), "on")
+        win._toggle_clean_focus_mode(False)
+        self.assertEqual(win.btn_clean_mode._toggle_mark.mark(), "off")
+
+        # 実際に描かれる絵で確かめる: シグナルを止めて切り替えても、オンならオンの色の印が描かれる
+        class _ColorMark(ToggleMark):
+            def _colors(self, t):
+                return "#ff00ff", "#ffff00"
+
         plain = QPushButton("ON/OFF", win)
         plain.setCheckable(True)
-        install_toggle_mark(plain, self.kit.tokens)
+        plain._toggle_mark = _ColorMark(plain, self.kit.tokens)
+        plain.resize(plain.sizeHint())
+        plain.show()
+        QApplication.processEvents()
+
+        def count(img, pred):
+            m = int(4 * img.devicePixelRatio())  # 枠と角の境目は数えない
+            return sum(
+                1 for x in range(m, img.width() - m) for y in range(m, img.height() - m) if pred(img.pixelColor(x, y))
+            )
+
+        magenta = lambda c: c.red() > 180 and c.blue() > 180 and c.green() < 90  # noqa: E731
+        yellow = lambda c: c.red() > 180 and c.green() > 180 and c.blue() < 90  # noqa: E731
         w0 = plain.sizeHint().width()
+        img = plain.grab().toImage()
+        self.assertGreater(count(img, yellow), 3)
+        self.assertEqual(count(img, magenta), 0)
+        plain.blockSignals(True)
         plain.setChecked(True)
-        self.assertEqual(plain.sizeHint().width(), w0)
+        plain.blockSignals(False)
+        QApplication.processEvents()
+        img = plain.grab().toImage()
+        self.assertGreater(count(img, magenta), 3, "シグナルを止めた切り替えでも、オンの印に変わる")
+        self.assertEqual(count(img, yellow), 0)
+        self.assertEqual(plain.sizeHint().width(), w0, "印の切り替えで幅が変わらない")
+        self.assertIs(install_toggle_mark(plain, self.kit.tokens), plain._toggle_mark)
         plain.deleteLater()
 
     def test_keyboard_focus_ring_only_for_keyboard(self):
@@ -439,12 +517,34 @@ class TestToastAndUnsaved(_WinCase):
         self.assertFalse(errs.row.isHidden())
         self.assertTrue(bool(win.input_edit.property("invalid")))
         self.assertIn("入力 E57", errs.label.text())
-        win.output_edit.setText(os.path.join(tempfile.gettempdir(), "no_such_dir_e57", "out.e57"))
-        win.output_edit.editingFinished.emit()
-        self.assertEqual(len(errs.messages()), 2)
-        win.input_edit.setText("")
-        self.assertFalse(bool(win.input_edit.property("invalid")), "直したらすぐ消す")
-        self.assertEqual(len(errs.messages()), 1)
+        with tempfile.TemporaryDirectory() as d:
+            blocker = os.path.join(d, "file.txt")
+            with open(blocker, "wb") as f:
+                f.write(b"x")
+            # まだ無いフォルダへの保存は成功する（保存のときに作られる）ので、誤りにしない
+            win.output_edit.setText(os.path.join(d, "new_folder", "out.e57"))
+            win.output_edit.editingFinished.emit()
+            self.assertEqual(len(errs.messages()), 1)
+            self.assertFalse(bool(win.output_edit.property("invalid")))
+            # 途中がファイルで、フォルダを作れない場所は誤り
+            win.output_edit.setText(os.path.join(blocker, "out.e57"))
+            win.output_edit.editingFinished.emit()
+            self.assertEqual(len(errs.messages()), 2)
+            self.assertTrue(bool(win.output_edit.property("invalid")))
+            win.input_edit.setText("")
+            self.assertFalse(bool(win.input_edit.property("invalid")), "直したらすぐ消す")
+            self.assertEqual(len(errs.messages()), 1)
+            # 引用符付きで貼られたパスは、確定したときに欄の文字を直す（本体は引用符を外さないため）
+            good = os.path.join(d, "out.e57")
+            win.output_edit.setText(f'"{good}"')
+            win.output_edit.editingFinished.emit()
+            self.assertEqual(win.output_edit.text(), good)
+            self.assertTrue(errs.row.isHidden())
+            win.input_edit.setText(f'"{missing}"')
+            win.input_edit.editingFinished.emit()
+            self.assertEqual(win.input_edit.text(), missing)
+            self.assertIn("入力 E57", errs.label.text())
+            win.input_edit.setText("")
         win.output_edit.setText("")
         self.assertTrue(errs.row.isHidden())
 
@@ -456,7 +556,7 @@ class TestToastAndUnsaved(_WinCase):
         QApplication.processEvents()
         self.assertFalse(win.save_manual_btn.icon().isNull())
         self.assertNotEqual(win.save_manual_btn.icon().cacheKey(), key_before, "テーマの色で描き直す")
-        self.assertEqual(win.btn_instant_del.property("toggle_mark"), "off")
+        self.assertEqual(win.btn_instant_del._toggle_mark.mark(), "off")
         win.show_toast("テーマを切り替えました")
         self.assertTrue(win.toast_label.isVisible())
 
@@ -559,6 +659,159 @@ class TestHintsOnWindow(_WinCase):
         ex.manual_window().close()
         dlg.close()
         self.assertTrue(ex.startup_tip_label.text().startswith("ヒント: "))
+
+
+class TestBugCheck20261111(_WinCase):
+    """2026-11-11 のエラー・バグ点検で見つけた不具合の再発防止"""
+
+    def test_settings_are_sandboxed(self):
+        from tests.settings_sandbox import is_sandboxed
+
+        self.assertTrue(is_sandboxed(), "テストがこの PC の本番アプリの保存設定を書き換えています")
+        self.assertTrue(QSettings("E57PointCloudTool", "Settings").fileName().lower().endswith(".ini"))
+
+    def test_undo_action_only_for_the_edit_just_made(self):
+        win, host = self.win, self.win.toast_host
+        self._load()
+        self._select(50)
+        win._delete_selected_points()   # 取り消せる編集を 1 つ作っておく
+        QApplication.processEvents()
+        win.show_toast("視点回転モード (V)")
+        self.assertFalse(host.has_action())
+
+        # 通知を出さない編集（断面外のクロップなど）のあと、別の操作の通知に「元に戻す」が付いてはいけない
+        win._push_layer_undo_state()
+        QApplication.processEvents()     # その編集の処理が終わり、イベントループへ戻った
+        win.show_toast("12 点をノイズレイヤーへ移動しました")
+        self.assertFalse(host.has_action(), "前の編集の印が残って、あとの通知に「元に戻す」が付いています")
+
+        # 編集と同じ処理の中でも、点数が出るだけの文には付けない
+        win._push_layer_undo_state()
+        win.show_toast("断面ボックス内の全点表示: OFF（表示 768 点）")
+        self.assertFalse(host.has_action())
+
+        # 編集と同じ処理の中で出た編集の報告には付く
+        win._push_layer_undo_state()
+        win.show_toast("12 点をノイズレイヤーへ移動しました")
+        self.assertTrue(host.has_action())
+
+    def test_real_crop_does_not_leak_undo_to_later_toast(self):
+        win, host = self.win, self.win.toast_host
+        self._load()
+        win.chk_clip_x.setChecked(True) if hasattr(win, "chk_clip_x") else None
+        if not win.viewer.is_section_active():
+            self.ex.run_command("section.x")
+        QApplication.processEvents()
+        if not win.viewer.is_section_active():
+            self.skipTest("断面を有効にできない構成")
+        from PySide6.QtWidgets import QMessageBox
+
+        orig_q, orig_i = QMessageBox.question, QMessageBox.information
+        QMessageBox.question = lambda *a, **k: QMessageBox.Yes
+        QMessageBox.information = lambda *a, **k: QMessageBox.Ok
+        try:
+            win._crop_outside_section()
+        finally:
+            QMessageBox.question, QMessageBox.information = orig_q, orig_i
+        QApplication.processEvents()
+        win.show_toast("断面ボックス内の全点表示: OFF（表示 768 点）")
+        self.assertFalse(host.has_action(), "クロップのあとの無関係な通知に「元に戻す」が付いています")
+
+    def test_action_toast_survives_a_modal_dialog(self):
+        from PySide6.QtWidgets import QDialog
+
+        from gui.status_feedback import ACTION_TOAST_MS
+
+        win, host = self.win, self.win.toast_host
+        self._load()
+        self._select(30)
+        win._delete_selected_points()
+        self.assertTrue(host.has_action())
+        dlg = QDialog(win)
+        dlg.setModal(True)
+        dlg.show()
+        QApplication.processEvents()
+        self.assertIsNotNone(QApplication.activeModalWidget())
+        win._toast_timer.stop()
+        win._toast_timer.timeout.emit()   # 完了ダイアログの裏で時間が来た
+        self.assertFalse(host.isHidden(), "ダイアログが開いているあいだは「元に戻す」を消さない")
+        self.assertTrue(win._toast_timer.isActive())
+        dlg.close()
+        dlg.deleteLater()
+        QApplication.processEvents()
+        win._toast_timer.stop()
+        win._toast_timer.timeout.emit()   # 閉じたあと最初の確認
+        self.assertFalse(host.isHidden())
+        self.assertGreaterEqual(win._toast_timer.remainingTime(), ACTION_TOAST_MS - 500, "閉じてから押す時間を取り直す")
+        self.assertTrue(host.has_action())
+        # 「元に戻す」の無い通知は、ダイアログが開いていても時間どおりに消してよい
+        win.show_toast("視点回転モード (V)")
+        self.assertFalse(host.has_action())
+
+    def test_done_is_cleared_when_edited_again(self):
+        win = self.win
+        binding = self.kit.busy["save_manual_btn"]
+        self._load()
+        binding.flash_done("保存済み")
+        self.assertEqual(win.save_manual_btn.text(), "保存済み")
+        win._push_layer_undo_state()      # 保存の直後にまた編集した
+        self.assertTrue(win._dirty)
+        self.assertEqual(binding.state(), "idle", "「保存済み」と「未保存の変更あり」を同時に出さない")
+        self.assertEqual(win.save_manual_btn.text(), "保存 (Ctrl+S)")
+        self.assertFalse(win.unsaved_pill.isHidden())
+
+    def test_icon_follows_theme_changed_while_busy_or_done(self):
+        from gui.button_kit import icon_colors_for, tokens_for
+        from gui.icons import themed_icon
+
+        win = self.win
+        btn = win.save_manual_btn
+        binding = self.kit.busy["save_manual_btn"]
+
+        def expected():
+            color, dis = icon_colors_for(btn, tokens_for(win))
+            return themed_icon("save", color, dis, 14).pixmap(14, 14).toImage()
+
+        for enter in ("busy", "done"):
+            other = "dark" if getattr(win, "ui_theme", "dark") != "dark" else "kiseki"
+            if enter == "busy":
+                btn.setEnabled(False)
+            else:
+                binding.flash_done("保存済み")
+            win.apply_ui_theme(other)
+            QApplication.processEvents()
+            if enter == "busy":
+                btn.setEnabled(True)
+            else:
+                binding._end_done()
+            self.assertEqual(binding.state(), "idle")
+            self.assertEqual(btn.icon().pixmap(14, 14).toImage(), expected(), f"{enter} 中にテーマを替えると、戻ったアイコンが古い色のまま")
+
+    def test_split_arrow_keeps_size_and_releases_after_menu(self):
+        from gui.button_kit import repolish
+
+        arrow = self.win.save_split.arrow_btn
+        QApplication.processEvents()
+        hint0 = arrow.sizeHint()
+        arrow.setProperty("kbfocus", True)
+        repolish(arrow)
+        self.assertEqual(arrow.sizeHint(), hint0, "Tab で枠が太くなっても大きさは変わらない")
+        arrow.setProperty("kbfocus", False)
+        repolish(arrow)
+        arrow.setDown(True)
+        self.win.save_split.menu.aboutToHide.emit()
+        self.assertFalse(arrow.isDown(), "メニューを閉じたら押下の見た目を戻す")
+
+    def test_sidebar_fits_in_both_themes(self):
+        win = self.win
+        for theme in ("dark", "kiseki"):
+            win.apply_ui_theme(theme)
+            win._set_sidebar_workflow_tab("all")
+            for _ in range(5):
+                QApplication.processEvents()
+            min_w = win.sidebar_widget.minimumSizeHint().width()
+            vp_w = win.sidebar_scroll.viewport().width()
+            self.assertLessEqual(min_w, vp_w, f"[{theme}] 「全て」タブで左パネルの最小幅({min_w}px)が表示領域幅({vp_w}px)を超えています")
 
 
 class TestClassicUiHasNoButtonKit(unittest.TestCase):

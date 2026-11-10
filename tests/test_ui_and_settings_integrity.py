@@ -6,6 +6,10 @@ UIコンパクト化・設定パネル・ワークフロー切替・感度設定
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+
+use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 import unittest
 import numpy as np
 from PySide6.QtCore import Qt, QSettings

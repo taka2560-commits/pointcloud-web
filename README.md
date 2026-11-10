@@ -144,5 +144,6 @@ python cli.py input.e57 -o output_clean.e57 --ror --ror-radius 0.05 --voxel-size
     ├── test_lod_store.py       # LOD ストア（空間順に並べ替えた全点データ）の作成・選択・読み出し
     ├── test_lod_controller.py  # 視点連動の高精細表示（LOD）
     ├── test_ui_extras.py       # 新UIの操作まわり（ランチャー・パレット・小窓・操作ガイド・説明書）
-    └── test_buttons_and_states.py # ボタンの役割と状態・状態表示・ヒント
+    ├── test_buttons_and_states.py # ボタンの役割と状態・状態表示・ヒント
+    └── settings_sandbox.py     # テスト中の保存設定を一時フォルダへ向ける（この PC の本番の設定を書き換えない）
 ```
