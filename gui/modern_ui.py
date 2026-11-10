@@ -818,6 +818,9 @@ def on_theme_changed(win, theme: str) -> None:
         log_warning(f"テーマ切替: サイドバー幅の更新に失敗しました: {exc}")
     for w in win.findChildren(QWidget):
         _repolish(w)
+    extras = getattr(win, "ui_extras", None)
+    if extras is not None:
+        extras.refresh_theme()  # 操作説明書の本文の色をテーマに合わせ直す
     win.update()
 
 
@@ -832,6 +835,11 @@ def apply_modern_ui(win) -> None:
     _install_menu_bar(win)
     _convert_bars_to_flow(win)
     _install_behaviors(win)
+
+    # 操作まわりの追加機能（コマンドランチャー・右クリックのパレット・パネルの小窓・操作ガイド・操作説明書）
+    from gui.ui_extras import install_ui_extras
+
+    install_ui_extras(win)
 
     # 既定タブは「①自動」（初めての人が最初に行う作業）
     try:

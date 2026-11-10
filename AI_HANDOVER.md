@@ -78,6 +78,16 @@
 - 新UIには **テーマ**（`dark` 既定 / `kiseki` = 「Stand 軌跡」準拠のライト）があります。`gui/design_tokens.py: THEMES` のトークンだけが違い、QSS 生成・部品・ロジックは共通です（`get_theme_qss("modern", theme)`）。解決順は UI モードと同じ（`--theme=kiseki` ＞ `E57_UI_THEME` ＞ 設定「テーマ (新UI)」 ＞ dark）。設定画面で選ぶと `MainWindow.apply_ui_theme()` がその場で切り替えます（再起動不要）。新しい色を足すときは両テーマに値を入れ、`tests/test_design_tokens.py` のコントラスト検査を通してください。
 - 新UIの **モーション**は `gui/motion.py` に集約しています（押下・出入り・カスケード・展開・数値ティッカー・シェイク・バウンス・パルス。選定理由は `docs/DESIGN_STYLE_PLAN.md` §9）。ルール: 1 回きり・420ms 以内・位置と透明度のみ・終了後は描画効果を外す。設定「アニメーション」OFF（`set_motion_enabled(False)`）で全て即時反映になるよう `motion_enabled()` を見てください。Gate4 は dark・classic・kiseki の 3 通りで起動し、モーション後に描画効果が残らないことも検査します。
 
+- 新UIの **操作まわりの追加機能**（2026-11-10、`gui/ui_extras.py` が `apply_modern_ui()` の最後に組み込む。従来UIには入れない）:
+  - **コマンド表**（`gui/commands.py`）が全機能の唯一の元データ。**機能を足したらここに 1 行足す**（題名・説明・ショートカット・ひらがなの別名・実行・使えない理由）。実行は既存のボタンのクリックや既存メソッドの呼び出しで行い、処理を二重に持たない。ランチャー・パレット・説明書のリンク・ショートカット一覧はすべてここから作る。
+  - **コマンドランチャー**（`gui/launcher.py`、Ctrl+K、メニューバー右端の「機能を検索」）: 検索は NFKC・小文字・カタカナ→ひらがなに揃えた部分一致（題名 > 説明・別名 > グループ名の順に優先）。使えない機能は薄く表示して理由を出す。最近使った機能は QSettings `launcher_recent`。
+  - **右クリックのクイックパレット**（`gui/quick_palette.py`）: `viewer.context_menu_requested` を従来のメニューからこちらへ付け替えている。従来のメニューは「その他のメニュー」から開ける。
+  - **ポップアップの土台**（`gui/popup_base.py`）: ビューアの子ウィジェットとして重ねる。Esc / Enter / 矢印にはウィンドウ全体の QShortcut があるため、開いている間は `ShortcutOverride` を受け取ってキーをポップアップ側へ回す（これをしないと Esc が「選択解除」に取られる）。`clicked` / `triggered` は bool を渡してくるので、引数付きのメソッドへ直接つながない（lambda で受ける）。
+  - **パネルの小窓化**（`gui/popout_panels.py`）: 左パネルのグループ（ウィジェットそのもの）を `Qt.Tool` の小窓へ移す。閉じると決まった並び順の位置へ戻す（Gate4 の「作業順」検査を崩さない）。小窓に出ている間は `_set_sidebar_workflow_tab` の後で再表示する。左パネル格納時は 3D 画面の左端にパネルドックを出す（格納の判定は `isHidden()`。`isVisible()` はウィンドウ表示前に False になるので使わない）。
+  - **モード別の操作ガイド**（`gui/mode_hints.py`）: ビューアの状態を 250ms ごとに見て右上に案内を出す（マウス透過）。QSettings `mode_hints_enabled`。
+  - **操作説明書**（`gui/manual.py`）: 本文は `TOPICS`。`[[cmd:ID]]` / `[[key:…]]` / `[[topic:ID]]` の記法でコマンド表の題名とショートカットを埋め込む（`tests/test_ui_extras.py` が、本文が参照する ID の実在を検査）。`QTextBrowser` はグローバル QSS の `QTextEdit`（ログ用の等幅フォント）を継ぐので、`QTextBrowser#manual_view` でフォントを上書きしている。
+  - 見た目は `gui/design_tokens.py: _extras_qss()`。新しい文字色と背景の組は `text_background_pairs()` に足してコントラスト検査を通す。
+
 ### ⑥ 【UI スタイル】セレクタ無しのインライン QSS を書かない
 - `widget.setStyleSheet("background: transparent;")` のようにセレクタを付けない宣言は**その子孫すべてに伝播**し、グローバル QSS（`QPushButton#execute_button` 等）を打ち消します（2026-10-31 に主要ボタンが文字だけに見える不具合として顕在化）。
 - 必ず `QWidget#name { ... }` のように objectName / クラスで限定するか、`setProperty("role", ...)` ＋ `gui/styles.py` のグローバル QSS で表現してください。デザイン改修の方針は `docs/DESIGN_STYLE_PLAN.md` を参照。
@@ -135,6 +145,15 @@
 │   ├── ui_mode.py              # UI モード（modern / classic）の解決と保存（起動引数・環境変数・設定）
 │   ├── design_tokens.py        # 新UIのデザイントークンと QSS 生成（色・文字サイズ・角丸・間隔の唯一の定義）
 │   ├── modern_ui.py            # 新UIアダプタ（従来UIに後付け: 作業順・メニュー/ステータスバー・空状態カード・絵文字除去）
+│   ├── ui_extras.py            # 新UIの操作まわりの追加機能の組み込み口（下の 6 つをまとめて後付けする）
+│   ├── commands.py             # コマンド表（全機能の名前・説明・ショートカット・実行・使えない理由。ランチャー/パレット/説明書の共通の元データ）
+│   ├── launcher.py             # コマンドランチャー（Ctrl+K。機能名を打って Enter で実行）
+│   ├── quick_palette.py        # 右クリックのクイックパレット（選択の有無で中身が変わるタイル）
+│   ├── popup_base.py           # 上 2 つの共通の土台（外側クリック・Esc で閉じる、ショートカットとの衝突回避）
+│   ├── popout_panels.py        # パネルの小窓化（見出しの「別窓」、左パネル格納時のパネルドック）
+│   ├── mode_hints.py           # モード別の操作ガイド（3D 画面の右上）
+│   ├── manual.py               # 操作説明書（設定の「説明書」タブ、F1 の別ウィンドウ。本文もここ）
+│   ├── lod_controller.py       # 視点連動の高精細表示（LOD）の制御
 │   ├── flow_layout.py          # 折り返しレイアウト（狭い画面で上部/下部バーのボタンが切れないようにする）
 │   ├── progress_dialog.py      # キャンセル対応モダン進捗ダイアログ（ApplicationModal）
 │   ├── styles.py               # モダンダークテーマQSSスタイルシート
@@ -250,12 +269,12 @@ python -m unittest discover tests -v     # 単体テストのみ
 - `.git/hooks/pre-commit` に全ゲートが登録済みで、コミット時に自動実行されます（NG ならコミット不可）。hooks は全 worktree で共有されるため `--install-hook` を再実行する必要はありません。
 - ゲートはリポジトリ内にファイルを残しません（一時ファイルは OS の一時ディレクトリ）。
 
-### テスト内容（全5段階・単体テスト 197 件）
+### テスト内容（全5段階・単体テスト 210 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
 4. **Gate 4: 実機 OpenGL & GUI シナリオ**（MainWindow 起動、VBO 描画、レイヤー操作、Undo/Redo、保存、レシピ、座標系、断面、壁アライン。バックグラウンド処理は `_wait_for_background()` で完了待ち）
-5. **Gate 5: unittest スイート**（`tests/` を discover。E57 ロスレス、フィルタ安全性、座標系往復、読込点数照合、レイヤー統合、UI/設定、全点転写保存、断面ボックス内の全点表示、断面ボックスの元ファイル読み直しとそのキャッシュ、LOD ストアと視点連動の高精細表示）
+5. **Gate 5: unittest スイート**（`tests/` を discover。E57 ロスレス、フィルタ安全性、座標系往復、読込点数照合、レイヤー統合、UI/設定、全点転写保存、断面ボックス内の全点表示、断面ボックスの元ファイル読み直しとそのキャッシュ、LOD ストアと視点連動の高精細表示、新UIの操作まわりの追加機能）
 
 ※ 配布EXE・ZIP の存在確認はゲートに含まれません。配布前に `EXE配布パッケージ作成.bat` を実行し、`dist/E57_PointCloud_Tool/` にマニュアル3点が同梱されていることを目視確認してください。
 
