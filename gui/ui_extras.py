@@ -10,14 +10,16 @@
 どれも既存のボタンやメソッドを呼ぶだけで、処理そのものは持たない。従来UIには入れない。
 """
 
+import random
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QPoint, Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import QPushButton, QTabWidget
+from PySide6.QtWidgets import QLabel, QPushButton, QTabWidget
 
 from core.logger import log_warning
 from gui.commands import GROUP_HELP, GROUP_VIEW, Command, build_commands, commands_by_id
+from gui.hints import TIPS, HintEngine, TipsDialog
 from gui.launcher import CommandLauncher
 from gui.manual import ManualTab, ManualWindow
 from gui.mode_hints import ModeHintOverlay
@@ -43,6 +45,8 @@ class UiExtras(QObject):
             open_legacy_menu=self._open_legacy_menu,
         )
         self.hints = ModeHintOverlay(win)
+        self.hint_engine = HintEngine(win, self.run_command)
+        self._tips_dialog: Optional[TipsDialog] = None
         self.dock = self.popouts.install_dock(lambda: self.launcher.open_launcher())
 
         self._install_shortcuts()
@@ -50,6 +54,7 @@ class UiExtras(QObject):
         self._rewire_context_menu()
         self._install_manual_tab()
         self._install_menu_entries()
+        self._install_startup_tip()
 
     # --- コマンド表（基本 + この追加機能のぶん） ---
     def commands(self) -> List[Command]:
@@ -78,6 +83,14 @@ class UiExtras(QObject):
         cmds.append(Command(
             "help.mode_hints", GROUP_HELP, "操作ガイドの表示 入/切", "ツールを選んだときに 3D 画面の右上へ出る案内", "", "がいど あんない ひんと",
             lambda w: self.set_hints_enabled(not self.hints.is_enabled()),
+        ))
+        cmds.append(Command(
+            "help.tips", GROUP_HELP, "ヒント集を開く", "知っていると便利な操作を順に見る。「試す」でその機能が動く", "", "ひんと こつ ちっぷす tips",
+            lambda w: self.open_tips(),
+        ))
+        cmds.append(Command(
+            "help.hints", GROUP_HELP, "状況に応じたヒントの表示 入/切", "次にやるとよいことを 3D 画面の右上に出すカード", "", "ひんと つぎ あんない",
+            lambda w: self.set_tips_enabled(not self.hint_engine.is_enabled()),
         ))
         return cmds
 
@@ -128,10 +141,15 @@ class UiExtras(QObject):
         tabs = grp.findChild(QTabWidget) if grp is not None else None
         if tabs is None:
             return
-        tab = ManualTab(self.win, self.commands, hints_enabled=self.hints.is_enabled())
+        tab = ManualTab(
+            self.win, self.commands, hints_enabled=self.hints.is_enabled(), tips_enabled=self.hint_engine.is_enabled()
+        )
         tab.browser.command_requested.connect(self.run_command)
         tab.open_window_requested.connect(lambda: self.open_manual(tab.browser.current_topic_id()))
         tab.hints_toggled.connect(self.hints.set_enabled)
+        tab.tips_toggled.connect(self.hint_engine.set_enabled)
+        tab.open_tips_requested.connect(lambda: self.open_tips())
+        tab.reset_hints_requested.connect(self._reset_hints)
         tabs.addTab(tab, "説明書")
         self.manual_tab = tab
         self.manual_tabs = tabs
@@ -150,6 +168,9 @@ class UiExtras(QObject):
                 a = QAction("操作説明書\tF1", self.win)
                 a.triggered.connect(lambda: self.open_manual())
                 menu.insertAction(first, a)
+                t = QAction("ヒント集...", self.win)
+                t.triggered.connect(lambda _=False: self.open_tips())
+                menu.insertAction(first, t)
                 for sub in menu.actions():
                     if sub.text().startswith("使い方マニュアル"):
                         sub.setText("ノイズフィルター設定ガイドを開く")
@@ -182,6 +203,61 @@ class UiExtras(QObject):
             self.manual_tab.chk_hints.blockSignals(False)
         if hasattr(self.win, "show_toast"):
             self.win.show_toast(f"操作ガイドの表示: {'ON' if enabled else 'OFF'}")
+
+    # --- ヒント ---
+    def _command_title(self, cmd_id: str) -> str:
+        cmd = commands_by_id(self.commands()).get(cmd_id)
+        return cmd.title if cmd is not None else cmd_id
+
+    def open_tips(self, tip_id: Optional[str] = None) -> TipsDialog:
+        if self._tips_dialog is None:
+            self._tips_dialog = TipsDialog(self.win, self.run_command, self.open_manual, self._command_title)
+        d = self._tips_dialog
+        if tip_id:
+            d.show_tip_id(tip_id)
+        d.show()
+        d.raise_()
+        d.activateWindow()
+        return d
+
+    def tips_dialog(self) -> Optional[TipsDialog]:
+        return self._tips_dialog
+
+    def set_tips_enabled(self, enabled: bool) -> None:
+        self.hint_engine.set_enabled(enabled)
+        if self.manual_tab is not None:
+            self.manual_tab.chk_tips.blockSignals(True)
+            self.manual_tab.chk_tips.setChecked(bool(enabled))
+            self.manual_tab.chk_tips.blockSignals(False)
+        if hasattr(self.win, "show_toast"):
+            self.win.show_toast(f"状況に応じたヒントの表示: {'ON' if enabled else 'OFF'}")
+
+    def _reset_hints(self) -> None:
+        self.hint_engine.reset_hidden()
+        if hasattr(self.win, "show_toast"):
+            self.win.show_toast("閉じたヒントを、もう一度表示するようにしました")
+
+    def _install_startup_tip(self) -> None:
+        """起動直後の画面（空状態カード）に、ヒント集から 1 つ出す"""
+        card = getattr(self.win, "empty_state_card", None)
+        lay = card.layout() if card is not None else None
+        if lay is None:
+            return
+        tip = random.choice(TIPS)
+        lbl = QLabel(f"ヒント: {tip.text}", card)
+        lbl.setObjectName("empty_state_tip")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+        btn = QPushButton("ほかのヒントを見る", card)
+        btn.setProperty("role", "ghost")
+        btn.clicked.connect(lambda _=False: self.open_tips())
+        lay.addWidget(btn)
+        self.startup_tip_label = lbl
+        try:
+            card.adjustSize()
+            card._recenter()
+        except Exception:
+            pass
 
     def refresh_theme(self) -> None:
         if self.manual_tab is not None:

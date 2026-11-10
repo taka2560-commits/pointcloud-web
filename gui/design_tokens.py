@@ -115,6 +115,7 @@ class Tokens:
     toast_success: str = "#86efac"
     toast_warning: str = "#fde68a"
     toast_error: str = "#fca5a5"
+    danger_text: str = "#fca5a5"   # 入力の誤りなど、地の上に書く注意の文字
     # 選択バッジ（選択中の強調）
     badge_bg: str = "#3b2a06"
     badge_text: str = "#fde68a"
@@ -191,6 +192,7 @@ KISEKI_TOKENS = Tokens(
     toast_success="#5cd69c",    # bar-gain
     toast_warning="#eadc62",    # bar-accent
     toast_error="#e27b6c",      # bar-loss
+    danger_text="#9a2f22",      # loss
     badge_bg="#0b1110",
     badge_text="#eadc62",
     badge_border="#0b1110",
@@ -264,6 +266,14 @@ def text_background_pairs(t: Tokens = TOKENS) -> Dict[str, Tuple[str, str, float
         "補足 / hover": (t.text_secondary, t.hover_bg, 4.5),
         "リンク / surface": (t.accent_soft, t.bg_surface, 4.5),
         "見出し帯の補足（別窓ボタン）": (t.band_muted, t.bg_surface if t.group_header_bg == "transparent" else t.group_header_bg, 4.5),
+        # ボタンの役割と状態（文字だけのボタン・通知の「元に戻す」・入力の誤り・完了）
+        "リンク / canvas": (t.accent_soft, t.bg_canvas, 4.5),
+        "リンク / elevated": (t.accent_soft, t.bg_elevated, 4.5),
+        "リンク / hover": (t.accent_soft, t.hover_bg, 4.5),
+        "エラー文字 / surface": (t.danger_text, t.bg_surface, 4.5),
+        "エラー文字 / elevated": (t.danger_text, t.bg_elevated, 4.5),
+        "通知のボタン hover": (t.toast_bg, t.toast_info, 4.5),
+        "完了ボタン": (t.success_text, t.success_base, 4.5),
     }
     for name, vals in t.tones.items():
         pairs[f"tone {name}"] = (vals[1], vals[0], 4.5)
@@ -382,6 +392,34 @@ QLabel#mode_hint_body {{
     background: transparent;
 }}
 
+/* ===== 状況に応じたヒントのカード（3D 画面の右上）・ヒント集 ===== */
+QFrame#hint_card {{
+    background-color: {t.bg_elevated};
+    border: 1px solid {t.accent_soft};
+    border-radius: {t.radius_md}px;
+}}
+QLabel#hint_card_title, QLabel#tips_counter {{
+    color: {t.text_secondary};
+    font-size: {t.size_xs}px;
+    font-weight: 700;
+    background: transparent;
+}}
+QLabel#hint_card_text {{
+    color: {t.text_primary};
+    font-size: {t.size_sm}px;
+    background: transparent;
+}}
+QLabel#tips_text {{
+    color: {t.text_primary};
+    font-size: {t.size_md}px;
+    background: transparent;
+}}
+QLabel#empty_state_tip {{
+    color: {t.text_secondary};
+    font-size: {t.size_xs}px;
+    background: transparent;
+}}
+
 /* ===== パネルドック（左パネル格納時）・小窓 ===== */
 QFrame#panel_dock {{
     background-color: {t.band_bg};
@@ -462,6 +500,275 @@ QListWidget#manual_topics::item:hover {{
 QListWidget#manual_topics::item:selected {{
     background-color: {t.on_bg};
     color: {t.on_text};
+}}
+"""
+
+
+def _button_states_qss(t: Tokens) -> str:
+    """
+    ボタンの役割と状態、状態表示の部品（「UIボタン20選」「UIの状態表示20選」を参考にした一覧）。
+    QSS の最後に置く（同じ強さの指定は後に書いたものが勝つため、役割ごとの指定を状態で上書きできる）。
+
+    役割 (role): primary=主操作（塗りつぶし）/ outline=補助 / soft=低優先（淡い塗り）/ ghost=最も軽い（文字だけ）
+                 / danger=削除など取り返しに注意が要る操作 / pill=検索・絞り込み / segment=切り替え
+    状態       : hover / pressed / disabled / checked に加えて、
+                 kbfocus="true"（キーボードで移動中の現在位置）・busy="true"（処理中）・done="true"（完了）
+    色だけに頼らない: 状態は文字（「保存中…」「保存済み」）と印（アイコン）でも伝える。gui/button_kit.py が付ける
+    """
+    ring = t.accent_soft
+    return f"""
+/* ===== 役割の追加: 淡い塗り（低優先） ===== */
+QPushButton[role="soft"] {{
+    background-color: {t.hover_bg};
+    color: {t.text_primary};
+    border: 1px solid {t.border_subtle};
+    font-weight: 600;
+}}
+QPushButton[role="soft"]:hover {{
+    border-color: {t.border_strong};
+}}
+QPushButton[role="soft"]:pressed {{
+    background-color: {t.pressed_bg};
+}}
+QPushButton[role="soft"]:disabled {{
+    background-color: {t.bg_surface};
+    color: {t.text_disabled};
+    border-color: {t.border_subtle};
+}}
+
+/* ===== 役割: 文字だけ（最も軽い操作）。リンクの色で書き、枠は出さない ===== */
+QPushButton[role="ghost"] {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: {t.accent_soft};
+    font-weight: 600;
+}}
+QPushButton[role="ghost"]:hover {{
+    background-color: {t.hover_bg};
+    border-color: {t.border_subtle};
+    text-decoration: underline;
+}}
+QPushButton[role="ghost"]:pressed {{
+    background-color: {t.pressed_bg};
+}}
+QPushButton[role="ghost"]:disabled {{
+    color: {t.text_disabled};
+    background-color: transparent;
+    border-color: transparent;
+}}
+
+/* ===== 役割: ピル型（検索・絞り込み・その場の小さな選択） ===== */
+QPushButton[role="pill"] {{
+    background-color: {t.bg_elevated};
+    color: {t.text_primary};
+    border: 1px solid {t.border_strong};
+    border-radius: 12px;
+    padding: 4px 12px;
+    font-size: {t.size_xs}px;
+    font-weight: 600;
+}}
+QPushButton[role="pill"]:hover {{
+    background-color: {t.hover_bg};
+    border-color: {t.accent_base};
+}}
+QPushButton[role="pill"]:pressed {{
+    background-color: {t.pressed_bg};
+}}
+QPushButton[role="pill"]:checked {{
+    background-color: {t.on_bg};
+    color: {t.on_text};
+    border-color: {t.on_border};
+}}
+QPushButton[role="pill"]:disabled {{
+    background-color: {t.bg_surface};
+    color: {t.text_disabled};
+    border-color: {t.border_subtle};
+}}
+QPushButton#menu_launcher_button {{
+    border-radius: 11px;
+}}
+
+/* ===== 状態の抜けを埋める（押下・無効・ホバー） ===== */
+QPushButton[role="outline"]:pressed {{
+    background-color: {t.pressed_bg};
+}}
+QPushButton[role="danger"]:pressed {{
+    background-color: {t.danger_strong};
+    border-color: {t.text_on_accent};
+}}
+QPushButton[role="danger-toggle"]:hover {{
+    border-color: {t.danger_base};
+}}
+QPushButton[role="danger-toggle"]:disabled {{
+    color: {t.text_disabled};
+    border-color: {t.border_subtle};
+}}
+QPushButton[role="segment"]:pressed {{
+    background-color: {t.pressed_bg};
+}}
+QPushButton[role="segment"]:disabled {{
+    color: {t.text_disabled};
+    border-color: {t.border_subtle};
+}}
+QPushButton[role="dock"]:pressed {{
+    background-color: {t.pressed_bg};
+    color: {t.text_primary};
+}}
+
+/* ===== 下部バー（帯の上）: 高さを揃え、無効は「文字だけ」にして押せないことを形でも示す ===== */
+QWidget#bottom_bar QPushButton {{
+    min-height: {t.control_h_sm - 10}px;
+    font-size: {t.size_xs}px;
+    padding: 4px 8px;
+}}
+QWidget#bottom_bar QPushButton[role="outline"] {{
+    background-color: transparent;
+    color: {t.band_text};
+    border: 1px solid {t.band_muted};
+}}
+QWidget#bottom_bar QPushButton[role="outline"]:hover {{
+    border-color: {t.band_text};
+}}
+QWidget#bottom_bar QPushButton:disabled {{
+    background-color: transparent;
+    color: {t.band_muted};
+    border: 1px solid transparent;
+}}
+
+/* ===== キーボードで移動中の現在位置（Tab / Shift+Tab）。マウスで押しただけでは出さない ===== */
+QPushButton[kbfocus="true"], QPushButton[kbfocus="true"]:hover, QPushButton[kbfocus="true"]:checked {{
+    border: 2px solid {ring};
+    padding: 3px 6px;
+}}
+QPushButton[role="primary"][kbfocus="true"], QPushButton[role="danger"][kbfocus="true"] {{
+    border: 2px solid {t.text_primary};
+}}
+QPushButton[role="segment"][kbfocus="true"] {{
+    padding: 3px 5px;
+}}
+QPushButton[role="tile"][kbfocus="true"] {{
+    padding: 5px 9px;
+}}
+QPushButton[role="pill"][kbfocus="true"] {{
+    padding: 3px 11px;
+}}
+QPushButton[role="dock"][kbfocus="true"] {{
+    border: 2px solid {t.band_text};
+    padding: 4px 6px;
+}}
+QPushButton#execute_button[kbfocus="true"] {{
+    border: 2px solid {t.text_primary};
+    padding: 7px 15px;
+}}
+QPushButton#menu_launcher_button[kbfocus="true"] {{
+    border: 2px solid {ring};
+    padding: 1px 11px;
+}}
+QWidget#nav_bar QPushButton[kbfocus="true"], QWidget#nav_bar QPushButton[kbfocus="true"]:checked,
+QWidget#bottom_bar QPushButton[kbfocus="true"] {{
+    border: 2px solid {t.band_text};
+}}
+QWidget#bottom_bar QPushButton[kbfocus="true"] {{
+    padding: 3px 7px;
+}}
+
+/* ===== 処理中・完了（文字とアイコンは gui/button_kit.py が差し替える） ===== */
+QPushButton[busy="true"], QPushButton[busy="true"]:disabled, QPushButton#execute_button[busy="true"]:disabled {{
+    background-color: {t.hover_bg};
+    color: {t.text_primary};
+    border: 1px solid {t.border_strong};
+}}
+QPushButton[done="true"], QPushButton[done="true"]:hover, QPushButton[done="true"]:disabled {{
+    background-color: {t.success_base};
+    color: {t.success_text};
+    border: 1px solid {t.success_base};
+}}
+
+/* ===== 分割ボタン（主操作 + 関連する操作のメニュー） ===== */
+QPushButton[split="main"] {{
+    border-top-right-radius: 0px;
+    border-bottom-right-radius: 0px;
+}}
+QPushButton[split="arrow"] {{
+    border-top-left-radius: 0px;
+    border-bottom-left-radius: 0px;
+    border-left: 1px solid {t.primary_text};
+    padding: 4px 5px;
+    min-width: 16px;
+}}
+QPushButton[split="arrow"]::menu-indicator {{
+    image: none;
+    width: 0px;
+}}
+
+/* ===== 通知（下部バーの右）: 印 + 文 + 次の一手（「元に戻す」など） ===== */
+QFrame#toast_host {{
+    background-color: {t.toast_bg};
+    border: 1px solid {t.toast_info};
+    border-radius: {t.radius_lg}px;
+}}
+QFrame#toast_host[kind="success"] {{
+    border-color: {t.toast_success};
+}}
+QFrame#toast_host[kind="warning"] {{
+    border-color: {t.toast_warning};
+}}
+QFrame#toast_host[kind="error"] {{
+    border-color: {t.toast_error};
+}}
+QFrame#toast_host QLabel#toast_label {{
+    background-color: transparent;
+    border: none;
+    padding: 2px 2px;
+}}
+QLabel#toast_icon {{
+    background: transparent;
+    border: none;
+}}
+QPushButton#toast_action {{
+    background-color: transparent;
+    color: {t.toast_info};
+    border: 1px solid {t.toast_info};
+    border-radius: 8px;
+    padding: 1px 10px;
+    min-height: 14px;
+    font-size: {t.size_xs}px;
+    font-weight: 700;
+}}
+QPushButton#toast_action:hover {{
+    background-color: {t.toast_info};
+    color: {t.toast_bg};
+}}
+
+/* ===== 未保存の変更（ステータスバー）。押すと保存 ===== */
+QPushButton#unsaved_pill {{
+    background-color: {t.badge_bg};
+    color: {t.badge_text};
+    border: 1px solid {t.badge_border};
+    border-radius: 9px;
+    padding: 1px 10px;
+    min-height: 16px;
+    font-size: {t.size_xs}px;
+    font-weight: 700;
+}}
+QPushButton#unsaved_pill:hover {{
+    border-color: {t.badge_text};
+}}
+
+/* ===== 入力の誤り（直す場所を枠で、理由を文で示す） ===== */
+QLineEdit[invalid="true"] {{
+    border: 2px solid {t.danger_base};
+    padding: 3px 7px;
+}}
+QLabel#field_error {{
+    color: {t.danger_text};
+    font-size: {t.size_xs}px;
+    font-weight: 600;
+    background: transparent;
+}}
+QLabel#field_error_icon, QLabel#state_icon {{
+    background: transparent;
+    border: none;
 }}
 """
 
@@ -1159,4 +1466,4 @@ QMessageBox QLabel {{
 QMessageBox QPushButton {{
     min-width: 84px;
 }}
-""" + _extras_qss(t)
+""" + _extras_qss(t) + _button_states_qss(t)
