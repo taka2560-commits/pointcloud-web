@@ -259,6 +259,11 @@ def text_background_pairs(t: Tokens = TOKENS) -> Dict[str, Tuple[str, str, float
         "トースト warning": (t.toast_warning, t.toast_bg, 4.5),
         "トースト error": (t.toast_error, t.toast_bg, 4.5),
         "選択バッジ": (t.badge_text, t.badge_bg, 4.5),
+        # ランチャーの選択行・パレットのタイル（hover）・説明書のリンク・パネルドック
+        "本文 / hover": (t.text_primary, t.hover_bg, 4.5),
+        "補足 / hover": (t.text_secondary, t.hover_bg, 4.5),
+        "リンク / surface": (t.accent_soft, t.bg_surface, 4.5),
+        "見出し帯の補足（別窓ボタン）": (t.band_muted, t.bg_surface if t.group_header_bg == "transparent" else t.group_header_bg, 4.5),
     }
     for name, vals in t.tones.items():
         pairs[f"tone {name}"] = (vals[1], vals[0], 4.5)
@@ -295,6 +300,170 @@ QPushButton[tone="{name}"]:disabled {{
 }}"""
         )
     return "\n".join(parts)
+
+
+def _extras_qss(t: Tokens) -> str:
+    """コマンドランチャー・右クリックのパレット・操作ガイド・パネルドック・小窓・操作説明書の QSS"""
+    return f"""
+/* ===== コマンドランチャー / クイックパレット ===== */
+QFrame#launcher, QFrame#quick_palette {{
+    background-color: {t.bg_elevated};
+    border: 1px solid {t.border_strong};
+    border-radius: {t.radius_lg}px;
+}}
+QLineEdit#launcher_search {{
+    background-color: {t.bg_input};
+    color: {t.text_primary};
+    border: 1px solid {t.accent_base};
+    border-radius: {t.radius_md}px;
+    padding: 8px 10px;
+    font-size: {t.size_md}px;
+    min-height: 22px;
+}}
+QListWidget#launcher_list {{
+    background-color: {t.bg_elevated};
+    border: none;
+    outline: none;
+}}
+QLabel#launcher_footer, QLabel#palette_title {{
+    color: {t.text_secondary};
+    font-size: {t.size_xs}px;
+    background: transparent;
+}}
+QLabel#palette_title {{
+    font-weight: 700;
+}}
+QPushButton[role="tile"] {{
+    background-color: {t.bg_surface};
+    color: {t.text_primary};
+    border: 1px solid {t.border_strong};
+    border-radius: {t.radius_md}px;
+    padding: 6px 10px;
+    min-width: 84px;
+    min-height: 36px;
+    font-size: {t.size_sm}px;
+    font-weight: 600;
+}}
+QPushButton[role="tile"]:hover {{
+    background-color: {t.hover_bg};
+    border-color: {t.accent_base};
+}}
+QPushButton[role="tile"]:pressed {{
+    background-color: {t.pressed_bg};
+}}
+QPushButton[role="tile"]:disabled {{
+    background-color: {t.bg_elevated};
+    color: {t.text_disabled};
+    border-color: {t.border_subtle};
+}}
+QPushButton[role="tile"][danger="true"] {{
+    border-color: {t.danger_base};
+}}
+QPushButton[role="tile"][danger="true"]:hover {{
+    background-color: {t.danger_strong};
+    color: {t.text_on_accent};
+}}
+
+/* ===== モード別の操作ガイド（3D 画面の右上） ===== */
+QFrame#mode_hint {{
+    background-color: {t.toast_bg};
+    border: 1px solid {t.border_strong};
+    border-radius: {t.radius_md}px;
+}}
+QLabel#mode_hint_title {{
+    color: {t.toast_info};
+    font-size: {t.size_sm}px;
+    font-weight: 700;
+    background: transparent;
+}}
+QLabel#mode_hint_body {{
+    color: {t.toast_info};
+    font-size: {t.size_xs}px;
+    background: transparent;
+}}
+
+/* ===== パネルドック（左パネル格納時）・小窓 ===== */
+QFrame#panel_dock {{
+    background-color: {t.band_bg};
+    border: 1px solid {t.border_strong};
+    border-radius: {t.radius_md}px;
+}}
+QPushButton[role="dock"] {{
+    background-color: {t.band_bg};
+    color: {t.band_text};
+    border: none;
+    border-radius: {t.radius_sm}px;
+    padding: 6px 8px;
+    min-width: 46px;
+    font-size: {t.size_xs}px;
+    font-weight: 600;
+}}
+QPushButton[role="dock"]:hover, QPushButton[role="dock"]:checked {{
+    background-color: {t.on_bg};
+    color: {t.on_text};
+}}
+QPushButton#collapsible_popout {{
+    background: transparent;
+    border: 1px solid {t.band_muted};
+    border-radius: {t.radius_sm}px;
+    color: {t.band_muted};
+    font-size: {t.size_xs}px;
+    padding: 0px 6px;
+    min-height: 18px;
+    max-height: 20px;
+}}
+QPushButton#collapsible_popout:hover {{
+    color: {t.band_text};
+    border-color: {t.band_text};
+}}
+QWidget#popout_host {{
+    background-color: {t.bg_canvas};
+}}
+
+/* ===== 操作説明書 ===== */
+QTextBrowser#manual_view {{
+    background-color: {t.bg_surface};
+    color: {t.text_primary};
+    border: 1px solid {t.border_subtle};
+    border-radius: {t.radius_md}px;
+    padding: 6px;
+    font-family: {t.font_ui};
+    font-size: {t.size_sm}px;
+}}
+QPushButton#menu_launcher_button {{
+    background-color: {t.bg_elevated};
+    color: {t.text_primary};
+    border: 1px solid {t.border_strong};
+    border-radius: {t.radius_md}px;
+    padding: 2px 12px;
+    margin: 3px 8px 3px 8px;
+    min-height: 18px;
+    font-size: {t.size_xs}px;
+    font-weight: 600;
+}}
+QPushButton#menu_launcher_button:hover {{
+    background-color: {t.hover_bg};
+    border-color: {t.accent_base};
+}}
+QListWidget#manual_topics {{
+    background-color: {t.bg_surface};
+    color: {t.text_primary};
+    border: 1px solid {t.border_subtle};
+    border-radius: {t.radius_md}px;
+    outline: none;
+    font-size: {t.size_sm}px;
+}}
+QListWidget#manual_topics::item {{
+    padding: 7px 8px;
+}}
+QListWidget#manual_topics::item:hover {{
+    background-color: {t.hover_bg};
+}}
+QListWidget#manual_topics::item:selected {{
+    background-color: {t.on_bg};
+    color: {t.on_text};
+}}
+"""
 
 
 def build_modern_qss(t: Tokens = TOKENS) -> str:
@@ -990,4 +1159,4 @@ QMessageBox QLabel {{
 QMessageBox QPushButton {{
     min-width: 84px;
 }}
-"""
+""" + _extras_qss(t)
