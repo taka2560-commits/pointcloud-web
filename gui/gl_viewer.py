@@ -232,6 +232,7 @@ class PointCloudViewer(QOpenGLWidget):
         self.overlay_box_total: int = 0                    # ボックス内にあった元ファイルの点数（間引き前）
         self.overlay_capped: bool = False                  # 上限で間引いたか
         self._overlay_box_key = None                       # 重ね描きを作ったときの断面ボックス
+        self.overlay_kind: str = ""                        # "section"（断面の読み直し）/ "lod"（視点連動の高精細表示）
         self._vbo_overlay = None
         self._vbo_overlay_colors = None
         self._vbo_overlay_dirty = True
@@ -1002,9 +1003,12 @@ class PointCloudViewer(QOpenGLWidget):
                 detail_tag = ""
             overlay_tag = ""
             if self.overlay_points is not None and len(self.overlay_points) > 0:
-                overlay_tag = f"  ｜  🔍 元ファイルから{len(self.overlay_points):,}点を重ね描き"
-                if self.overlay_capped:
-                    overlay_tag += f" (ボックス内{self.overlay_box_total:,}点を上限で間引き)"
+                if self.overlay_kind == "lod":
+                    overlay_tag = f"  ｜  🔍 高精細(LOD) {len(self.overlay_points):,}点"
+                else:
+                    overlay_tag = f"  ｜  🔍 元ファイルから{len(self.overlay_points):,}点を重ね描き"
+                    if self.overlay_capped:
+                        overlay_tag += f" (ボックス内{self.overlay_box_total:,}点を上限で間引き)"
             sec_text = f"📐 断面シーク中{guide_tag}  ｜  {'  /  '.join(sec_parts)}  ｜  表示: {vis_cnt:,}点{detail_tag}{overlay_tag}"
 
             font_sec = QFont("Segoe UI", 9, QFont.Bold)
@@ -1796,7 +1800,9 @@ class PointCloudViewer(QOpenGLWidget):
             assert self.overlay_points.shape == (n_ov, 3), f"overlay_pointsの形状が不正です: {self.overlay_points.shape}"
             assert self.overlay_colors is not None and len(self.overlay_colors) == n_ov, "overlay_pointsとoverlay_colorsの長さが不一致です"
             assert not np.any(np.isnan(self.overlay_points)), "overlay_pointsにNaNが含まれています"
-            assert self.is_section_active(), "断面が無効なのに重ね描き(overlay_points)が残っています"
+            assert self.overlay_kind in ("section", "lod"), f"重ね描きの種別が不正です: {self.overlay_kind!r}"
+            if self.overlay_kind == "section":
+                assert self.is_section_active(), "断面が無効なのに断面の重ね描き(overlay_points)が残っています"
             assert self._overlay_box_key == self._section_box_key(), "重ね描きが現在の断面ボックスと一致していません"
 
     # --- レイヤー管理メソッド (マルチレイヤー・ロック・スキャン・プロジェクト保存対応) ---
@@ -2467,8 +2473,60 @@ class PointCloudViewer(QOpenGLWidget):
         self.overlay_box_total = int(n_in_box)
         self.overlay_capped = bool(capped)
         self._overlay_box_key = self._section_box_key()
+        self.overlay_kind = "section"
         self._recolor_overlay()
         self.update()
+
+    def set_view_overlay(
+        self,
+        points_centered: np.ndarray,
+        colors: Optional[np.ndarray] = None,
+        intensities: Optional[np.ndarray] = None,
+        n_total: int = 0,
+        capped: bool = False,
+    ):
+        """
+        視点連動の高精細表示（LOD）の点を表示専用に重ね描きする。points_centered は中心オフセット済みの float32 (M, 3)。
+        断面が無くても表示できる。断面ボックスが変わる・点群を入れ替えると消える（作り直しは gui/lod_controller.py）。
+        """
+        if self.points_centered is None or points_centered is None or len(points_centered) == 0:
+            self.clear_section_overlay()
+            self.update()
+            return
+        pts_c = np.ascontiguousarray(points_centered, dtype=np.float32)
+        n = len(pts_c)
+        rgb = np.asarray(colors, dtype=np.float32) if colors is not None else None
+        if rgb is not None and rgb.shape != (n, 3):
+            rgb = None
+        ints = np.asarray(intensities, dtype=np.float32) if intensities is not None else None
+        if ints is not None and ints.shape != (n,):
+            ints = None
+        self._overlay_source = (pts_c, rgb, ints, None)
+        self.overlay_points = pts_c
+        self.overlay_box_total = int(n_total)
+        self.overlay_capped = bool(capped)
+        self._overlay_box_key = self._section_box_key()
+        self.overlay_kind = "lod"
+        self._recolor_overlay()
+        self.update()
+
+    def camera_mvp(self) -> Tuple[np.ndarray, int, int]:
+        """
+        現在のカメラの (投影 × ビュー行列 4×4, 幅 px, 高さ px)。paintGL と同じ投影。clip = mvp @ [x, y, z, 1]
+        （x, y, z は中心オフセット済み座標）。高精細表示（LOD）が画面に入る範囲と広さを求めるのに使う。
+        """
+        w, h = max(1, self.width()), max(1, self.height())
+        aspect = w / h
+        near_plane = max(0.1, self.camera_distance * 0.01)
+        far_plane = max(500.0, self.camera_distance * 50.0)
+        proj = QMatrix4x4()
+        if self.is_orthographic:
+            ortho_size = max(0.5, self.camera_distance * 0.35)
+            proj.ortho(-ortho_size * aspect, ortho_size * aspect, -ortho_size, ortho_size, -far_plane, far_plane)
+        else:
+            proj.perspective(self.fov, aspect, near_plane, far_plane)
+        m = proj * self._get_view_matrix()
+        return np.array(m.copyDataTo(), dtype=np.float64).reshape(4, 4), int(w), int(h)
 
     def clear_section_overlay(self):
         """重ね描きを消す（断面ボックスの変更・断面解除・点群入替・ユーザー操作）"""
@@ -2480,6 +2538,7 @@ class PointCloudViewer(QOpenGLWidget):
         self.overlay_box_total = 0
         self.overlay_capped = False
         self._overlay_box_key = None
+        self.overlay_kind = ""
         self._vbo_overlay_dirty = True
 
     def _drop_overlay_if_box_changed(self):
@@ -2521,7 +2580,8 @@ class PointCloudViewer(QOpenGLWidget):
         else:
             cols = np.tile(np.asarray([0.3, 0.8, 0.95], dtype=np.float32), (n, 1))
 
-        if getattr(self, "shading_enabled", False):
+        # 陰影は「隣の点＝スキャン順で隣」を前提にした計算なので、空間順に並べ替えた LOD の重ね描きには掛けない
+        if getattr(self, "shading_enabled", False) and self.overlay_kind != "lod":
             shade = self._shading_factors_of(pts_c, _t_int() if ints is not None else None)
             factor = 1.0 + (shade - 1.0) * float(getattr(self, "shading_strength", 0.65))
             cols = np.clip(cols * factor[:, np.newaxis], 0.0, 1.0)

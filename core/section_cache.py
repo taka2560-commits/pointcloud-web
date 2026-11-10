@@ -97,6 +97,14 @@ class CachedScan:
             dtype=np.float64,
         )
 
+    def load_chunk_raw(self, k: int) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+        """チャンク k を (ローカル座標 float64 (n,3), 色 uint8 (n,3) or None, 強度 float16 (n,) or None) で返す（LOD 作成用）"""
+        a, b = self.chunk_slice(k)
+        local = local_from_stored(self.xyz[a:b], self.xyz_kind, self.xyz_scale, self.xyz_offset)
+        rgb = np.asarray(self.rgb[a:b]) if self.rgb is not None else None
+        ints = np.asarray(self.intensity[a:b]) if self.intensity is not None else None
+        return local, rgb, ints
+
     def load_chunk(self, k: int) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         """チャンク k を (ローカル座標 float64 (n,3), 色 float32 0〜1 or None, 強度 float32 or None) で返す"""
         a, b = self.chunk_slice(k)
