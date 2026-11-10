@@ -302,6 +302,156 @@ def _chunk_colors(chunk: Dict[str, np.ndarray], n: int, divisor: float) -> np.nd
     return cols
 
 
+def _decode_scan_chunks(s, cache: Optional[SectionCache], chunk_size: int, state: Dict[str, bool]):
+    """
+    1 スキャンを元ファイルからデコードして (ローカル座標 float64 (n,3), 色 0〜1 or None, 強度 or None, 読んだ点数) を
+    チャンクごとに返すジェネレータ。cache が書き込み可能ならキャッシュへも書く。
+    読み切ったら確定して state["built"]=True、途中で止まれば（例外・close）書きかけの部分ファイルを消す。
+    state["building"] は書き込み中かどうか（進捗メッセージ用）。
+    """
+    schemas = s.field_schemas
+    has_rgb = all(k in schemas for k in _RGB)
+    has_int = "intensity" in schemas
+    name = s.name or f"Scan {s.scan_index}"
+    n_declared = int(getattr(s, "original_point_count", len(s.points)))
+    fields = list(_CARTESIAN) + (list(_RGB) if has_rgb else []) + (["intensity"] if has_int else [])
+    divisor = color_divisor(s) if has_rgb else 1.0
+    # 座標の持ち方は元ファイルの定義で決める（生整数ならそのまま保持し、全点読込と同じ式で復元 → ビット単位で一致）
+    xyz_kind, xyz_scale, xyz_offset = _xyz_storage_kind(e57_point_field_schemas(s.source_file, int(s.source_scan_index)))
+    raw_xyz = xyz_kind in ("int32", "int64")
+    writer = None
+    if cache is not None and cache.can_write(n_declared, xyz_kind):
+        writer = cache.writer(int(s.source_scan_index), n_declared, has_rgb, has_int, xyz_kind, xyz_scale, xyz_offset)
+    state["building"] = writer is not None
+    completed = False
+    try:
+        for chunk in iter_e57_point_chunks(
+            s.source_file, int(s.source_scan_index), fields, chunk_size=chunk_size, raw_fields=(_CARTESIAN if raw_xyz else None)
+        ):
+            cx = chunk.get("cartesianX")
+            if cx is None or "cartesianY" not in chunk or "cartesianZ" not in chunk:
+                raise ValueError(f"スキャン「{name}」の読み直しで直交座標が読めませんでした: {s.source_file}")
+            n_chunk = len(cx)
+            if raw_xyz:
+                store = np.column_stack([chunk[k] for k in _CARTESIAN]).astype(np.int64, copy=False)
+                local = local_from_stored(store, "int64", xyz_scale, xyz_offset)
+                if xyz_kind == "int32":
+                    store = store.astype(np.int32)
+            else:
+                store_dtype = np.float32 if xyz_kind == "float32" else np.float64
+                store = np.column_stack([np.asarray(chunk[k], dtype=store_dtype) for k in _CARTESIAN])
+                local = store.astype(np.float64) if store_dtype != np.float64 else store
+                finite = np.isfinite(local).all(axis=1)
+                if not finite.all():
+                    keep = np.flatnonzero(finite)
+                    store = store[keep]
+                    local = local[keep]
+                    chunk = {k: v[keep] for k, v in chunk.items()}
+            n_fin = len(local)
+            rgb01 = _chunk_colors(chunk, n_fin, divisor) if (has_rgb and (writer is not None or n_fin > 0)) else None
+            ints = None
+            if has_int:
+                ints = np.asarray(chunk["intensity"], dtype=np.float32)
+                if not np.isfinite(ints).all():
+                    ints = np.nan_to_num(ints, nan=0.0, posinf=0.0, neginf=0.0)
+            if writer is not None:
+                try:
+                    writer.add(store, local, rgb01, ints)
+                except (OSError, ValueError) as e:
+                    log_warning(f"読み直しキャッシュの書き込みに失敗したためキャッシュ無しで続けます: {e}")
+                    writer.abort()
+                    writer = None
+                    state["building"] = False
+            del chunk, store
+            yield local, rgb01, ints, n_chunk
+        completed = True
+    finally:
+        if writer is not None:
+            if completed:
+                try:
+                    writer.finish()
+                    state["built"] = True
+                except (OSError, ValueError) as e:
+                    log_warning(f"読み直しキャッシュの確定に失敗しました（次回はデコードします）: {e}")
+                    writer.abort()
+            else:
+                writer.abort()
+        state["building"] = False
+
+
+def ensure_section_cache(
+    scans: Sequence,
+    cache_dir: Optional[str] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+) -> Dict[str, object]:
+    """
+    読み込み済みスキャンの読み込み元すべてについて、読み直しキャッシュを揃える（無いスキャンだけデコードして書く）。
+    LOD データ（core/lod_store.py）を作る前提として使う。書けない場合（読み取り専用・空き容量不足）は RuntimeError。
+    戻り値: {"built": 今回書いたスキャン数, "already": 既にあったスキャン数, "cache_dirs": [...], "cache_bytes": 合計バイト}
+    """
+    scans = [
+        s for s in scans
+        if not getattr(s, "is_spherical_only", False) and all(k in (getattr(s, "field_schemas", {}) or {}) for k in _CARTESIAN)
+    ]
+    if not scans:
+        raise ValueError("直交座標を持つスキャンがありません。")
+    validate_reload_sources(scans)
+    caches: Dict[str, SectionCache] = {}
+    todo: List[Tuple[object, SectionCache]] = []
+    already = 0
+    for s in scans:
+        key = os.path.abspath(s.source_file)
+        if key not in caches:
+            cache = SectionCache.open(s.source_file, cache_dir=cache_dir, create=True)
+            if cache is None:
+                raise RuntimeError(f"読み直しキャッシュのフォルダを作れません: {s.source_file}")
+            caches[key] = cache
+        cache = caches[key]
+        if cache.has_scan(int(s.source_scan_index)) and cache.scan(int(s.source_scan_index)) is not None:
+            already += 1
+        else:
+            todo.append((s, cache))
+    total = sum(int(getattr(s, "original_point_count", len(s.points))) for s, _ in todo)
+    done = 0
+    built = 0
+    for s, cache in todo:
+        name = s.name or f"Scan {s.scan_index}"
+        n_declared = int(getattr(s, "original_point_count", len(s.points)))
+        state = {"built": False, "building": False}
+        base = done
+        scan_read = 0
+        gen = _decode_scan_chunks(s, cache, chunk_size, state)
+        try:
+            for _local, _rgb, _ints, n_chunk in gen:
+                if is_cancelled is not None and is_cancelled():
+                    raise InterruptedError("キャッシュ作成がユーザーによって中止されました。")
+                if not state["building"]:
+                    raise RuntimeError(
+                        f"読み直しキャッシュを書き込めません（空き容量不足か書き込み不可）: {cache.directory}"
+                    )
+                scan_read += n_chunk
+                done = base + min(n_declared, scan_read)
+                if progress_callback is not None:
+                    progress_callback(
+                        min(1.0, done / total) if total > 0 else 1.0,
+                        f"スキャン「{name}」を元ファイルからデコードしてキャッシュ作成中 ({scan_read:,}/{n_declared:,} 点)",
+                    )
+        finally:
+            gen.close()
+        if not state["built"]:
+            raise RuntimeError(f"読み直しキャッシュを作成できませんでした: {cache.directory}")
+        built += 1
+        done = base + n_declared
+    return {
+        "built": built,
+        "already": already,
+        "cache_dirs": [c.directory for c in caches.values()],
+        "cache_bytes": int(sum(c.total_bytes() for c in caches.values())),
+    }
+
+
 def reload_section_points(
     scans: Sequence,
     box: SectionBox,
@@ -422,57 +572,13 @@ def reload_section_points(
             continue
 
         # --- 元ファイルをデコード（可能ならキャッシュも書く） ---
-        fields = list(_CARTESIAN) + (list(_RGB) if has_rgb else []) + (["intensity"] if has_int else [])
-        divisor = color_divisor(s) if has_rgb else 1.0
-        # 座標の持ち方は元ファイルの定義で決める（生整数ならそのまま保持し、全点読込と同じ式で復元 → ビット単位で一致）
-        xyz_kind, xyz_scale, xyz_offset = _xyz_storage_kind(e57_point_field_schemas(s.source_file, int(s.source_scan_index)))
-        raw_xyz = xyz_kind in ("int32", "int64")
-        writer = None
-        if cache is not None and cache.can_write(n_declared, xyz_kind):
-            writer = cache.writer(int(s.source_scan_index), n_declared, has_rgb, has_int, xyz_kind, xyz_scale, xyz_offset)
-        building = writer is not None
-        verb = "元ファイルから読み直し＋キャッシュ作成中" if building else "元ファイルから読み直し中"
-        _report(f"スキャン「{name}」を{verb} (0/{n_declared:,} 点)")
+        state = {"built": False, "building": False}
+        _report(f"スキャン「{name}」を元ファイルから読み直し中 (0/{n_declared:,} 点)")
         scan_read = 0
+        gen = _decode_scan_chunks(s, cache, chunk_size, state)
         try:
-            for chunk in iter_e57_point_chunks(
-                s.source_file, int(s.source_scan_index), fields, chunk_size=chunk_size, raw_fields=(_CARTESIAN if raw_xyz else None)
-            ):
+            for local, rgb01, ints, n_chunk in gen:
                 _check()
-                cx = chunk.get("cartesianX")
-                if cx is None or "cartesianY" not in chunk or "cartesianZ" not in chunk:
-                    raise ValueError(f"スキャン「{name}」の読み直しで直交座標が読めませんでした: {s.source_file}")
-                n_chunk = len(cx)
-                if raw_xyz:
-                    store = np.column_stack([chunk[k] for k in _CARTESIAN]).astype(np.int64, copy=False)
-                    local = local_from_stored(store, "int64", xyz_scale, xyz_offset)
-                    if xyz_kind == "int32":
-                        store = store.astype(np.int32)
-                else:
-                    store_dtype = np.float32 if xyz_kind == "float32" else np.float64
-                    store = np.column_stack([np.asarray(chunk[k], dtype=store_dtype) for k in _CARTESIAN])
-                    local = store.astype(np.float64) if store_dtype != np.float64 else store
-                    finite = np.isfinite(local).all(axis=1)
-                    if not finite.all():
-                        keep = np.flatnonzero(finite)
-                        store = store[keep]
-                        local = local[keep]
-                        chunk = {k: v[keep] for k, v in chunk.items()}
-                n_fin = len(local)
-                rgb01 = _chunk_colors(chunk, n_fin, divisor) if (has_rgb and (building or n_fin > 0)) else None
-                ints = None
-                if has_int:
-                    ints = np.asarray(chunk["intensity"], dtype=np.float32)
-                    if not np.isfinite(ints).all():
-                        ints = np.nan_to_num(ints, nan=0.0, posinf=0.0, neginf=0.0)
-                if writer is not None:
-                    try:
-                        writer.add(store, local, rgb01, ints)
-                    except (OSError, ValueError) as e:
-                        log_warning(f"読み直しキャッシュの書き込みに失敗したためキャッシュ無しで続けます: {e}")
-                        writer.abort()
-                        writer = None
-                        building = False
                 disp = to_display_coordinates(s, local)
                 sel = np.flatnonzero(box.contains(disp))
                 n_read += n_chunk
@@ -485,20 +591,14 @@ def reload_section_points(
                         ints[sel] if ints is not None else None,
                         s_idx,
                     )
-                del chunk, local, disp, store
+                del local, disp
                 done_weight = scan_start_weight + min(n_declared, scan_read)
+                verb = "元ファイルから読み直し＋キャッシュ作成中" if state["building"] else "元ファイルから読み直し中"
                 _report(f"スキャン「{name}」を{verb} ({scan_read:,}/{n_declared:,} 点, ボックス内 {n_in_box:,} 点)")
-        except BaseException:
-            if writer is not None:
-                writer.abort()
-            raise
-        if writer is not None:
-            try:
-                writer.finish()
-                cache_built += 1
-            except (OSError, ValueError) as e:
-                log_warning(f"読み直しキャッシュの確定に失敗しました（次回はデコードします）: {e}")
-                writer.abort()
+        finally:
+            gen.close()  # 途中で止まった場合（中止・例外）は書きかけのキャッシュを消す
+        if state["built"]:
+            cache_built += 1
         done_weight = scan_start_weight + n_declared
 
     pts, cols, ints, sids = acc.finish()

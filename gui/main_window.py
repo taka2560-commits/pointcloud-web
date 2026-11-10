@@ -49,6 +49,7 @@ from core.processor import (
 )
 from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 from core.section_reload import SectionBox, reload_section_points
+from core.lod_store import BYTES_PER_POINT as LOD_BYTES_PER_POINT, prepare_lod_for_scans
 from core.logger import log_info, log_warning, log_error, log_exception, open_log_folder
 from core.filters import (
     segment_ground_points,
@@ -790,6 +791,18 @@ class MainWindow(QMainWindow):
         self.btn_sec_reload_clear.clicked.connect(self._on_section_overlay_clear_clicked)
         sec_reload_row.addWidget(self.btn_sec_reload_clear)
         sec_layout.addLayout(sec_reload_row)
+
+        # 視点連動の高精細表示（LOD）: 視点が止まると、見えている範囲を元ファイルの密度で重ね描きする（gui/lod_controller.py）
+        self.chk_lod = QCheckBox("🔎 高精細表示 (LOD): 止まると元ファイルの密度で描く")
+        self.chk_lod.setChecked(False)
+        self.chk_lod.setToolTip(
+            "ONにすると、視点が止まるたびに、画面に入っている範囲を元ファイルの密度で読み込んで重ね描きします"
+            "（近く・大きく見えている所ほど細かく、全体で 600 万点まで）。断面が有効なら箱の中だけを読みます。\n"
+            "初回はファイルごとに LOD データを作成します（1 点 17 バイト。5 億点で約 9GB、数分。元ファイルの横の .cache フォルダ）。\n"
+            "重ね描きは表示専用です（選択・ノイズ移動・計測の対象外）。ノイズとして消した点の周りは重ね描きからも隠します"
+        )
+        self.chk_lod.toggled.connect(self._on_lod_toggled)
+        sec_layout.addWidget(self.chk_lod)
 
         # ② 現在見ている場所/選択点を一発でシーク基点にセット & シーク時のカメラ追従
         sec_focus_row = QHBoxLayout()
@@ -1995,6 +2008,11 @@ class MainWindow(QMainWindow):
         self.viewer.brush_radius_changed.connect(self._on_viewer_brush_radius_changed)
         self.viewer.wall_aligned.connect(self._on_wall_aligned)
         self.viewer.section_guides_changed.connect(self._on_viewer_section_guides_changed)
+        # 視点連動の高精細表示（LOD）。有効化は断面パネルのチェックボックス（_on_lod_toggled）
+        from gui.lod_controller import LodController
+
+        self.lod = LodController(self.viewer, self)
+        self.lod.status_changed.connect(lambda msg: self.status_label.setText(msg))
         right_layout.addWidget(self.viewer, 1)
 
         # ★ 柱② & 柱④: 3Dビューア下部 ボトムアクションバー (選択時クイック操作 + トースト通知表示)
@@ -3154,6 +3172,8 @@ class MainWindow(QMainWindow):
             s.setValue("sec_step_idx", self.combo_sec_step.currentIndex())
         if hasattr(self, "chk_sec_full_detail"):
             s.setValue("sec_full_detail", self.chk_sec_full_detail.isChecked())
+        if hasattr(self, "chk_lod"):
+            s.setValue("lod_enabled", self.chk_lod.isChecked())
         if hasattr(self, "combo_load_budget"):
             s.setValue("load_budget_idx", self.combo_load_budget.currentIndex())
         if hasattr(self, "combo_undo_limit"):
@@ -3236,6 +3256,8 @@ class MainWindow(QMainWindow):
 
             if hasattr(self, "chk_sec_full_detail"):
                 self.chk_sec_full_detail.setChecked(s.value("sec_full_detail", True, type=bool))
+            if hasattr(self, "chk_lod"):
+                self.chk_lod.setChecked(s.value("lod_enabled", False, type=bool))
 
             undo_idx = s.value("undo_limit_idx", 1, type=int)
             if hasattr(self, "combo_undo_limit") and 0 <= undo_idx < self.combo_undo_limit.count():
@@ -3309,6 +3331,8 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "chk_sec_full_detail"):
             self.chk_sec_full_detail.setChecked(True)
+        if hasattr(self, "chk_lod"):
+            self.chk_lod.setChecked(False)
 
         if hasattr(self, "combo_load_budget"):
             self.combo_load_budget.setCurrentIndex(0)
@@ -3348,6 +3372,8 @@ class MainWindow(QMainWindow):
                     log_warning(f"{type(w).__name__} が 5 秒以内に停止しなかったため強制終了します")
                     w.terminate()
                     w.wait()
+        if hasattr(self, "lod"):
+            self.lod.shutdown()
         super().closeEvent(event)
 
     def show_toast(self, message: str, duration_ms: int = 2600):
@@ -4222,6 +4248,87 @@ class MainWindow(QMainWindow):
         self.viewer.update()
         self.show_toast("🔍 元ファイルの重ね描きを消しました")
 
+    # --- 視点連動の高精細表示（LOD） ---
+    def _set_lod_checked_silently(self, checked: bool):
+        self.chk_lod.blockSignals(True)
+        self.chk_lod.setChecked(checked)
+        self.chk_lod.blockSignals(False)
+
+    def _on_lod_toggled(self, checked: bool):
+        """高精細表示 (LOD) の ON/OFF。LOD データが無ければ確認のうえ作成する（バックグラウンド・中止可）"""
+        if not checked:
+            self.lod.set_enabled(False)
+            self.lod.detach()
+            return
+        if self.viewer.points_raw is None or len(self.viewer.points_raw) == 0 or not self.current_scans:
+            return  # 点群が無い間はチェックだけ覚えておき、読み込み後に _lod_after_load で有効にする
+        if not all(getattr(s, "source_file", None) for s in self.current_scans):
+            self.show_toast("読み込み元ファイルの記録が無いため高精細表示は使えません（ファイルから開いた点群だけが対象です）")
+            self._set_lod_checked_silently(False)
+            return
+        if self.lod.attach(self.current_scans):
+            self.lod.set_enabled(True)
+            self.show_toast(f"🔎 高精細表示 (LOD): ON（元ファイル {self.lod.scene.n_points:,} 点。視点が止まると読み込みます）")
+            return
+        # LOD データが無い → 作成の確認
+        n_total = sum(int(getattr(s, "original_point_count", s.point_count)) for s in self.current_scans)
+        est_gb = n_total * LOD_BYTES_PER_POINT / 1e9
+        reply = QMessageBox.question(
+            self,
+            "高精細表示 (LOD) データの作成",
+            f"このファイルの LOD データがまだありません。作成しますか？\n\n"
+            f"・元ファイル {n_total:,} 点を空間順に並べ替えたデータを、元ファイルの横の .cache フォルダに作ります\n"
+            f"・大きさ: 約 {est_gb:.1f}GB（読み直しキャッシュが未作成ならさらに同じだけ必要です）\n"
+            f"・時間: 1 億点あたり 1〜2 分（キャッシュが未作成なら元ファイルのデコードぶんが加わります）\n\n"
+            f"作成は 1 回だけで、次回からはすぐ使えます。途中で中止できます。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            self._set_lod_checked_silently(False)
+            return
+        scans_at_start = self.current_scans
+
+        def on_done(result):
+            if self.current_scans is not scans_at_start or not self.chk_lod.isChecked():
+                return
+            if self.lod.attach(self.current_scans):
+                self.lod.set_enabled(True)
+                msg = f"高精細表示 (LOD) データを作成しました: {result['bytes'] / 1e9:.2f}GB, {result['elapsed_sec']:.0f} 秒"
+                self.log_text.append(msg)
+                self.show_toast(f"🔎 {msg}", 5000)
+            else:
+                self._set_lod_checked_silently(False)
+                self.show_toast("⚠️ LOD データを開けませんでした")
+
+        started = self._run_in_background(
+            "高精細表示 (LOD) データの作成",
+            f"{n_total:,} 点を空間順に並べ替えています（約 {est_gb:.1f}GB）",
+            prepare_lod_for_scans,
+            self.current_scans,
+            on_success=on_done,
+        )
+        if not started:
+            self._set_lod_checked_silently(False)
+            return
+        # 中止・エラーのときはチェックを戻す
+        self.func_worker.cancelled.connect(lambda: self._set_lod_checked_silently(False))
+        self.func_worker.finished_error.connect(lambda _msg: self._set_lod_checked_silently(False))
+
+    def _lod_after_load(self):
+        """点群を読み込んだ直後: 高精細表示が ON なら、LOD データのあるファイルは自動で有効にする（無ければ OFF に戻す）"""
+        if not hasattr(self, "lod") or not hasattr(self, "chk_lod"):
+            return
+        self.lod.set_enabled(False)
+        self.lod.detach()
+        if not self.chk_lod.isChecked():
+            return
+        if self.current_scans and all(getattr(s, "source_file", None) for s in self.current_scans) and self.lod.attach(self.current_scans):
+            self.lod.set_enabled(True)
+            return
+        self._set_lod_checked_silently(False)
+        self.show_toast("高精細表示 (LOD): このファイルの LOD データは未作成です（チェックを入れ直すと作成します）", 4000)
+
     def _on_viewer_section_guides_changed(self, show_origin: bool, show_box: bool):
         """ビューア側（Bキーなど）の枠表示状態をGUIチェックボックスへ反映"""
         self.chk_sec_show_origin.blockSignals(True)
@@ -4845,6 +4952,7 @@ class MainWindow(QMainWindow):
 
             # 0ミリ秒で高速バインド (UIフリーズなし)
             self.viewer.set_preloaded_data(preloaded, reset_camera=True)
+            self._lod_after_load()
 
             # 初期配色モードの自動適用
             def_mode = getattr(self.viewer, "default_color_mode", PointCloudViewer.COLOR_MODE_RGB)
