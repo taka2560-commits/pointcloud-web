@@ -28,7 +28,15 @@ from core.processor import (
 )
 from core.filters import keep_largest_clusters
 from core.e57_io import E57ScanData, E57StreamWriter, file_signature, read_e57_scans, write_e57_scans
-from core.fullres_transfer import ORPHAN_LABEL, TransferStats, estimate_stride, labels_from_masks, transfer_labels
+from core.fullres_transfer import ORPHAN_LABEL, LabelTransfer, TransferStats, estimate_stride, labels_from_masks
+from core.e57_stream import (
+    DEFAULT_STREAM_CHUNK,
+    E57SchemaBoundsError,
+    ScanStreamSink,
+    iter_scan_stream_chunks,
+    measure_field_ranges,
+    scan_stream_template,
+)
 
 
 def collect_e57_files(path: str) -> List[str]:
@@ -683,10 +691,14 @@ class FullResolutionSaveWorker(QThread):
     """
     全点転写保存: 間引き読込（1 億点超のメモリ保護）で決めたノイズ判定を、元ファイルの全点へ写して E57 出力する。
 
-    手順（スキャンごとに繰り返すので、メモリは「読み込んでいる間引き点群 + 1 スキャンの全点」で済む）
-      1. 元ファイルからそのスキャンだけを全点で読み直す（read_e57_scans(scan_indices=[...])）
-      2. 読み込んでいる間引き点群（判定点）のラベルを、最近傍の判定点から全点へ写す（core.fullres_transfer）
-      3. 保存対象の点だけを抜き出して E57StreamWriter で追記する（生の整数・スケール・pose はそのまま）
+    手順（スキャンごとに、100 万点ずつ流して行う。メモリは「読み込んでいる間引き点群 + チャンク数個」で済み、
+    1 スキャンが 5 億点を超えても足りる。以前は 1 スキャンの全点を一度に読んでいたので、5.4 億点・1 スキャンの
+    ファイルでは約 89GB が要り、32GB の PC では保存できなかった）
+      1. 元ファイルからそのスキャンを 100 万点ずつ読む（core.e57_stream.iter_scan_stream_chunks）
+      2. 読み込んでいる間引き点群（判定点）のラベルを、最近傍の判定点からその点へ写す（core.fullres_transfer.LabelTransfer）
+      3. 保存対象の点だけを、出力のスキャンへそのまま追記する（core.e57_stream.ScanStreamSink。生の整数・スケール・
+         pose・メタデータはそのまま。出力は以前の「全点を読んでから書く」方式と同じになる）
+    元ファイルの値がプロトタイプの範囲を外れていたときは、範囲を測ってから最初から書き直す（まれ）。
     判定点の座標は取り込み時の座標系変換を外してから使う（元ファイルと同じローカル座標で照合する）。
     元ファイルが読込後に変更されていたら（サイズか更新時刻の不一致）保存しない。
     中止は転写のチャンク境界とスキャン境界で反映され、書きかけの一時ファイルは消される。
@@ -753,8 +765,18 @@ class FullResolutionSaveWorker(QThread):
             self.finished_error.emit(str(e))
 
     def _run_save(self):
+        try:
+            self._run_save_once(measure_ranges=False)
+        except E57SchemaBoundsError as exc:
+            # 元ファイルの値がそのファイル自身のプロトタイプの範囲を外れていた（まれ）。範囲を測って最初から書き直す
+            log_warning(f"全点で保存: {exc} 各スキャンの値の範囲を測ってから、最初から書き直します。")
+            self._run_save_once(measure_ranges=True)
+
+    def _run_save_once(self, measure_ranges: bool):
         t0 = time.perf_counter()
         self._validate_sources()
+        self.scan_stats = []
+        self.total_orphans = 0
 
         # 判定点のラベル: 単一ファイルは 1=保存 / 0=除外、分割保存はレイヤー番号（どれにも入らなければ除外）
         if self.split_masks:
@@ -772,14 +794,26 @@ class FullResolutionSaveWorker(QThread):
         writers: Dict[int, E57StreamWriter] = {}
         writer_paths: Dict[int, str] = {}
         used_out_files: set = set()
+        open_sinks: List[ScanStreamSink] = []
         total_saved = 0
         total_excluded = 0
         self.total_full_points = sum(int(getattr(s, "original_point_count", len(s.points))) for s in self.scans)
         done_full = 0
         offset = 0
+        chunk = int(getattr(self, "stream_chunk_size", DEFAULT_STREAM_CHUNK))
 
         def pct_of(done: int) -> int:
             return int(5 + 90 * (done / max(1, self.total_full_points)))
+
+        def writer_for(li: int) -> E57StreamWriter:
+            if li not in writers:
+                if self.split_masks:
+                    out_file = split_output_path(base_path, ext, layer_names[li], li, used_out_files)
+                else:
+                    out_file = self.output_path
+                writer_paths[li] = out_file
+                writers[li] = E57StreamWriter(out_file)
+            return writers[li]
 
         try:
             for s in self.scans:
@@ -789,78 +823,64 @@ class FullResolutionSaveWorker(QThread):
                 self._check_cancelled()
                 name = s.name or f"Scan {s.scan_index}"
                 n_orig = int(getattr(s, "original_point_count", n_j))
+                tpl = scan_stream_template(s.source_file, int(s.source_scan_index))
 
-                self.progress_changed.emit(
-                    pct_of(done_full), f"スキャン「{name}」を全点で読み直し中...", f"{n_orig:,} 点 / 判定点 {n_j:,} 点"
-                )
-                full_list = read_e57_scans(s.source_file, point_budget=None, scan_indices=[int(s.source_scan_index)])
-                if not full_list:
-                    raise RuntimeError(f"読み込み元ファイルにスキャン #{s.source_scan_index} が見つかりません: {s.source_file}")
-                full = full_list[0]
-                del full_list
-                n_full = len(full.points)
-                if s._name:
-                    full.name = s._name  # 複数ファイル統合時の「ファイル名 / スキャン名」を引き継ぐ
+                if measure_ranges:
+                    self.progress_changed.emit(
+                        pct_of(done_full), f"スキャン「{name}」の値の範囲を確認中...", f"{n_orig:,} 点"
+                    )
+                    tpl.bounds_override = measure_field_ranges(tpl, chunk, is_cancelled=lambda: self._is_cancelled)
 
-                self._check_cancelled()
-                base_pct = pct_of(done_full)
-                span = max(1, pct_of(done_full + n_full) - base_pct)
                 if n_j == 0:
-                    log_warning(f"全点転写: スキャン「{name}」は判定点が 0 点のため、{n_full:,} 点すべてを除外します。")
-                    labels_full = np.full(n_full, ORPHAN_LABEL, dtype=np.int32)
-                    stats = TransferStats(n_full=n_full, n_judged=0, n_orphan=n_full)
+                    log_warning(f"全点転写: スキャン「{name}」は判定点が 0 点のため、{n_orig:,} 点すべてを除外します。")
+                    judged_local = np.empty((0, 3), dtype=np.float64)
                 else:
                     judged_local = (
                         s.points
                         if is_identity_coord_mode(getattr(s, "coord_mode", "cartesian"))
                         else inverse_transform_coordinate_system(s.points, s.coord_mode)
                     )
+                lt = LabelTransfer(judged_local, labels_j, estimate_stride(n_orig, n_j))
+                del judged_local
 
-                    def on_transfer_progress(done_pts: int, total_pts: int, _b=base_pct, _s=span, _n=name):
-                        self.progress_changed.emit(
-                            int(_b + _s * 0.6 * done_pts / max(1, total_pts)),
-                            f"スキャン「{_n}」の判定を全点へ転写中...",
-                            f"{done_pts:,} / {total_pts:,} 点",
-                        )
-
-                    labels_full, stats = transfer_labels(
-                        judged_local,
-                        labels_j,
-                        full.points,
-                        stride=estimate_stride(n_orig, n_j),
-                        is_cancelled=lambda: self._is_cancelled,
-                        progress=on_transfer_progress,
+                sinks: Dict[int, ScanStreamSink] = {}
+                n_full = 0
+                self.progress_changed.emit(
+                    pct_of(done_full), f"スキャン「{name}」を全点で読み直し、判定を転写中...", f"0 / {n_orig:,} 点"
+                )
+                for raw, xyz in iter_scan_stream_chunks(tpl, chunk, is_cancelled=lambda: self._is_cancelled):
+                    self._check_cancelled()
+                    labels = lt.labels_for(xyz)
+                    targets = (
+                        [int(v) for v in np.unique(labels) if v >= 0] if self.split_masks
+                        else ([self.KEEP_LABEL] if np.any(labels == self.KEEP_LABEL) else [])
                     )
-                    del judged_local
+                    for li in targets:
+                        idx = np.flatnonzero(labels == li)
+                        if len(idx) == 0:
+                            continue
+                        key = li if self.split_masks else 0
+                        sink = sinks.get(key)
+                        if sink is None:
+                            sink = ScanStreamSink(writer_for(key), tpl, name_override=s._name or None, capacity=chunk)
+                            sinks[key] = sink
+                            open_sinks.append(sink)
+                        sink.write(raw, xyz, idx)
+                    n_full += len(xyz)
+                    del raw, xyz, labels
+                    self.progress_changed.emit(
+                        pct_of(done_full + n_full),
+                        f"スキャン「{name}」を全点で読み直し、判定を転写中...",
+                        f"{n_full:,} / {n_orig:,} 点",
+                    )
+
+                kept_in_scan = 0
+                for sink in sinks.values():
+                    kept_in_scan += sink.finish()
+                    open_sinks.remove(sink)
+                stats = lt.stats
                 self.scan_stats.append((name, stats))
                 self.total_orphans += int(stats.n_orphan)
-
-                self.progress_changed.emit(
-                    int(base_pct + span * 0.7),
-                    f"スキャン「{name}」を E57 に書き込み中...",
-                    f"孤立点 {stats.n_orphan:,} 点を除外",
-                )
-                kept_in_scan = 0
-                if self.split_masks:
-                    for li, layer_name in enumerate(layer_names):
-                        keep_idx = np.flatnonzero(labels_full == li)
-                        if len(keep_idx) == 0:
-                            continue
-                        if li not in writers:
-                            out_file = split_output_path(base_path, ext, layer_name, li, used_out_files)
-                            writer_paths[li] = out_file
-                            writers[li] = E57StreamWriter(out_file)
-                        writers[li].add_scan(full.filter_by_indices(keep_idx))
-                        kept_in_scan += len(keep_idx)
-                else:
-                    keep_idx = np.flatnonzero(labels_full == self.KEEP_LABEL)
-                    if len(keep_idx) > 0:
-                        if 0 not in writers:
-                            writer_paths[0] = self.output_path
-                            writers[0] = E57StreamWriter(self.output_path)
-                        writers[0].add_scan(full.filter_by_indices(keep_idx))
-                        kept_in_scan += len(keep_idx)
-
                 total_saved += kept_in_scan
                 total_excluded += n_full - kept_in_scan
                 done_full += n_full
@@ -869,10 +889,7 @@ class FullResolutionSaveWorker(QThread):
                     f" → 保存 {kept_in_scan:,} 点, 除外 {n_full - kept_in_scan:,} 点 (うち孤立点 {stats.n_orphan:,} 点,"
                     f" 引き継ぎ最大距離 {stats.max_inherit_distance:.3f}m)"
                 )
-                del full, labels_full
-                import gc
-
-                gc.collect()
+                del lt, sinks
 
             if not writers:
                 raise ValueError("保存対象レイヤーの点数が 0 点のため出力できません。")
@@ -882,6 +899,8 @@ class FullResolutionSaveWorker(QThread):
             for li in list(writers.keys()):
                 writers[li].close()
         except BaseException:
+            for sink in open_sinks:
+                sink.close_quietly()
             for w in writers.values():
                 w.abort()
             raise
