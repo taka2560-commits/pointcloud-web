@@ -710,12 +710,20 @@ class TestBugCheck20261111(_WinCase):
         QMessageBox.question = lambda *a, **k: QMessageBox.Yes
         QMessageBox.information = lambda *a, **k: QMessageBox.Ok
         try:
+            n_before = int(np.sum(~win.viewer.layer_mask))
             win._crop_outside_section()
         finally:
             QMessageBox.question, QMessageBox.information = orig_q, orig_i
+        moved = int(np.sum(~win.viewer.layer_mask)) - n_before
+        self.assertGreater(moved, 0, "断面の外に点がある配置で検査すること")
+        # クロップそのものの通知には「元に戻す」が付き、押すとクロップだけが戻る
+        self.assertIn("断面ボックス外", win.toast_label.text())
+        self.assertTrue(host.has_action(), "クロップの結果の通知に「元に戻す」が付いていません")
         QApplication.processEvents()
         win.show_toast("断面ボックス内の全点表示: OFF（表示 768 点）")
         self.assertFalse(host.has_action(), "クロップのあとの無関係な通知に「元に戻す」が付いています")
+        win.show_toast(f"{moved:,} 点をノイズレイヤーへ移動しました")  # 同じ文でも、編集の直後でなければ付けない
+        self.assertFalse(host.has_action())
 
     def test_action_toast_survives_a_modal_dialog(self):
         from PySide6.QtWidgets import QDialog
@@ -801,6 +809,14 @@ class TestBugCheck20261111(_WinCase):
         arrow.setDown(True)
         self.win.save_split.menu.aboutToHide.emit()
         self.assertFalse(arrow.isDown(), "メニューを閉じたら押下の見た目を戻す")
+
+    def test_no_deprecated_mouse_event_calls(self):
+        """QMouseEvent.pos() は Qt 6 で非推奨（警告がテストのたびに出ていた）。position().toPoint() を使う"""
+        import gui.gl_viewer as glv
+
+        src = open(glv.__file__, encoding="utf-8").read()
+        self.assertNotIn("event.pos()", src)
+        self.assertNotIn("event.globalPos()", src)
 
     def test_sidebar_fits_in_both_themes(self):
         win = self.win
