@@ -65,6 +65,60 @@ def judged_spacing(judged_local: np.ndarray, tree: Optional[cKDTree] = None, wor
     return spacing
 
 
+class LabelTransfer:
+    """
+    判定点から全点へのラベルの転写を、全点を少しずつ渡して行う（全点をメモリに載せずに保存するため）。
+    木と許容半径は最初に 1 回だけ作り、labels_for() を何回呼んでも、全点を一度に渡したときと同じラベルになる。
+    """
+
+    def __init__(
+        self,
+        judged_local: np.ndarray,
+        judged_labels: np.ndarray,
+        stride: int,
+        base_factor: float = DEFAULT_BASE_FACTOR,
+        min_radius: float = DEFAULT_MIN_RADIUS,
+        workers: int = -1,
+    ):
+        judged_local = np.ascontiguousarray(judged_local, dtype=np.float64).reshape(-1, 3)
+        judged_labels = np.asarray(judged_labels).reshape(-1)
+        if len(judged_labels) != len(judged_local):
+            raise ValueError(f"判定点の座標 {len(judged_local):,} 点とラベル {len(judged_labels):,} 個の数が一致しません。")
+        self.workers = workers
+        self.stats = TransferStats(n_judged=len(judged_local))
+        self.stats.stride = max(1, int(stride))
+        self.stats.factor = radius_factor(self.stats.stride, base_factor)
+        self._labels_j = judged_labels.astype(np.int32, copy=False)
+        self._tree: Optional[cKDTree] = None
+        self._radius: Optional[np.ndarray] = None
+        if len(judged_local) > 0:
+            self._tree = cKDTree(judged_local, balanced_tree=False, compact_nodes=False)
+            spacing = judged_spacing(judged_local, tree=self._tree, workers=workers)
+            self._radius = np.maximum(spacing * self.stats.factor, float(min_radius))
+
+    def labels_for(self, full_local: np.ndarray) -> np.ndarray:
+        """全点の一部 (n, 3) のラベル (n,) int32 を返し、集計（stats）に足す。孤立点は ORPHAN_LABEL"""
+        full_local = np.ascontiguousarray(full_local, dtype=np.float64).reshape(-1, 3)
+        n = len(full_local)
+        labels = np.full(n, ORPHAN_LABEL, dtype=np.int32)
+        st = self.stats
+        st.n_full += n
+        if n == 0:
+            return labels
+        if self._tree is None:
+            st.n_orphan += n
+            return labels
+        d, idx = self._tree.query(full_local, k=1, workers=self.workers)
+        inherit = d <= self._radius[idx]
+        labels[inherit] = self._labels_j[idx[inherit]]
+        n_inherit = int(np.count_nonzero(inherit))
+        if n_inherit:
+            st.max_inherit_distance = max(st.max_inherit_distance, float(np.max(d[inherit])))
+        st.n_inherited += n_inherit
+        st.n_orphan += n - n_inherit
+        return labels
+
+
 def transfer_labels(
     judged_local: np.ndarray,
     judged_labels: np.ndarray,
@@ -78,7 +132,7 @@ def transfer_labels(
     progress: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[np.ndarray, TransferStats]:
     """
-    判定点 (judged_local, judged_labels) から全点 full_local へラベルを写す。
+    判定点 (judged_local, judged_labels) から全点 full_local へラベルを写す（全点を一度に渡す版）。
 
     :param judged_local: (N_j, 3) 判定点のローカル座標
     :param judged_labels: (N_j,) 整数ラベル（例: 1=保存, 0=除外。分割保存ではレイヤー番号）
@@ -88,47 +142,20 @@ def transfer_labels(
     """
     judged_local = np.ascontiguousarray(judged_local, dtype=np.float64).reshape(-1, 3)
     full_local = np.ascontiguousarray(full_local, dtype=np.float64).reshape(-1, 3)
-    judged_labels = np.asarray(judged_labels).reshape(-1)
-    if len(judged_labels) != len(judged_local):
-        raise ValueError(f"判定点の座標 {len(judged_local):,} 点とラベル {len(judged_labels):,} 個の数が一致しません。")
-
     n_full = len(full_local)
     n_judged = len(judged_local)
-    stats = TransferStats(n_full=n_full, n_judged=n_judged)
-    stats.stride = int(stride) if stride is not None and stride >= 1 else estimate_stride(n_full, n_judged)
-    stats.factor = radius_factor(stats.stride, base_factor)
-
+    k = int(stride) if stride is not None and stride >= 1 else estimate_stride(n_full, n_judged)
+    lt = LabelTransfer(judged_local, judged_labels, k, base_factor=base_factor, min_radius=min_radius, workers=workers)
     labels_full = np.full(n_full, ORPHAN_LABEL, dtype=np.int32)
-    if n_full == 0:
-        return labels_full, stats
-    if n_judged == 0:
-        stats.n_orphan = n_full
-        return labels_full, stats
-
-    tree = cKDTree(judged_local, balanced_tree=False, compact_nodes=False)
-    spacing = judged_spacing(judged_local, tree=tree, workers=workers)
-    radius = np.maximum(spacing * stats.factor, float(min_radius))
-
-    labels_j = judged_labels.astype(np.int32, copy=False)
-    max_d = 0.0
     chunk_size = max(1, int(chunk_size))
     for start in range(0, n_full, chunk_size):
         if is_cancelled is not None and is_cancelled():
             raise InterruptedError("全点転写がユーザーによって中止されました。")
         end = min(n_full, start + chunk_size)
-        d, idx = tree.query(full_local[start:end], k=1, workers=workers)
-        inherit = d <= radius[idx]
-        seg = labels_full[start:end]
-        seg[inherit] = labels_j[idx[inherit]]
-        if np.any(inherit):
-            max_d = max(max_d, float(np.max(d[inherit])))
+        labels_full[start:end] = lt.labels_for(full_local[start:end])
         if progress is not None:
             progress(end, n_full)
-
-    stats.n_orphan = int(np.count_nonzero(labels_full == ORPHAN_LABEL))
-    stats.n_inherited = n_full - stats.n_orphan
-    stats.max_inherit_distance = max_d
-    return labels_full, stats
+    return labels_full, lt.stats
 
 
 def labels_from_masks(masks, n_points: int) -> np.ndarray:

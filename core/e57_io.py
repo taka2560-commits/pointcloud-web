@@ -1396,23 +1396,36 @@ class E57StreamWriter:
     def point_count(self) -> int:
         return sum(n for n, _ in self._expected)
 
+    def _register_scan_meta(self, root_extensions, coordinate_metadata: Optional[str]) -> None:
+        """スキャンの拡張名前空間のうち未登録のものを足し、最初に見つかった coordinateMetadata を覚える"""
+        if self._closed:
+            raise RuntimeError("E57StreamWriter は既に閉じられています。")
+        for prefix, uri in root_extensions or []:
+            if prefix not in self._added_prefixes:
+                try:
+                    self._imf.extensionsAdd(prefix, uri)
+                except Exception:
+                    pass
+                self._added_prefixes.add(prefix)
+        if self._coord_meta is None and coordinate_metadata:
+            self._coord_meta = coordinate_metadata
+
+    def _register_written(self, n_points: int, is_spherical_only: bool) -> None:
+        """書き終えたスキャンを、close() の再オープン検証の期待値に載せる"""
+        self._expected.append((int(n_points), bool(is_spherical_only)))
+
     def add_scan(self, scan: E57ScanData) -> None:
-        """スキャンを検証してから追記する。失敗したら一時ファイルを消して例外を再送出する"""
+        """
+        スキャンを検証してから追記する。失敗したら一時ファイルを消して例外を再送出する。
+        1 スキャンを全点メモリに載せられないときは core/e57_stream.py の ScanStreamSink で少しずつ書く。
+        """
         if self._closed:
             raise RuntimeError("E57StreamWriter は既に閉じられています。")
         try:
             scan.validate()
-            for prefix, uri in scan.root_extensions:
-                if prefix not in self._added_prefixes:
-                    try:
-                        self._imf.extensionsAdd(prefix, uri)
-                    except Exception:
-                        pass
-                    self._added_prefixes.add(prefix)
-            if self._coord_meta is None and scan.coordinate_metadata:
-                self._coord_meta = scan.coordinate_metadata
+            self._register_scan_meta(scan.root_extensions, scan.coordinate_metadata)
             _write_single_scan_lossless(self._imf, self._data3d, scan, len(self._expected))
-            self._expected.append((len(scan.points), bool(scan.is_spherical_only)))
+            self._register_written(len(scan.points), scan.is_spherical_only)
         except Exception:
             self.abort()
             raise
