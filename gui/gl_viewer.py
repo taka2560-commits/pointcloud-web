@@ -3184,19 +3184,19 @@ class PointCloudViewer(QOpenGLWidget):
 
     # --- マウス操作 ---
     def mousePressEvent(self, event: QMouseEvent):
-        self.last_mouse_pos = event.pos()
-        self.current_mouse_pos = event.pos()
+        self.last_mouse_pos = event.position().toPoint()
+        self.current_mouse_pos = event.position().toPoint()
         self._last_selection_modifiers = event.modifiers()
 
         # ⑦ 軸ギズモ (X, Y, Z, ISO) クリックによるワンタッチ視点切替
         if event.button() == Qt.LeftButton:
-            gizmo_hit = self._check_gizmo_hit(event.pos())
+            gizmo_hit = self._check_gizmo_hit(event.position().toPoint())
             if gizmo_hit:
                 self._on_gizmo_axis_clicked(gizmo_hit)
                 return
 
         if event.button() == Qt.RightButton:
-            self._right_press_pos = event.pos()
+            self._right_press_pos = event.position().toPoint()
             self._right_click_consumed = False
 
         if event.button() == Qt.RightButton and self.wall_align_mode:
@@ -3231,7 +3231,7 @@ class PointCloudViewer(QOpenGLWidget):
 
         # 🧭 2点ピック斜め壁アラインモードでの点ピック
         if self.wall_align_mode and event.button() == Qt.LeftButton:
-            hit = self._pick_nearest_point(event.pos())
+            hit = self._pick_nearest_point(event.position().toPoint())
             if hit is not None:
                 centered_pt, world_pt = hit
                 if len(self.wall_align_points) >= 2:
@@ -3250,7 +3250,7 @@ class PointCloudViewer(QOpenGLWidget):
             return
 
         if self.measure_mode and event.button() == Qt.LeftButton:
-            hit = self._pick_nearest_point(event.pos(), max_px=self.MEASURE_PICK_MAX_PX)
+            hit = self._pick_nearest_point(event.position().toPoint(), max_px=self.MEASURE_PICK_MAX_PX)
             if hit is not None:
                 self._on_measure_pick(hit[0], hit[1], snap_px=self.last_pick_px)
             else:
@@ -3259,16 +3259,16 @@ class PointCloudViewer(QOpenGLWidget):
 
         if self.selection_mode and event.button() == Qt.LeftButton:
             if self.selection_shape == self.SELECT_POLYGON:
-                self.polygon_points.append(event.pos())
+                self.polygon_points.append(event.position().toPoint())
                 self.update()
             elif self.selection_shape == self.SELECT_BRUSH:
                 self.is_selecting = True
-                self.brush_stroke_points = [event.pos()]
+                self.brush_stroke_points = [event.position().toPoint()]
                 self.update()
             else:
                 self.is_selecting = True
-                self.selection_start = event.pos()
-                self.selection_end = event.pos()
+                self.selection_start = event.position().toPoint()
+                self.selection_end = event.position().toPoint()
                 self.update()
             return
 
@@ -3285,17 +3285,17 @@ class PointCloudViewer(QOpenGLWidget):
                 self.is_panning = True
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        self.current_mouse_pos = event.pos()
+        self.current_mouse_pos = event.position().toPoint()
         dx = event.position().x() - self.last_mouse_pos.x()
         dy = event.position().y() - self.last_mouse_pos.y()
-        self.last_mouse_pos = event.pos()
+        self.last_mouse_pos = event.position().toPoint()
 
         if self.is_selecting:
             if self.selection_shape == self.SELECT_BRUSH:
-                if len(self.brush_stroke_points) == 0 or (event.pos() - self.brush_stroke_points[-1]).manhattanLength() >= 3:
-                    self.brush_stroke_points.append(event.pos())
+                if len(self.brush_stroke_points) == 0 or (event.position().toPoint() - self.brush_stroke_points[-1]).manhattanLength() >= 3:
+                    self.brush_stroke_points.append(event.position().toPoint())
             else:
-                self.selection_end = event.pos()
+                self.selection_end = event.position().toPoint()
             self.update()
         elif self.is_rotating:
             # 左クリック視点回転操作
@@ -3317,7 +3317,7 @@ class PointCloudViewer(QOpenGLWidget):
             self.update()
         else:
             # ⑦ 軸ギズモのホバー判定
-            hit = self._check_gizmo_hit(event.pos())
+            hit = self._check_gizmo_hit(event.position().toPoint())
             if hit != getattr(self, "_hovered_gizmo_axis", None):
                 self._hovered_gizmo_axis = hit
                 if hit:
@@ -3329,11 +3329,11 @@ class PointCloudViewer(QOpenGLWidget):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self.is_selecting:
             self.is_selecting = False
-            self.selection_end = event.pos()
+            self.selection_end = event.position().toPoint()
             self._last_selection_modifiers = event.modifiers()
             if self.selection_shape == self.SELECT_BRUSH:
                 if len(self.brush_stroke_points) == 0:
-                    self.brush_stroke_points.append(event.pos())
+                    self.brush_stroke_points.append(event.position().toPoint())
                 self._process_brush_selection()
                 self.brush_stroke_points.clear()
             else:
@@ -3344,7 +3344,7 @@ class PointCloudViewer(QOpenGLWidget):
             press_pos = getattr(self, "_right_press_pos", None)
             consumed = getattr(self, "_right_click_consumed", False)
             if not consumed and press_pos is not None:
-                if (event.pos() - press_pos).manhattanLength() <= 5:
+                if (event.position().toPoint() - press_pos).manhattanLength() <= 5:
                     self.context_menu_requested.emit(event.globalPosition().toPoint())
 
         was_interacting = self.is_rotating or self.is_panning
@@ -3368,7 +3368,7 @@ class PointCloudViewer(QOpenGLWidget):
             return
 
         if event.button() == Qt.LeftButton:
-            hit = self._pick_nearest_point(event.pos())
+            hit = self._pick_nearest_point(event.position().toPoint())
             if hit is not None:
                 centered_pt, world_pt = hit
                 self.camera_target = QVector3D(float(centered_pt[0]), float(centered_pt[1]), float(centered_pt[2]))

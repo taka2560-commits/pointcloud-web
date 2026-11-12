@@ -4741,6 +4741,7 @@ class MainWindow(QMainWindow):
         self.viewer.move_indices_to_noise(outside_idx)
         self.log_text.append(f"断面ボックス外クロップ: {len(outside_idx):,} 点をノイズレイヤーへ一括移動しました")
         self.status_label.setText(f"断面ボックス外の {len(outside_idx):,} 点をノイズへ移動しました (Ctrl+Zで取消可)")
+        self.show_toast(f"✂️ 断面ボックス外の {len(outside_idx):,} 点をノイズレイヤーへ移動しました (Ctrl+Zで取消可)")
 
     def _invert_selection(self):
         """現在表示中の範囲内で選択状態を反転"""
@@ -5942,7 +5943,7 @@ class MainWindow(QMainWindow):
                 f"・残存有効点: {n_remain:,} 点\n"
                 f"・検出ノイズ: {n_removed:,} 点 ({ratio:.2f}% 検出)\n"
                 + ("\n【フィルタ別レイヤー】\n" + "\n".join(detail_lines) + "\n" if detail_lines else "")
-                + f"\n※「◀ 1つ戻る (Ctrl+Z)」で自動除去を一括で取り消せます。"
+                + f"\n※「1つ戻る」ボタン (Ctrl+Z) で自動除去を一括で取り消せます。"
                 f"（🔒ロック中レイヤーと手動削除点はそのまま保護されます）"
             )
             self.log_text.append(f"自動ノイズ処理完了: {n_removed:,} 点を {len(detail_lines)} 個のフィルタ別レイヤーへ一括移動 (残存: {n_remain:,} 点)")
