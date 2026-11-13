@@ -74,6 +74,7 @@ from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS, get_theme_qss
+from gui.section_seek import seek_scale, seek_slider_range, seek_slider_value, spin_decimals_for
 from gui.ui_mode import (
     get_ui_mode, UI_MODE_MODERN, UI_MODE_CLASSIC, set_saved_ui_mode, get_saved_ui_mode,
     get_ui_theme, set_saved_ui_theme, get_saved_ui_theme,
@@ -3086,7 +3087,6 @@ class MainWindow(QMainWindow):
 
     def _on_sec_step_changed(self, index: int):
         step_val = float(self.combo_sec_step.currentData() or 0.01)
-        self._sec_pos_scale = 1.0 / step_val
         for sp in (
             getattr(self, "spin_pos_x", None),
             getattr(self, "spin_pos_y", None),
@@ -3094,7 +3094,30 @@ class MainWindow(QMainWindow):
             getattr(self, "spin_pos_wall", None),
         ):
             if sp:
+                sp.blockSignals(True)
+                sp.setDecimals(spin_decimals_for(step_val))  # 5mm・1mm の刻みは小数 3 桁でないと表せない
                 sp.setSingleStep(step_val)
+                sp.blockSignals(False)
+        # 倍率だけ変えるとスライダーの左端・右端が点群の範囲とずれるので、範囲も同じ刻みで作り直す
+        self._apply_section_seek_ranges()
+
+    def _apply_section_seek_ranges(self):
+        """X/Y/Z 断面シークのスライダーを、点群の範囲と設定の刻み幅で作り直す（今の位置はそのまま）"""
+        if not hasattr(self, "slider_pos_x"):
+            return
+        step_val = float(self.combo_sec_step.currentData() or 0.01) if hasattr(self, "combo_sec_step") else 0.01
+        scale = seek_scale(step_val, self.world_min, self.world_max)
+        self._sec_pos_scale = scale
+        for idx, (s_pos, sp_pos) in enumerate([
+            (self.slider_pos_x, self.spin_pos_x),
+            (self.slider_pos_y, self.spin_pos_y),
+            (self.slider_pos_z, self.spin_pos_z),
+        ]):
+            lo, hi = seek_slider_range(self.world_min[idx], self.world_max[idx], scale)
+            s_pos.blockSignals(True)
+            s_pos.setRange(lo, hi)
+            s_pos.setValue(seek_slider_value(sp_pos.value(), scale))
+            s_pos.blockSignals(False)
 
     def _on_ui_mode_combo_changed(self, index: int):
         """UIスタイルの選択を保存（次回起動時に適用）"""
@@ -3897,8 +3920,6 @@ class MainWindow(QMainWindow):
         self.world_max = safe_max
 
         max_span = float(np.max(safe_max - safe_min))
-        self._sec_pos_scale = 100.0 if max_span <= 10000.0 else 10.0
-        scale = self._sec_pos_scale
         max_thick_slider = max(200, min(5000, int(max(10.0, max_span) * 10)))
 
         for idx, (s_pos, sp_pos, s_th, sp_th) in enumerate([
@@ -3912,15 +3933,13 @@ class MainWindow(QMainWindow):
             sp_pos.setValue(float(mid))
             sp_pos.blockSignals(False)
 
-            s_pos.blockSignals(True)
-            s_pos.setRange(int(round(safe_min[idx] * scale)), int(round(safe_max[idx] * scale)))
-            s_pos.setValue(int(round(mid * scale)))
-            s_pos.blockSignals(False)
-
             s_th.blockSignals(True)
             s_th.setRange(1, max_thick_slider)
             s_th.setValue(int(round(sp_th.value() * 10.0)))
             s_th.blockSignals(False)
+
+        # シークのスライダーは、点群の範囲と設定の刻み幅から決める（倍率と範囲を必ず一緒に）
+        self._apply_section_seek_ranges()
 
         self._on_section_x_changed()
         self._on_section_y_changed()
