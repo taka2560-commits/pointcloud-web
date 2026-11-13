@@ -12,6 +12,8 @@ build/
 
 # ビルド成果物・配布パッケージ（dist/archive/ も含む）
 dist/
+# 版の記録（配布版を作るたびに tools/write_build_info.py が書く）
+build_info.json
 
 
 # 実行時ログ・一時出力

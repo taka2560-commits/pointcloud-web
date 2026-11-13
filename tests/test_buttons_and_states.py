@@ -264,7 +264,9 @@ class TestButtonRolesAndIcons(_WinCase):
         pills = [b.text() for b in win.section_group.findChildren(QPushButton) if b.property("role") == "pill"]
         self.assertEqual(sorted(pills), ["0.1m", "0.5m", "1m", "2m", "5m"])
         soft = [b for b in win.findChildren(QPushButton) if b.property("role") == "soft"]
-        self.assertTrue(soft and all("ログフォルダ" in b.text() for b in soft))
+        # 淡い塗りは、使う回数の少ない操作だけ（ログのフォルダを開く・作業用データの管理）
+        self.assertTrue(soft and all("ログフォルダ" in b.text() or b is win.btn_workdata_manage for b in soft))
+        self.assertIn(win.btn_workdata_manage, soft)
         self.assertEqual(win.btn_toggle_sec_guides.text(), "切替", "幅に収まらない文字を残さない")
 
     def test_icon_buttons_keep_text_and_have_no_emoji(self):

@@ -75,7 +75,10 @@ QA_REPORT_2026-10-31.md: 総合品質管理チェック報告書（欠陥一覧�
 core/e57_io.py        : E57完全ロスレス入出力エンジン
 core/filters.py       : ノイズ除去・間引きアルゴリズム（SOR, ROR, DBSCAN, 孤立塊等）
 core/processor.py     : FilterConfig、座標系変換関数、パイプライン実行
-core/logger.py        : システム履歴ロガー（日別UTF-8出力、クラッシュダンプ）
+core/logger.py        : システム履歴ロガー（日別UTF-8出力。配布版は %LOCALAPPDATA%\E57PointCloudTool\logs）
+core/workdata.py      : 作業用データ（読み直し用・高精細表示用）の一覧・削除、書く前の空きの見積もり
+core/build_info.py    : 版（配布版を作った日時とコミット）。タイトル・バージョン情報・ログに出す
+gui/system_tools.py   : 作業用データの管理の窓、保存前の空きの確認、版の表示
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）
 gui/main_window.py    : メイン画面UI、リボンバー、レイヤー管理、レシピセレクター
 gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread、汎用 FunctionWorker）

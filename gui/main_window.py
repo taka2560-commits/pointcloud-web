@@ -7,6 +7,7 @@ PySide6によるE57点群ノイズ処理ツールのメインウィンドウ
 - 2点間寸法計測、全体フィット、正射影/透視投影、描画点数バジェット
 """
 
+import math
 import os
 from typing import Optional, List
 import numpy as np
@@ -51,6 +52,7 @@ from core.e57_io import E57ScanData, read_e57_scans, write_e57_scans
 from core.section_reload import SectionBox, reload_section_points
 from core.lod_store import BYTES_PER_POINT as LOD_BYTES_PER_POINT, prepare_lod_for_scans
 from core.logger import log_info, log_warning, log_error, log_exception, open_log_folder
+from core.sysinfo import format_bytes
 from core.filters import (
     segment_ground_points,
     segment_largest_plane,
@@ -74,6 +76,7 @@ from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS, get_theme_qss
+from gui.system_tools import confirm_lod_build, confirm_save_free_space, install_system_tools, window_title_with_build
 from gui.section_seek import (
     THICK_PAGE_STEP, THICK_SINGLE_STEP, THICK_SLIDER_MAX, centered_seek_span, seek_scale, seek_slider_range,
     seek_slider_value, spin_decimals_for, thick_from_slider, thick_to_slider,
@@ -211,7 +214,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("E57 点群ノイズ処理ツール - 3Dエディタ")
+        self.setWindowTitle(window_title_with_build())  # 版を添える（画面の写しだけで、どの版かが分かる）
         self.resize(1400, 900)
         self.setMinimumSize(QSize(1000, 650))
 
@@ -266,6 +269,8 @@ class MainWindow(QMainWindow):
         self._apply_section_thick_sliders()
         self._setup_shortcuts()
         self._load_app_settings()
+        # 作業用データの管理と版の表示（設定 → システムに行を足す。新UIの後付けより前に入れて、見た目をそろえる）
+        install_system_tools(self)
 
         if self.ui_mode == UI_MODE_MODERN:
             # 従来UIの構築結果に新UI（作業順の並び・メニュー/ステータスバー・重複ボタン非表示・絵文字除去等）を後付けする
@@ -803,7 +808,7 @@ class MainWindow(QMainWindow):
         self.chk_lod.setToolTip(
             "ONにすると、視点が止まるたびに、画面に入っている範囲を元ファイルの密度で読み込んで重ね描きします"
             "（近く・大きく見えている所ほど細かく、全体で 600 万点まで）。断面が有効なら箱の中だけを読みます。\n"
-            "初回はファイルごとに LOD データを作成します（1 点 17 バイト。5 億点で約 9GB、数分。元ファイルの横の .cache フォルダ）。\n"
+            "初回はファイルごとに LOD データを作成します（1 点 17 バイト。5 億点で約 8GB、数分。置き場所と削除は 設定 → システム → 作業用データ）。\n"
             "重ね描きは表示専用です（選択・ノイズ移動・計測の対象外）。ノイズとして消した点の周りは重ね描きからも隠します"
         )
         self.chk_lod.toggled.connect(self._on_lod_toggled)
@@ -2965,7 +2970,7 @@ class MainWindow(QMainWindow):
         btn_sys_open_logs.clicked.connect(open_log_folder)
         l_sys.addWidget(btn_sys_open_logs, 3, 0, 1, 2)
 
-        sys_hint = QLabel("※起動時の挙動や処理履歴は logs/ フォルダにテキストで自動保存されます。")
+        sys_hint = QLabel("※起動時の挙動や処理履歴は、ログのフォルダにテキストで自動保存されます（上のボタンで開けます）。")
         sys_hint.setWordWrap(True)
         sys_hint.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
         l_sys.addWidget(sys_hint, 4, 0, 1, 2)
@@ -3006,6 +3011,7 @@ class MainWindow(QMainWindow):
         self.chk_ui_motion.toggled.connect(self._on_ui_motion_toggled)
         l_sys.addWidget(self.chk_ui_motion, 7, 0, 1, 2)
 
+        self.tab_system = tab_sys  # gui/system_tools.py が「作業用データ」と「版」の行を足す
         tab_sub.addTab(tab_sys, "⚙️ システム")
 
         # 3. ショートカット一覧タブ
@@ -4275,7 +4281,7 @@ class MainWindow(QMainWindow):
             if result.cache_used_scans:
                 cache_txt += f", キャッシュから {result.n_chunks_read:,}/{result.n_chunks_total:,} チャンク"
             if result.cache_built_scans:
-                cache_txt += f", キャッシュ作成 {result.cache_bytes / 1e9:.2f}GB（次回から高速）"
+                cache_txt += f", キャッシュ作成 {format_bytes(result.cache_bytes)}（次回から高速）"
             msg = (
                 f"元ファイルから {result.n_points:,} 点を重ね描き{cap_txt}: ボックス内 {result.n_in_box:,} 点 / 走査 {result.n_read:,} 点, "
                 f"{result.n_scans_read} スキャン読込・{result.n_scans_skipped} スキャン範囲外{cache_txt}, {result.elapsed_sec:.1f} 秒"
@@ -4324,21 +4330,10 @@ class MainWindow(QMainWindow):
             self.lod.set_enabled(True)
             self.show_toast(f"🔎 高精細表示 (LOD): ON（元ファイル {self.lod.scene.n_points:,} 点。視点が止まると読み込みます）")
             return
-        # LOD データが無い → 作成の確認
+        # LOD データが無い → 作成の確認（大きさ・置き場所・空きを見せ、空きが足りなければ始めない。gui/system_tools.py）
         n_total = sum(int(getattr(s, "original_point_count", s.point_count)) for s in self.current_scans)
-        est_gb = n_total * LOD_BYTES_PER_POINT / 1e9
-        reply = QMessageBox.question(
-            self,
-            "高精細表示 (LOD) データの作成",
-            f"このファイルの LOD データがまだありません。作成しますか？\n\n"
-            f"・元ファイル {n_total:,} 点を空間順に並べ替えたデータを、元ファイルの横の .cache フォルダに作ります\n"
-            f"・大きさ: 約 {est_gb:.1f}GB（読み直しキャッシュが未作成ならさらに同じだけ必要です）\n"
-            f"・時間: 1 億点あたり 1〜2 分（キャッシュが未作成なら元ファイルのデコードぶんが加わります）\n\n"
-            f"作成は 1 回だけで、次回からはすぐ使えます。途中で中止できます。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
+        est_gb = n_total * LOD_BYTES_PER_POINT / 1024 ** 3  # エクスプローラーと同じ数え方（core/sysinfo.py）
+        if not confirm_lod_build(self, self.current_scans):
             self._set_lod_checked_silently(False)
             return
         scans_at_start = self.current_scans
@@ -4348,7 +4343,7 @@ class MainWindow(QMainWindow):
                 return
             if self.lod.attach(self.current_scans):
                 self.lod.set_enabled(True)
-                msg = f"高精細表示 (LOD) データを作成しました: {result['bytes'] / 1e9:.2f}GB, {result['elapsed_sec']:.0f} 秒"
+                msg = f"高精細表示 (LOD) データを作成しました: {format_bytes(result['bytes'])}, {result['elapsed_sec']:.0f} 秒"
                 self.log_text.append(msg)
                 self.show_toast(f"🔎 {msg}", 5000)
             else:
@@ -5791,6 +5786,10 @@ class MainWindow(QMainWindow):
                 return
 
         if self.save_worker and self.save_worker.isRunning():
+            return
+
+        # 実務安全保護③: 保存先の空きを、書き始める前に確かめる（足りない見込みなら知らせる。gui/system_tools.py）
+        if not confirm_save_free_space(self, out_path, self.current_scans, layer_mask, split_masks, use_fullres):
             return
 
         self.save_manual_btn.setEnabled(False)

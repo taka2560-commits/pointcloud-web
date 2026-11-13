@@ -49,6 +49,13 @@ echo [1/3] Ensuring PyInstaller is installed...
 "!PY_EXE!" !PY_ARG! -m pip install pyinstaller
 
 echo.
+echo [1.5/3] Writing build stamp (build_info.json: build time and commit)...
+rem The stamp is bundled by the spec and shown in the window title, the About dialog and the log.
+rem Delete the old stamp first so that a failed write can never leave a stale one in the package.
+if exist "build_info.json" del /q "build_info.json"
+"!PY_EXE!" !PY_ARG! tools\write_build_info.py
+
+echo.
 echo [2/3] Building EXE package (This takes about 2-4 minutes, please wait)...
 rem Build from the checked-in spec file (manual files, hidden imports and open3d data are declared there).
 rem Do NOT pass main.py here: PyInstaller would regenerate and overwrite E57_PointCloud_Tool.spec.

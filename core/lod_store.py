@@ -35,10 +35,12 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from core.e57_io import file_signature
+from core.fsutil import replace_file
 from core.npy_file import NpyFileArray, NpySequentialWriter
 from core.logger import log_info, log_warning
 from core.processor import _coord_mode_axes, scan_pose_transform, transform_coordinate_system
 from core.section_cache import SectionCache, cache_dir_for, local_from_stored
+from core.sysinfo import format_bytes
 
 LOD_VERSION = 1
 LOD_DEPTH = 7
@@ -240,7 +242,7 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
     need = int(n_points * max(BYTES_PER_POINT, BUCKET_BYTES_PER_POINT) * FREE_SPACE_MARGIN)
     if free < need:
         raise RuntimeError(
-            f"LOD データを作る空き容量が足りません（必要 {need / 1e9:.1f}GB / 空き {free / 1e9:.1f}GB）: {cache.directory}"
+            f"LOD データを作る空き容量が足りません（必要 {format_bytes(need)} / 空き {format_bytes(free)}）: {cache.directory}"
         )
 
     # 格子の範囲: キャッシュのチャンク表（ローカル座標の範囲）の 8 頂点を pose で移して合わせる（やや大きめになるが取りこぼさない）
@@ -396,7 +398,7 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
         progress(0.97, "LOD データを確定しています...")
         for k_name, p in part.items():
             if os.path.exists(p):
-                os.replace(p, paths[k_name])
+                replace_file(p, paths[k_name])
         np.save(paths["lod_cells.npy"], cells)
         np.save(paths["lod_starts.npy"], starts)
         header = {
@@ -416,7 +418,7 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
         tmp = paths["lod.json"] + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(header, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, paths["lod.json"])
+        replace_file(tmp, paths["lod.json"])
     except BaseException:
         for f in bucket_files:
             if f is not None:
@@ -441,7 +443,7 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
     elapsed = time.perf_counter() - t0
     log_info(
         f"LOD データ作成: {os.path.basename(source)} {n_points:,} 点, {n_levels} レベル, 格子 {len(cells):,} 個, "
-        f"{total_bytes / 1e9:.2f}GB, {elapsed:.1f} 秒"
+        f"{format_bytes(total_bytes)}, {elapsed:.1f} 秒"
     )
     progress(1.0, "LOD データの作成が完了しました")
     return {

@@ -13,22 +13,31 @@ libe57 には読み飛ばし（seek）が無く、箱に掛からない部分も
     scanNN_int.npy    float16 (n,)    … 反射強度（表示のストレッチ用。無ければ作らない）
     scanNN_chunks.npy float64 (m, 8)  … チャンク表 [先頭位置, 点数, xmin, xmax, ymin, ymax, zmin, zmax]（ローカル座標）
 2 回目からは、チャンク表の範囲を表示座標へ変換して箱に掛かるチャンクだけをファイルから読む（mmap は使わない。core/npy_file.py）。
-1 点 17 バイト（int32 / float32 の場合。5.4 億点で約 9GB）。元ファイルが変わると（署名不一致）作り直す。
+1 点 17 バイト（int32 / float32 の場合。5.4 億点で 9.15×10⁹ バイト = エクスプローラーの表示で約 8.5GB）。元ファイルが変わると（署名不一致）作り直す。
 スキャン単位で追加できるので、箱に掛からず読まなかったスキャンは後で必要になったときに加わる。
 書き込みに失敗しても（読み取り専用フォルダ・空き容量不足）読み直し自体は従来どおり続ける。
+
+置き場所（2026-11-13 に追加）: 既定は元ファイルの横。set_default_cache_root() でまとめて別のフォルダへ変えられる
+（画面の「作業用データの管理」が、保存した設定を起動時と変更時に渡す。gui/system_tools.py）。
+そのときのフォルダ名は <元ファイル名>.<元フォルダの印 8 桁>.cache（別のフォルダにある同じ名前のファイルどうしで取り合わない）。
 """
 
+import hashlib
 import json
 import os
+import re
 import shutil
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from core.e57_io import file_signature
+from core.fsutil import read_bytes_shared, replace_file
 from core.npy_file import NpyFileArray, NpySequentialWriter
 from core.logger import log_info, log_warning
+from core.sysinfo import format_bytes
 
 CACHE_VERSION = 2
 CACHE_SUFFIX = ".cache"
@@ -40,11 +49,40 @@ FREE_SPACE_MARGIN = 1.1
 _PART = ".part.npy"
 
 
+_default_cache_root: Optional[str] = None
+
+
+def set_default_cache_root(path: Optional[str]) -> None:
+    """
+    作業用データ（読み直しキャッシュと LOD データ）の置き場所の既定を変える。None か空なら元ファイルの横。
+    cache_dir を渡さない呼び出し（画面からの呼び出しはすべてそう）に効く。
+    """
+    global _default_cache_root
+    _default_cache_root = os.path.abspath(path) if path else None
+
+
+def get_default_cache_root() -> Optional[str]:
+    return _default_cache_root
+
+
+def _source_folder_tag(src: str) -> str:
+    """元ファイルのフォルダの印（8 桁）。置き場所をまとめたとき、別のフォルダの同じ名前のファイルと取り合わないため"""
+    folder = os.path.normcase(os.path.dirname(os.path.abspath(src)))
+    return hashlib.sha1(folder.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
 def cache_dir_for(source_file: str, cache_dir: Optional[str] = None) -> str:
-    """キャッシュフォルダのパス。既定は <元ファイル>.cache、cache_dir 指定時はその下に元ファイル名で作る"""
+    """
+    キャッシュフォルダのパス。
+    - cache_dir 指定時: その下に <元ファイル名>.cache
+    - 置き場所の既定（set_default_cache_root）があるとき: その下に <元ファイル名>.<元フォルダの印>.cache
+    - どちらも無いとき: <元ファイル>.cache（元ファイルの横）
+    """
     src = os.path.abspath(source_file)
     if cache_dir:
         return os.path.join(cache_dir, os.path.basename(src) + CACHE_SUFFIX)
+    if _default_cache_root:
+        return os.path.join(_default_cache_root, f"{os.path.basename(src)}.{_source_folder_tag(src)}{CACHE_SUFFIX}")
     return src + CACHE_SUFFIX
 
 
@@ -203,7 +241,7 @@ class ScanCacheWriter:
         for key, final in (("xyz", base + "_xyz.npy"), ("rgb", base + "_rgb.npy"), ("int", base + "_int.npy")):
             part = self._paths[key]
             if os.path.exists(part):
-                os.replace(part, final)
+                replace_file(part, final)
         self.cache._register_scan(
             self.scan_index, self.n_written, self.has_rgb, self.has_int, self.xyz_kind, self.xyz_scale, self.xyz_offset
         )
@@ -286,7 +324,7 @@ class SectionCache:
         tmp = self.header_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, self.header_path)
+        replace_file(tmp, self.header_path)
 
     def _remove_dir(self) -> bool:
         try:
@@ -359,7 +397,7 @@ class SectionCache:
         need = int(estimate_cache_bytes(n_points, xyz_kind) * FREE_SPACE_MARGIN)
         if free < need:
             log_warning(
-                f"読み直しキャッシュを作る空き容量が足りません（必要 {need / 1e9:.1f}GB / 空き {free / 1e9:.1f}GB）。"
+                f"読み直しキャッシュを作る空き容量が足りません（必要 {format_bytes(need)} / 空き {format_bytes(free)}）。"
                 f"キャッシュ無しで続けます: {self.directory}"
             )
             self.writable = False
@@ -412,6 +450,96 @@ class SectionCache:
         except OSError:
             pass
         return total
+
+
+_OWN_FILE_RE = re.compile(r"^(header\.json(\.tmp)?|lod\.json(\.tmp)?|scan\d+_[a-z]+(\.part)?\.npy|lod_[a-z]+(\.part)?\.npy|.+\.part\.npy)$")
+
+
+def read_cache_header(directory: str) -> Optional[dict]:
+    """作業用データのフォルダの header.json を読む。読めない・形が違うときは None（このアプリのフォルダではない）"""
+    try:
+        # 削除を邪魔しない開き方で読む（一覧を別スレッドで読んでいる間も、古い作業用データの作り直しや削除を止めない）。
+        # 作る側の header.json の置き換えは replace_file() が繰り返す（core/fsutil.py）
+        raw = None
+        for attempt in range(3):
+            try:
+                raw = read_bytes_shared(os.path.join(directory, "header.json"))
+                break
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.01)  # 置き換えの最中に当たった。すぐ読めるようになる
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or "version" not in data or "signature" not in data:
+        return None
+    sig = data.get("signature")
+    if not isinstance(sig, (list, tuple)) or len(sig) != 2:
+        return None
+    return data
+
+
+def is_own_cache_file(name: str) -> bool:
+    """このアプリが作業用データのフォルダに作るファイルの名前か"""
+    return bool(_OWN_FILE_RE.match(name))
+
+
+def remove_cache_directory(directory: str) -> Tuple[bool, int, List[str]]:
+    """
+    作業用データのフォルダを消す（画面の「作業用データの管理」から使う）。
+    戻り値: (フォルダごと消えたか, 空いたバイト数, 消さずに残したものの名前)
+
+    - header.json が読めないフォルダには触らない（このアプリのフォルダと確かめられないものは消さない）。
+    - 消すのは、このアプリが作る名前のファイルだけ。ほかのファイルやフォルダが入っていたら残す。
+    - 途中で止まっても中途半端なデータを使わないよう、先に header.json を「スキャン無し」に書き換え、
+      lod.json を消す（LOD の目印）。そのあとで大きなファイルを消し、最後に header.json とフォルダを消す。
+    """
+    directory = os.path.abspath(directory)
+    header = read_cache_header(directory)
+    if header is None:
+        return False, 0, []
+    freed = 0
+    kept: List[str] = []
+    try:
+        emptied = dict(header)
+        emptied["scans"] = {}
+        tmp = os.path.join(directory, "header.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(emptied, f, ensure_ascii=False, indent=1)
+        replace_file(tmp, os.path.join(directory, "header.json"))
+    except OSError as e:
+        log_warning(f"作業用データを削除できません（書き込めません）: {directory} ({e})")
+        return False, 0, []
+    try:
+        names = sorted(os.listdir(directory), key=lambda n: (n != "lod.json", n))
+    except OSError:
+        return False, 0, []
+    for name in names:
+        if name == "header.json":
+            continue
+        path = os.path.join(directory, name)
+        if not is_own_cache_file(name) or not os.path.isfile(path) or os.path.islink(path):
+            kept.append(name)
+            continue
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+            freed += size
+        except OSError as e:
+            log_warning(f"作業用データのファイルを削除できません: {path} ({e})")
+            kept.append(name)
+    if kept:
+        return False, freed, kept
+    try:
+        size = os.path.getsize(os.path.join(directory, "header.json"))
+        os.remove(os.path.join(directory, "header.json"))
+        freed += size
+        os.rmdir(directory)
+    except OSError as e:
+        log_warning(f"作業用データのフォルダを削除できません: {directory} ({e})")
+        return False, freed, kept
+    return True, freed, kept
 
 
 def remove_cache(source_file: str, cache_dir: Optional[str] = None) -> bool:

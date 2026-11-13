@@ -326,6 +326,31 @@ class TestCenteredSliders(_WinCase):
         self.assertAlmostEqual(right, WORLD_MAX[2], delta=0.051)
         self._assert_centered(win.slider_pos_z, "読み込み直し後")
 
+    def test_wall_seek_moves_the_camera_when_following(self):
+        """
+        斜め壁の断面をシークすると、視点追従（既定で ON）で注視点が壁の向きに沿って動く。
+        2026-11-14 に見つけた不具合: gui/main_window.py が math を読み込んでおらず、ここで NameError になっていた
+        （2026-10-27 から。断面は動くが視点が付いてこず、ログに未捕捉例外が残る）。
+        """
+        win = self.win
+        self._load()
+        center = 0.5 * (WORLD_MIN + WORLD_MAX)
+        win.viewer.wall_align_angle_deg = 30.0
+        win.viewer.wall_align_center_world = center.copy()
+        win.chk_sec_wall.setChecked(True)
+        self.assertTrue(win.chk_sec_follow_cam.isChecked(), "視点追従は既定で ON")
+        win.spin_pos_wall.setValue(2.0)
+        win._on_section_wall_changed(from_user_seek=True)   # スライダーを動かしたときと同じ呼び出し（落ちないこと）
+        off = win.viewer.center_offset
+        self.assertAlmostEqual(win.viewer.camera_target.x(), center[0] + 2.0 * -0.5 - off[0], places=3)
+        self.assertAlmostEqual(win.viewer.camera_target.y(), center[1] + 2.0 * (3 ** 0.5 / 2) - off[1], places=3)
+        # 視点追従を切ると動かさない
+        win.chk_sec_follow_cam.setChecked(False)
+        x_before = win.viewer.camera_target.x()
+        win.spin_pos_wall.setValue(4.0)
+        win._on_section_wall_changed(from_user_seek=True)
+        self.assertAlmostEqual(win.viewer.camera_target.x(), x_before, places=6)
+
     def test_thickness_slider_middle_is_one_meter(self):
         win = self.win
         mid = THICK_SLIDER_MAX // 2
