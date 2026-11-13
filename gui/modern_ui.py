@@ -787,6 +787,30 @@ def _tune_density(win) -> None:
     sync_log_stretch()
 
 
+def _fit_section_spins(win) -> None:
+    try:
+        from gui.spin_fit import fit_section_spins
+
+        fit_section_spins(win)
+    except Exception as exc:  # 見た目の補助なので、失敗しても本体は動かす
+        log_warning(f"新UI: 断面シークの数値欄の幅合わせに失敗しました: {exc}")
+
+
+def _install_section_spin_fit(win) -> None:
+    """
+    断面シークの数値欄の幅を、座標の桁数に合わせる（幅 78px の固定では、桁の多い座標が途中で切れて読めなかった）。
+    桁数が変わるのは、点群を読み込んだとき（座標の範囲）と、刻み幅を変えたとき（小数の桁数）。
+    どちらも本体の処理（範囲・桁数の設定）より後に動くよう、ここで後から接続する。
+    """
+    if getattr(win, "spin_pos_x", None) is None:
+        return
+    win.viewer.bounds_ready.connect(lambda *_a: _fit_section_spins(win))
+    combo = getattr(win, "combo_sec_step", None)
+    if combo is not None:
+        combo.currentIndexChanged.connect(lambda *_a: _fit_section_spins(win))
+    _fit_section_spins(win)
+
+
 def _convert_bars_to_flow(win) -> None:
     nav_bar = getattr(win, "_nav_bar_widget", None)
     if nav_bar is not None:
@@ -1044,6 +1068,7 @@ def on_theme_changed(win, theme: str) -> None:
         part = getattr(win, attr, None)
         if part is not None:
             part.refresh_theme()  # アイコン・印をテーマの色で描き直す
+    _fit_section_spins(win)  # 文字の幅と余白がテーマで変わる
     win.update()
 
 
@@ -1099,6 +1124,9 @@ def apply_modern_ui(win) -> None:
         _tune_density(win)
     except Exception as exc:
         log_warning(f"新UI: 余白とログ枠の調整に失敗しました: {exc}")
+
+    # 断面シークの数値欄の幅（座標の桁数に合わせる）
+    _install_section_spin_fit(win)
 
     # 既定タブは「①自動」（初めての人が最初に行う作業）
     try:
