@@ -628,10 +628,18 @@ QPushButton[role="dock"]:pressed {{
 }}
 
 /* ===== 下部バー（帯の上）: 高さを揃え、無効は「文字だけ」にして押せないことを形でも示す ===== */
+/* 帯の上のボタンは横の余白を詰める: 3D 画面の幅が 1,000px（横 1,450px の画面で左パネルを開いた状態）でも
+   上下のバーが 1 段に収まるようにする。収まらないとボタン 1〜2 個のために 2 段目ができ、3D 画面が狭くなる */
+QWidget#nav_bar QPushButton {{
+    padding: 4px 5px;
+}}
+QWidget#nav_bar QPushButton[role="segment"] {{
+    padding: 4px 4px;
+}}
 QWidget#bottom_bar QPushButton {{
     min-height: {t.control_h_sm - 10}px;
     font-size: {t.size_xs}px;
-    padding: 4px 8px;
+    padding: 4px 6px;
 }}
 QWidget#bottom_bar QPushButton[role="outline"] {{
     background-color: transparent;
@@ -696,7 +704,13 @@ QWidget#bottom_bar QPushButton[kbfocus="true"] {{
     border: 2px solid {t.band_text};
 }}
 QWidget#bottom_bar QPushButton[kbfocus="true"] {{
-    padding: 3px 7px;
+    padding: 3px 5px;
+}}
+QWidget#nav_bar QPushButton[kbfocus="true"] {{
+    padding: 3px 4px;
+}}
+QWidget#nav_bar QPushButton[role="segment"][kbfocus="true"] {{
+    padding: 3px 3px;
 }}
 
 /* ===== 処理中・完了（文字とアイコンは gui/button_kit.py が差し替える） ===== */

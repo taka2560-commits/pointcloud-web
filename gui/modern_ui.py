@@ -710,6 +710,83 @@ def _switch_to_classic(win) -> None:
         win.show_toast("次回起動から従来UIになります")
 
 
+def fit_tab_height_to_current(tabs: QTabWidget) -> None:
+    """
+    タブの高さを「今開いているタブ」の中身に合わせる。
+    QTabWidget は全タブのうちいちばん背の高いものに高さを合わせるので、背の高いタブ（説明書）が 1 つあると、
+    ほかのタブ（表示・操作感度・システム）の行が引き伸ばされて余白だらけになる（2026-11-13 に利用者が指摘）。
+    開いていないタブの縦の大きさを数えないようにして、開いているタブの中身の高さにする。
+    """
+    originals = {}
+    for i in range(tabs.count()):
+        page = tabs.widget(i)
+        if page is not None:
+            originals[id(page)] = page.sizePolicy().verticalPolicy()
+
+    def apply(index: int) -> None:
+        for i in range(tabs.count()):
+            page = tabs.widget(i)
+            if page is None:
+                continue
+            pol = page.sizePolicy()
+            orig = originals.setdefault(id(page), pol.verticalPolicy())
+            pol.setVerticalPolicy(orig if i == index else QSizePolicy.Ignored)
+            page.setSizePolicy(pol)
+        tabs.updateGeometry()
+        parent = tabs.parentWidget()
+        while parent is not None:
+            parent.updateGeometry()
+            parent = parent.parentWidget()
+
+    tabs.currentChanged.connect(apply)
+    apply(tabs.currentIndex())
+
+
+LOG_MIN_HEIGHT = 150  # ログ枠の最低の高さ（約 7 行）。左パネルに空きがあれば、空きいっぱいまで広がる
+
+
+def _tune_density(win) -> None:
+    """余白を減らし、ログ枠を広げる（2026-11-13 の利用者の指摘: 表示の余白が多い・ログ枠が小さい）"""
+    # 1. 設定のタブ: 開いているタブの中身の高さに合わせる
+    grp = getattr(win, "settings_group", None)
+    tabs = grp.findChild(QTabWidget) if grp is not None else None
+    if tabs is not None:
+        fit_tab_height_to_current(tabs)
+
+    # 2. ログ枠: 高さ 70px（3 行）の固定をやめ、最低 7 行。左パネルに空きがあれば空きいっぱいまで広げる
+    log = getattr(win, "log_text", None)
+    log_group = getattr(win, "log_group", None)
+    side_lay = win.sidebar_widget.layout() if getattr(win, "sidebar_widget", None) is not None else None
+    if log is None or log_group is None or side_lay is None:
+        return
+    log.setMinimumHeight(LOG_MIN_HEIGHT)
+    log.setMaximumHeight(16777215)
+    pol = log.sizePolicy()
+    pol.setVerticalPolicy(QSizePolicy.Expanding)
+    log.setSizePolicy(pol)
+
+    def sync_log_stretch(*_args) -> None:
+        # ログを畳んでいる・隠しているときは広げない（空の箱だけが大きくなるため）
+        try:
+            expanded = bool(log_group.is_expanded()) if hasattr(log_group, "is_expanded") else True
+        except Exception:
+            expanded = True
+        toggle = getattr(win, "btn_toggle_log", None)
+        shown = toggle.isChecked() if toggle is not None else True
+        side_lay.setStretchFactor(log_group, 1 if (expanded and shown) else 0)
+
+    win._sync_log_stretch = sync_log_stretch
+    if hasattr(log_group, "toggled_collapse"):
+        log_group.toggled_collapse.connect(sync_log_stretch)
+    toggle = getattr(win, "btn_toggle_log", None)
+    if toggle is not None:
+        toggle.toggled.connect(sync_log_stretch)
+    extras = getattr(win, "ui_extras", None)
+    if extras is not None and getattr(extras, "popouts", None) is not None:
+        extras.popouts.changed.connect(sync_log_stretch)  # 小窓から戻したとき、広がり方を付け直す
+    sync_log_stretch()
+
+
 def _convert_bars_to_flow(win) -> None:
     nav_bar = getattr(win, "_nav_bar_widget", None)
     if nav_bar is not None:
@@ -857,7 +934,7 @@ def _install_behaviors(win) -> None:
     orig_update_bar = win._update_floating_selection_bar
 
     #   未選択のときは「なぜ下のボタンが押せないか」を短く書く（長い文だとバーが 2 段になる）
-    idle_badge_text = "未選択: 点を囲むと右の操作が使えます"
+    idle_badge_text = "未選択（点を囲むと使えます）"
 
     def update_bar(count: int):
         badge = win.floating_sel_badge
@@ -1016,6 +1093,12 @@ def apply_modern_ui(win) -> None:
     extras = install_ui_extras(win)
     if kit is not None and extras is not None and extras.nav_launcher_btn is not None:
         kit.set_icon(extras.nav_launcher_btn, "search")
+
+    # 余白とログ枠（説明書タブを足した後に行う: 設定のタブの高さは、足したタブも含めて決まるため）
+    try:
+        _tune_density(win)
+    except Exception as exc:
+        log_warning(f"新UI: 余白とログ枠の調整に失敗しました: {exc}")
 
     # 既定タブは「①自動」（初めての人が最初に行う作業）
     try:

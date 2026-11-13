@@ -23,7 +23,7 @@ use_sandbox_settings()  # この PC の本番アプリの保存設定を、テ�
 import numpy as np
 from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
 from PySide6.QtGui import QFocusEvent
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QTabWidget
 
 from gui.button_kit import BUTTON_ICONS, DISABLED_REASONS, ROLE_GUIDE, KeyboardFocusRing, disabled_reason
 from gui.design_tokens import THEMES, build_modern_qss
@@ -814,7 +814,8 @@ class TestBugCheck20261111(_WinCase):
         """QMouseEvent.pos() は Qt 6 で非推奨（警告がテストのたびに出ていた）。position().toPoint() を使う"""
         import gui.gl_viewer as glv
 
-        src = open(glv.__file__, encoding="utf-8").read()
+        with open(glv.__file__, encoding="utf-8") as f:
+            src = f.read()
         self.assertNotIn("event.pos()", src)
         self.assertNotIn("event.globalPos()", src)
 
@@ -828,6 +829,95 @@ class TestBugCheck20261111(_WinCase):
             min_w = win.sidebar_widget.minimumSizeHint().width()
             vp_w = win.sidebar_scroll.viewport().width()
             self.assertLessEqual(min_w, vp_w, f"[{theme}] 「全て」タブで左パネルの最小幅({min_w}px)が表示領域幅({vp_w}px)を超えています")
+
+
+class TestDensity20261113(_WinCase):
+    """2026-11-13 の利用者の指摘（表示の余白が多い・ログ枠が小さい）の再発防止"""
+
+    def _tabs(self):
+        return self.win.settings_group.findChild(QTabWidget)
+
+    def test_settings_tab_height_follows_current_tab(self):
+        win = self.win
+        win._set_sidebar_workflow_tab("settings")
+        tabs = self._tabs()
+        names = [tabs.tabText(i) for i in range(tabs.count())]
+        self.assertIn("説明書", names)
+        heights = {}
+        for i, name in enumerate(names):
+            tabs.setCurrentIndex(i)
+            for _ in range(5):
+                QApplication.processEvents()
+            heights[name] = (tabs.height(), tabs.widget(i).sizeHint().height())
+        display_h, display_hint = heights["表示"]
+        # 以前は、いちばん背の高い「説明書」に全タブの高さが合わされ、「表示」の行が引き伸ばされて余白だらけだった
+        self.assertLess(display_h, heights["説明書"][0] - 150, f"「表示」タブが説明書の高さに引き伸ばされています: {heights}")
+        self.assertLessEqual(display_h, display_hint + 60, f"「表示」タブに余白があります: {heights}")
+        self.assertGreaterEqual(heights["説明書"][0], 400, "説明書のタブは読める高さを保つ")
+        tabs.setCurrentIndex(0)
+
+    def test_log_box_is_large_and_grows(self):
+        win, ex = self.win, self.ex
+        log = win.log_text
+        self.assertGreaterEqual(log.minimumHeight(), 150, "ログ枠が小さいままです（以前は高さ 70px = 3 行の固定）")
+        self.assertGreater(log.maximumHeight(), 2000)
+        for _ in range(5):
+            QApplication.processEvents()
+        self.assertGreaterEqual(log.height(), 150)
+        lay = win.sidebar_widget.layout()
+        self.assertEqual(lay.stretch(lay.indexOf(win.log_group)), 1, "左パネルに空きがあれば、ログ枠が空きいっぱいまで広がる")
+        win.btn_toggle_log.setChecked(False)
+        self.assertEqual(lay.stretch(lay.indexOf(win.log_group)), 0, "ログを隠しているときは広げない")
+        win.btn_toggle_log.setChecked(True)
+        self.assertEqual(lay.stretch(lay.indexOf(win.log_group)), 1)
+
+        # ログも小窓に出せる。窓を大きくすれば、そのぶんログ枠が広がる
+        self.assertIn("panel.log", {c.id for c in ex.commands()})
+        w = ex.popouts.pop_out("log")
+        self.assertIsNotNone(w)
+        w.resize(720, 700)
+        for _ in range(8):
+            QApplication.processEvents()
+        self.assertGreater(log.height(), 380, "小窓を大きくしてもログ枠が広がりません")
+        ex.popouts.restore("log")
+        for _ in range(5):
+            QApplication.processEvents()
+        self.assertLess(lay.indexOf(win.save_group), lay.indexOf(win.log_group), "ログは保存の箱の次（いちばん下）へ戻る")
+        self.assertGreaterEqual(lay.indexOf(win.log_group), 0)
+        self.assertEqual(lay.stretch(lay.indexOf(win.log_group)), 1, "戻した後も、空きいっぱいまで広がる")
+
+    def test_bars_fit_in_one_row_at_1450px_wide_screen(self):
+        """横 1,450px の画面（3D 画面の幅は約 1,000px）で、上下のバーが 1 段に収まる。明るいテーマのほうが文字が広い"""
+        win = self.win
+        win.apply_ui_theme("kiseki")
+        win.resize(1450, 900)
+        for _ in range(10):
+            QApplication.processEvents()
+        self.assertLess(win.viewer.width(), 1030)
+
+        def rows(bar):
+            return len({b.geometry().y() for b in bar.findChildren(QPushButton) if b.isVisible() and b.parentWidget() is bar})
+
+        self.assertEqual(rows(win._nav_bar_widget), 1, "上のバーが 2 段になっています")
+        self.assertEqual(rows(win.bottom_overlay_bar), 1, "下のバーが 2 段になっています（未選択）")
+        self._load()
+        self._select(123456 if len(win.viewer.points_raw) > 123456 else 1000)
+        for _ in range(5):
+            QApplication.processEvents()
+        self.assertEqual(rows(win.bottom_overlay_bar), 1, "下のバーが 2 段になっています（選択中）")
+
+    def test_hud_banner_wraps_instead_of_being_cut(self):
+        from gui.gl_viewer import HUD_SEPARATOR, wrap_hud_segments
+
+        text = HUD_SEPARATOR.join(["断面シーク中 (枠非表示 / Shift+B:再表示)", "Z基点:10.84m [10.34〜11.34m / 厚1.00m]",
+                                   "表示: 30,246,033点", "元ファイルから8,506,840点を重ね描き (ボックス内272,214,414点を上限で間引き)"])
+        measure = lambda t: len(t) * 10  # noqa: E731
+        lines = wrap_hud_segments(text, 600, measure)
+        self.assertGreater(len(lines), 1)
+        self.assertEqual(HUD_SEPARATOR.join(lines), text, "折り返しても文は欠けない")
+        self.assertTrue(all(measure(ln) <= 600 or HUD_SEPARATOR not in ln for ln in lines))
+        self.assertEqual(wrap_hud_segments("短い案内", 600, measure), ["短い案内"])
+        self.assertEqual(len(wrap_hud_segments(text, 100000, measure)), 1)
 
 
 class TestClassicUiHasNoButtonKit(unittest.TestCase):

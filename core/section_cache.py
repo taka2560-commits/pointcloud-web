@@ -12,7 +12,7 @@ libe57 には読み飛ばし（seek）が無く、箱に掛からない部分も
     scanNN_rgb.npy    uint8   (n, 3)  … 色（16bit 色は 8bit に落とす。表示専用）
     scanNN_int.npy    float16 (n,)    … 反射強度（表示のストレッチ用。無ければ作らない）
     scanNN_chunks.npy float64 (m, 8)  … チャンク表 [先頭位置, 点数, xmin, xmax, ymin, ymax, zmin, zmax]（ローカル座標）
-2 回目からは、チャンク表の範囲を表示座標へ変換して箱に掛かるチャンクだけを np.load(mmap_mode="r") で読む。
+2 回目からは、チャンク表の範囲を表示座標へ変換して箱に掛かるチャンクだけをファイルから読む（mmap は使わない。core/npy_file.py）。
 1 点 17 バイト（int32 / float32 の場合。5.4 億点で約 9GB）。元ファイルが変わると（署名不一致）作り直す。
 スキャン単位で追加できるので、箱に掛からず読まなかったスキャンは後で必要になったときに加わる。
 書き込みに失敗しても（読み取り専用フォルダ・空き容量不足）読み直し自体は従来どおり続ける。
@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from core.e57_io import file_signature
+from core.npy_file import NpyFileArray, NpySequentialWriter
 from core.logger import log_info, log_warning
 
 CACHE_VERSION = 2
@@ -72,7 +73,7 @@ def local_from_stored(
 
 @dataclass
 class CachedScan:
-    """キャッシュ済みスキャン 1 つ分（配列は mmap。n_valid 点だけが有効）"""
+    """キャッシュ済みスキャン 1 つ分（配列は NpyFileArray = 範囲を指定したときだけファイルから読む。n_valid 点だけが有効）"""
 
     scan_index: int
     n_valid: int
@@ -80,9 +81,9 @@ class CachedScan:
     xyz_scale: Optional[List[float]]
     xyz_offset: Optional[List[float]]
     chunks: np.ndarray            # (m, 8) float64
-    xyz: np.ndarray               # (n, 3) memmap（xyz_kind の dtype）
-    rgb: Optional[np.ndarray]     # (n, 3) uint8 memmap
-    intensity: Optional[np.ndarray]  # (n,) float16 memmap
+    xyz: NpyFileArray               # (n, 3)（xyz_kind の dtype）
+    rgb: Optional[NpyFileArray]     # (n, 3) uint8
+    intensity: Optional[NpyFileArray]  # (n,) float16
 
     def chunk_slice(self, k: int) -> Tuple[int, int]:
         start = int(self.chunks[k, 0])
@@ -147,13 +148,11 @@ class ScanCacheWriter:
             "int": base + "_int" + _PART,
         }
         n_alloc = max(1, self.n_points)
-        self._xyz = np.lib.format.open_memmap(self._paths["xyz"], mode="w+", dtype=_XYZ_DTYPES[xyz_kind], shape=(n_alloc, 3))
-        self._rgb = (
-            np.lib.format.open_memmap(self._paths["rgb"], mode="w+", dtype=np.uint8, shape=(n_alloc, 3)) if has_rgb else None
-        )
-        self._int = (
-            np.lib.format.open_memmap(self._paths["int"], mode="w+", dtype=np.float16, shape=(n_alloc,)) if has_int else None
-        )
+        self._n_alloc = n_alloc
+        # mmap ではなく、先頭から順に書く（mmap で書くと、書いた分がメモリに残り、5 億点でメモリが 95% まで埋まった）
+        self._xyz = NpySequentialWriter(self._paths["xyz"], _XYZ_DTYPES[xyz_kind], (n_alloc, 3))
+        self._rgb = NpySequentialWriter(self._paths["rgb"], np.uint8, (n_alloc, 3)) if has_rgb else None
+        self._int = NpySequentialWriter(self._paths["int"], np.float16, (n_alloc,)) if has_int else None
 
     def add(self, xyz_store: np.ndarray, local_xyz: np.ndarray, rgb01: Optional[np.ndarray], ints: Optional[np.ndarray]) -> None:
         """
@@ -167,29 +166,30 @@ class ScanCacheWriter:
             raise ValueError("キャッシュ書き込み: 座標と復元座標の長さが一致しません")
         a = self.n_written
         b = a + n
-        if b > len(self._xyz):
+        if b > self._n_alloc:
             raise ValueError(f"キャッシュの書き込みが宣言点数 {self.n_points:,} を超えました（スキャン #{self.scan_index}）")
-        self._xyz[a:b] = np.asarray(xyz_store, dtype=self._xyz.dtype)
+        self._xyz.append(np.asarray(xyz_store, dtype=self._xyz.dtype))
         if self._rgb is not None:
             if rgb01 is not None:
-                self._rgb[a:b] = np.clip(np.rint(rgb01 * 255.0), 0, 255).astype(np.uint8)
+                self._rgb.append(np.clip(np.rint(rgb01 * 255.0), 0, 255).astype(np.uint8))
             else:
-                self._rgb[a:b] = 0
+                self._rgb.append(np.zeros((n, 3), dtype=np.uint8))
         if self._int is not None:
             if ints is not None:
-                self._int[a:b] = np.clip(ints, -65504.0, 65504.0).astype(np.float16)
+                self._int.append(np.clip(ints, -65504.0, 65504.0).astype(np.float16))
             else:
-                self._int[a:b] = 0
+                self._int.append(np.zeros(n, dtype=np.float16))
         mins = np.min(local_xyz, axis=0)
         maxs = np.max(local_xyz, axis=0)
         self.chunk_rows.append([float(a), float(n), float(mins[0]), float(maxs[0]), float(mins[1]), float(maxs[1]), float(mins[2]), float(maxs[2])])
         self.n_written = b
 
-    def _close_maps(self) -> None:
+    def _close_maps(self, pad: bool = True) -> None:
+        """書き込みを閉じる。pad=True なら宣言点数に満たない残りを 0 で埋める（以前の mmap 版と同じ大きさのファイルになる）"""
         for m in (self._xyz, self._rgb, self._int):
             if m is not None:
                 try:
-                    m.flush()
+                    m.close(pad=pad)
                 except Exception:
                     pass
         self._xyz = self._rgb = self._int = None
@@ -209,7 +209,7 @@ class ScanCacheWriter:
         )
 
     def abort(self) -> None:
-        self._close_maps()
+        self._close_maps(pad=False)
         for p in self._paths.values():
             try:
                 if os.path.exists(p):
@@ -309,7 +309,7 @@ class SectionCache:
         return int(scan_index) in self.scans
 
     def scan(self, scan_index: int) -> Optional[CachedScan]:
-        """スキャンのキャッシュを mmap で開く。ファイルが欠けていれば None（呼び出し側はデコードに戻す）"""
+        """スキャンのキャッシュを開く（mmap は使わない）。ファイルが欠けていれば None（呼び出し側はデコードに戻す）"""
         idx = int(scan_index)
         if idx in self._loaded:
             return self._loaded[idx]
@@ -322,10 +322,10 @@ class SectionCache:
             log_warning(f"読み直しキャッシュのスキャン #{idx} の座標形式が不明なためデコードに戻します: {kind}")
             return None
         try:
-            chunks = np.load(base + "_chunks.npy", mmap_mode="r")
-            xyz = np.load(base + "_xyz.npy", mmap_mode="r")
-            rgb = np.load(base + "_rgb.npy", mmap_mode="r") if meta.get("has_rgb") else None
-            inten = np.load(base + "_int.npy", mmap_mode="r") if meta.get("has_int") else None
+            chunks = np.load(base + "_chunks.npy")
+            xyz = NpyFileArray(base + "_xyz.npy")
+            rgb = NpyFileArray(base + "_rgb.npy") if meta.get("has_rgb") else None
+            inten = NpyFileArray(base + "_int.npy") if meta.get("has_int") else None
         except (OSError, ValueError) as e:
             log_warning(f"読み直しキャッシュのスキャン #{idx} が読めないためデコードに戻します: {e}")
             return None

@@ -47,6 +47,26 @@ class LayerInfo:
     is_noise: bool = False  # True: ノイズ(除去点)扱い (ID=0 または 自動除去フィルタレイヤー)
 
 
+HUD_SEPARATOR = "  ｜  "
+
+
+def wrap_hud_segments(text: str, max_width: int, measure) -> list:
+    """
+    画面上部の案内文を、区切り（｜）の所で折り返して行のリストにする。
+    measure は文字列の描画幅を返す関数。区切りの無い 1 かたまりが max_width より長い場合は、そのまま 1 行にする。
+    """
+    lines, cur = [], ""
+    for seg in str(text).split(HUD_SEPARATOR):
+        cand = seg if not cur else cur + HUD_SEPARATOR + seg
+        if cur and measure(cand) > max_width:
+            lines.append(cur)
+            cur = seg
+        else:
+            cur = cand
+    lines.append(cur)
+    return lines
+
+
 class PointCloudViewer(QOpenGLWidget):
     """3D点群ビューアクラス"""
 
@@ -1014,14 +1034,18 @@ class PointCloudViewer(QOpenGLWidget):
             font_sec = QFont("Segoe UI", 9, QFont.Bold)
             painter.setFont(font_sec)
             fm_sec = painter.fontMetrics()
-            tw_s = fm_sec.horizontalAdvance(sec_text) + 24
+            # 幅に収まらないときは区切り（｜）の所で折り返す（1 行のままだと右端で切れて、重ね描きの点数が読めなかった）
+            sec_lines = wrap_hud_segments(sec_text, max(200, self.width() - 48), fm_sec.horizontalAdvance)
+            tw_s = max(fm_sec.horizontalAdvance(line) for line in sec_lines) + 24
+            bh_s = 26 + 20 * (len(sec_lines) - 1)
             bx_s = max(12, (self.width() - tw_s) // 2)
             by_s = 44 if (self.clean_focus_mode or self.instant_delete_mode or self.pan_mode or self.space_pan_active or (self.selection_mode and self.selection_shape == self.SELECT_BRUSH)) else 10
             painter.setPen(QPen(QColor(250, 204, 21, 220), 1.5))
             painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
-            painter.drawRoundedRect(QRect(bx_s, by_s, tw_s, 26), 13, 13)
+            painter.drawRoundedRect(QRect(bx_s, by_s, tw_s, bh_s), 13, 13)
             painter.setPen(QColor(254, 240, 138))
-            painter.drawText(QRect(bx_s, by_s, tw_s, 26), Qt.AlignCenter, sec_text)
+            for li_s, line in enumerate(sec_lines):
+                painter.drawText(QRect(bx_s, by_s + 20 * li_s, tw_s, 26), Qt.AlignCenter, line)
 
         # 5. 計測情報 & 2点ピック斜め壁視点合わせガイド表示
         if self.wall_align_mode:

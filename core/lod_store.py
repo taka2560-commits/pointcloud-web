@@ -19,8 +19,9 @@ LOD ストア（視点に応じて元ファイルの密度で描くための、�
   lod_starts.npy  int64   (レベル数, K+1) … レベル ℓ の中で格子 j の点が始まる位置（全体通し番号）
 
 描画時は、葉の箱を画面へ投影して「画面上の広さ × 目標密度」ぶんの点数を葉ごとに求め、全体が予算に収まるように
-葉ごとのレベルを決める（select_leaf_levels）。選ばれた範囲だけを mmap から読む（gather）。粗いレベルが先に並ぶ。
-作成は 2 回走査（1 回目: レベル × 格子の点数を数える、2 回目: 行き先へ書き込む）で、全点をメモリに載せない。
+葉ごとのレベルを決める（select_leaf_levels）。選ばれた範囲だけをファイルから読む（gather）。粗いレベルが先に並ぶ。
+作成は 3 段（1: レベル × 格子の点数を数える、2: 行き先の区間ごとの一時ファイルへ振り分ける、3: 区間ごとに並べて書く）で、
+全点をメモリに載せず、ファイルも mmap しない（core/npy_file.py の冒頭に理由）。
 GUI にも OpenGL にも依存しない。
 """
 
@@ -34,6 +35,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from core.e57_io import file_signature
+from core.npy_file import NpyFileArray, NpySequentialWriter
 from core.logger import log_info, log_warning
 from core.processor import _coord_mode_axes, scan_pose_transform, transform_coordinate_system
 from core.section_cache import SectionCache, cache_dir_for, local_from_stored
@@ -51,6 +53,14 @@ FALLBACK_RGB = (77, 204, 242)      # 色の無いスキャン（読み込みワ�
 HIDDEN_VOXEL = 0.05                # m。非表示の点（ノイズなど）を重ね描きから隠す判定の格子（最も細かい段）
 HIDDEN_VOXELS = (0.05, 0.2, 0.8, 3.2)  # m。細かい段から粗い段へ。どれかで「非表示の点だけの格子」に入れば隠す
 _PART = ".part.npy"
+# 並べ替えの小分け（2026-11-13）: 行き先を SEGMENT_POINTS 点ごとの区間に分け、区間ごとの一時ファイルへ順に書いてから、
+# 区間を 1 つずつメモリ上で並べて最終ファイルへ順に書く。以前は 9GB の最終ファイルを mmap して飛び飛びに書いていたので、
+# 書いた分がメモリに残り、5.4 億点でメモリが 97% まで埋まってディスクの応答が 2.4 秒まで落ちた。
+SEGMENT_POINTS = 16_000_000   # 1 区間の点数（メモリ上で並べる単位。約 0.6GB）
+MAX_SEGMENTS = 64             # 一時ファイルの数の上限（点数が多いときは 1 区間を大きくする）
+# 一時ファイルの 1 点: 区間の中の行き先 int32 + 座標 float32×3 + 色 uint8×3 + 強度 float16 = 21 バイト
+_BUCKET_DTYPE = np.dtype([("d", "<i4"), ("xyz", "<f4", (3,)), ("rgb", "u1", (3,)), ("i", "<f2")])
+BUCKET_BYTES_PER_POINT = _BUCKET_DTYPE.itemsize
 _FILES = ("lod_xyz.npy", "lod_rgb.npy", "lod_int.npy", "lod_cells.npy", "lod_starts.npy", "lod.json")
 
 # 7bit の値を 3bit おきに広げる表（モートン符号用）
@@ -142,6 +152,7 @@ def build_lod_store(
     base_points: int = DEFAULT_BASE_POINTS,
     is_cancelled: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
+    segment_points: Optional[int] = None,
 ) -> List[Dict[str, object]]:
     """
     読み込み済みスキャンの読み込み元ファイルごとに LOD ストアを作る（読み直しキャッシュが揃っていること。
@@ -163,7 +174,7 @@ def build_lod_store(
             if progress_callback is not None:
                 progress_callback((_i + max(0.0, min(1.0, ratio))) / n_files, msg)
 
-        results.append(_build_one(source, file_scans, cache_dir, base_points, is_cancelled, sub_progress))
+        results.append(_build_one(source, file_scans, cache_dir, base_points, is_cancelled, sub_progress, segment_points))
     return results
 
 
@@ -202,7 +213,7 @@ def prepare_lod_for_scans(
     }
 
 
-def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progress) -> Dict[str, object]:
+def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progress, segment_points=None) -> Dict[str, object]:
     t0 = time.perf_counter()
     cache = SectionCache.open(source, cache_dir=cache_dir, create=False)
     if cache is None:
@@ -225,7 +236,8 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
         free = shutil.disk_usage(cache.directory).free
     except OSError:
         free = 0
-    need = int(n_points * BYTES_PER_POINT * FREE_SPACE_MARGIN)
+    # 並べ替えの途中は、一時ファイル（1 点 21 バイト）がいちばん大きい。区間を最終ファイルへ移すたびに消していく
+    need = int(n_points * max(BYTES_PER_POINT, BUCKET_BYTES_PER_POINT) * FREE_SPACE_MARGIN)
     if free < need:
         raise RuntimeError(
             f"LOD データを作る空き容量が足りません（必要 {need / 1e9:.1f}GB / 空き {free / 1e9:.1f}GB）: {cache.directory}"
@@ -275,7 +287,7 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
             u, c = np.unique(key, return_counts=True)
             counts[u] += c
             g += len(local)
-            progress(0.45 * g / n_points, f"LOD 作成 1/2: 「{name}」の点を数えています ({g:,}/{n_points:,} 点)")
+            progress(0.45 * g / n_points, f"LOD 作成 1/3: 「{name}」の点を数えています ({g:,}/{n_points:,} 点)")
     counts2 = counts.reshape(n_levels, N_MORTON)
     cells = np.flatnonzero(counts2.any(axis=0)).astype(np.int32)
     cnt = counts2[:, cells]
@@ -292,16 +304,20 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
         cursor[lv * N_MORTON + cells.astype(np.int64)] = starts[lv, :-1]
     del counts2, cnt
 
-    # --- 2 回目: 行き先へ書き込む ---
+    # --- 2 回目: 行き先の区間ごとの一時ファイルへ順に書く → 区間ごとに並べて最終ファイルへ順に書く ---
     paths = lod_paths(source, cache_dir)
     part = {k: paths[k][: -len(".npy")] + _PART for k in ("lod_xyz.npy", "lod_rgb.npy", "lod_int.npy")}
-    out_xyz = out_rgb = out_int = None
+    seg_points = int(segment_points) if segment_points else max(SEGMENT_POINTS, -(-n_points // MAX_SEGMENTS))
+    seg_points = max(1, min(seg_points, 2_000_000_000))  # 区間の中の行き先は int32 で持つ
+    n_seg = -(-n_points // seg_points)
+    lod_dir = os.path.dirname(paths["lod_xyz.npy"])
+    bucket_paths = [os.path.join(lod_dir, f"lod_bucket{i:03d}{_PART}") for i in range(n_seg)]
+    bucket_files: List[Optional[object]] = [None] * n_seg
+    writers: List[NpySequentialWriter] = []
+    for p_old in bucket_paths:  # leftovers of an interrupted run must not be appended to
+        if os.path.exists(p_old):
+            os.remove(p_old)
     try:
-        out_xyz = np.lib.format.open_memmap(part["lod_xyz.npy"], mode="w+", dtype=np.float32, shape=(n_points, 3))
-        if has_rgb:
-            out_rgb = np.lib.format.open_memmap(part["lod_rgb.npy"], mode="w+", dtype=np.uint8, shape=(n_points, 3))
-        if has_int:
-            out_int = np.lib.format.open_memmap(part["lod_int.npy"], mode="w+", dtype=np.float16, shape=(n_points,))
         g = 0
         for s, cs in pairs:
             name = s.name or f"Scan {s.scan_index}"
@@ -315,19 +331,68 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
                 first = np.flatnonzero(np.concatenate([[True], ks[1:] != ks[:-1]]))
                 lens = np.diff(np.concatenate([first, [n]]))
                 rank = np.arange(n, dtype=np.int64) - np.repeat(first, lens)
-                dest = cursor[ks] + rank
-                out_xyz[dest] = (world[order] - origin).astype(np.float32)
-                if out_rgb is not None:
-                    out_rgb[dest] = rgb[order] if rgb is not None else np.asarray(FALLBACK_RGB, dtype=np.uint8)
-                if out_int is not None:
-                    out_int[dest] = ints[order] if ints is not None else np.float16(0.0)
+                dest = cursor[ks] + rank   # 行き先（キーの順に並べてあるので、小さい順になっている）
+                xyz_o = (world[order] - origin).astype(np.float32)
+                rgb_o = rgb[order] if rgb is not None else None
+                int_o = ints[order] if ints is not None else None
+                seg_lo = int(dest[0] // seg_points)
+                seg_hi = int(dest[-1] // seg_points)
+                edges = np.searchsorted(dest, np.arange(seg_lo, seg_hi + 2, dtype=np.int64) * seg_points)
+                for j, seg in enumerate(range(seg_lo, seg_hi + 1)):
+                    i0, i1 = int(edges[j]), int(edges[j + 1])
+                    if i1 <= i0:
+                        continue
+                    rec = np.empty(i1 - i0, dtype=_BUCKET_DTYPE)
+                    rec["d"] = dest[i0:i1] - seg * seg_points
+                    rec["xyz"] = xyz_o[i0:i1]
+                    rec["rgb"] = rgb_o[i0:i1] if rgb_o is not None else np.asarray(FALLBACK_RGB, dtype=np.uint8)
+                    rec["i"] = int_o[i0:i1] if int_o is not None else np.float16(0.0)
+                    if bucket_files[seg] is None:
+                        bucket_files[seg] = open(bucket_paths[seg], "ab")
+                    bucket_files[seg].write(memoryview(rec).cast("B"))
                 cursor[ks[first]] += lens
                 g += n
-                progress(0.45 + 0.5 * g / n_points, f"LOD 作成 2/2: 「{name}」の点を並べ替えています ({g:,}/{n_points:,} 点)")
-        for m in (out_xyz, out_rgb, out_int):
-            if m is not None:
-                m.flush()
-        m = out_xyz = out_rgb = out_int = None  # mmap を閉じてから改名する（Windows は開いたままだと改名できない）
+                progress(0.45 + 0.3 * g / n_points, f"LOD 作成 2/3: 「{name}」の点を振り分けています ({g:,}/{n_points:,} 点)")
+        for i, f in enumerate(bucket_files):
+            if f is not None:
+                f.close()
+                bucket_files[i] = None
+
+        out_xyz = NpySequentialWriter(part["lod_xyz.npy"], np.float32, (n_points, 3))
+        writers.append(out_xyz)
+        out_rgb = out_int = None
+        if has_rgb:
+            out_rgb = NpySequentialWriter(part["lod_rgb.npy"], np.uint8, (n_points, 3))
+            writers.append(out_rgb)
+        if has_int:
+            out_int = NpySequentialWriter(part["lod_int.npy"], np.float16, (n_points,))
+            writers.append(out_int)
+        done = 0
+        for seg in range(n_seg):
+            _check()
+            seg_len = min(seg_points, n_points - seg * seg_points)
+            rec = np.fromfile(bucket_paths[seg], dtype=_BUCKET_DTYPE) if os.path.exists(bucket_paths[seg]) else np.empty(0, dtype=_BUCKET_DTYPE)
+            if len(rec) != seg_len:
+                raise RuntimeError(f"LOD の並べ替えで点数が合いません（区間 {seg}: {len(rec):,} / {seg_len:,} 点）")
+            d = rec["d"]
+            buf = np.empty((seg_len, 3), dtype=np.float32)
+            buf[d] = rec["xyz"]
+            out_xyz.append(buf)
+            if out_rgb is not None:
+                buf_c = np.empty((seg_len, 3), dtype=np.uint8)
+                buf_c[d] = rec["rgb"]
+                out_rgb.append(buf_c)
+            if out_int is not None:
+                buf_i = np.empty(seg_len, dtype=np.float16)
+                buf_i[d] = rec["i"]
+                out_int.append(buf_i)
+            del rec, d, buf
+            os.remove(bucket_paths[seg])
+            done += seg_len
+            progress(0.75 + 0.22 * done / n_points, f"LOD 作成 3/3: 並べ替えた点を書き込んでいます ({done:,}/{n_points:,} 点)")
+        for w in writers:
+            w.close(pad=False)
+        writers = []
         progress(0.97, "LOD データを確定しています...")
         for k_name, p in part.items():
             if os.path.exists(p):
@@ -353,8 +418,18 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
             json.dump(header, f, ensure_ascii=False, indent=1)
         os.replace(tmp, paths["lod.json"])
     except BaseException:
-        out_xyz = out_rgb = out_int = None
-        for p in part.values():
+        for f in bucket_files:
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        for w in writers:
+            try:
+                w.close(pad=False)
+            except Exception:
+                pass
+        for p in list(part.values()) + bucket_paths:
             try:
                 if os.path.exists(p):
                     os.remove(p)
@@ -383,7 +458,11 @@ def _build_one(source, file_scans, cache_dir, base_points, is_cancelled, progres
 # 読み出し
 # ----------------------------------------------------------------------------------------------------------------------
 class LodStore:
-    """1 ファイル分の LOD ストア（mmap）。葉の表と、葉ごとのレベル指定からの読み出しを提供する"""
+    """
+    1 ファイル分の LOD ストア。葉の表と、葉ごとのレベル指定からの読み出しを提供する。
+    点のファイルは mmap せず、要る範囲だけをファイルから読む（NpyFileArray）。mmap だと、見て回るうちに読んだ分が
+    使用メモリに積み上がる。
+    """
 
     def __init__(self, source_file: str, header: dict, paths: Dict[str, str], leaf_max_points: int):
         self.source_file = source_file
@@ -394,9 +473,9 @@ class LodStore:
         self.origin = np.asarray(header["origin"], dtype=np.float64)
         self.cells = np.load(paths["lod_cells.npy"]).astype(np.int64)
         self.starts = np.load(paths["lod_starts.npy"])
-        self.xyz = np.load(paths["lod_xyz.npy"], mmap_mode="r")
-        self.rgb = np.load(paths["lod_rgb.npy"], mmap_mode="r") if header.get("has_rgb") else None
-        self.intensity = np.load(paths["lod_int.npy"], mmap_mode="r") if header.get("has_int") else None
+        self.xyz = NpyFileArray(paths["lod_xyz.npy"])
+        self.rgb = NpyFileArray(paths["lod_rgb.npy"]) if header.get("has_rgb") else None
+        self.intensity = NpyFileArray(paths["lod_int.npy"]) if header.get("has_int") else None
         if self.xyz.shape != (self.n_points, 3) or self.starts.shape != (self.n_levels, len(self.cells) + 1):
             raise ValueError("LOD データの形状が不正です")
         self._build_leaves(int(leaf_max_points))
@@ -517,15 +596,12 @@ class LodStore:
         xyz = np.empty((total, 3), dtype=np.float32)
         rgb = np.empty((total, 3), dtype=np.uint8) if self.rgb is not None else None
         inten = np.empty(total, dtype=np.float16) if self.intensity is not None else None
-        pos = 0
-        for a, b in zip(a_all.tolist(), b_all.tolist()):
-            n = b - a
-            xyz[pos : pos + n] = self.xyz[a:b]
-            if rgb is not None:
-                rgb[pos : pos + n] = self.rgb[a:b]
-            if inten is not None:
-                inten[pos : pos + n] = self.intensity[a:b]
-            pos += n
+        a_list, b_list = a_all.tolist(), b_all.tolist()
+        self.xyz.read_ranges(a_list, b_list, xyz)
+        if rgb is not None:
+            self.rgb.read_ranges(a_list, b_list, rgb)
+        if inten is not None:
+            self.intensity.read_ranges(a_list, b_list, inten)
         return xyz, rgb, inten
 
     def close(self) -> None:
