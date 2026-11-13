@@ -74,7 +74,10 @@ from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS, get_theme_qss
-from gui.section_seek import seek_scale, seek_slider_range, seek_slider_value, spin_decimals_for
+from gui.section_seek import (
+    THICK_PAGE_STEP, THICK_SINGLE_STEP, THICK_SLIDER_MAX, centered_seek_span, seek_scale, seek_slider_range,
+    seek_slider_value, spin_decimals_for, thick_from_slider, thick_to_slider,
+)
 from gui.ui_mode import (
     get_ui_mode, UI_MODE_MODERN, UI_MODE_CLASSIC, set_saved_ui_mode, get_saved_ui_mode,
     get_ui_theme, set_saved_ui_theme, get_saved_ui_theme,
@@ -260,6 +263,7 @@ class MainWindow(QMainWindow):
         self._sec_commit_timer.timeout.connect(self._commit_pending_section_slices)
 
         self._init_ui()
+        self._apply_section_thick_sliders()
         self._setup_shortcuts()
         self._load_app_settings()
 
@@ -3101,23 +3105,60 @@ class MainWindow(QMainWindow):
         # 倍率だけ変えるとスライダーの左端・右端が点群の範囲とずれるので、範囲も同じ刻みで作り直す
         self._apply_section_seek_ranges()
 
-    def _apply_section_seek_ranges(self):
-        """X/Y/Z 断面シークのスライダーを、点群の範囲と設定の刻み幅で作り直す（今の位置はそのまま）"""
+    def _apply_section_seek_ranges(self, recenter: bool = False):
+        """
+        X/Y/Z 断面シークのスライダーを、点群の範囲と設定の刻み幅で作り直す（今の位置はそのまま）。
+        スライダーの真ん中が基点で、点群の最小・最大までは必ず届く。
+        recenter=True（「現在位置/選択点を基点に」）で、今の位置を真ん中に置き直す。
+        """
         if not hasattr(self, "slider_pos_x"):
             return
-        step_val = float(self.combo_sec_step.currentData() or 0.01) if hasattr(self, "combo_sec_step") else 0.01
-        scale = seek_scale(step_val, self.world_min, self.world_max)
-        self._sec_pos_scale = scale
-        for idx, (s_pos, sp_pos) in enumerate([
+        pairs = [
             (self.slider_pos_x, self.spin_pos_x),
             (self.slider_pos_y, self.spin_pos_y),
             (self.slider_pos_z, self.spin_pos_z),
-        ]):
-            lo, hi = seek_slider_range(self.world_min[idx], self.world_max[idx], scale)
+        ]
+        centers = getattr(self, "_sec_seek_center", None)
+        if recenter or centers is None:
+            centers = [float(sp_pos.value()) for _, sp_pos in pairs]
+            self._sec_seek_center = centers
+        step_val = float(self.combo_sec_step.currentData() or 0.01) if hasattr(self, "combo_sec_step") else 0.01
+        ext = np.abs(np.asarray(self.world_max, dtype=np.float64) - np.asarray(self.world_min, dtype=np.float64))
+        scale = seek_scale(step_val, self.world_min - ext, self.world_max + ext)  # 範囲は最大で点群の幅ぶん外へ伸びる
+        self._sec_pos_scale = scale
+        for idx, (s_pos, sp_pos) in enumerate(pairs):
+            w_lo, w_hi = float(self.world_min[idx]), float(self.world_max[idx])
+            a, b = centered_seek_span(centers[idx], w_lo, w_hi)
+            lo, hi = seek_slider_range(a, b, scale)
+            sp_pos.blockSignals(True)
+            sp_pos.setRange(min(lo / scale, w_lo - 10.0), max(hi / scale, w_hi + 10.0))  # スライダーで動かせる所は、数値欄にも入る
+            sp_pos.blockSignals(False)
             s_pos.blockSignals(True)
             s_pos.setRange(lo, hi)
             s_pos.setValue(seek_slider_value(sp_pos.value(), scale))
             s_pos.blockSignals(False)
+            s_pos.setToolTip(
+                f"真ん中が基点です。バーの範囲 {a:.2f} 〜 {b:.2f} m（点群は {w_lo:.2f} 〜 {w_hi:.2f} m）。\n"
+                "「現在位置/選択点を基点に」を押すと、その位置が真ん中になります。"
+            )
+
+    def _apply_section_thick_sliders(self):
+        """厚み幅のスライダー（X/Y/Z・斜め壁）を「真ん中が 1m」の目盛りにして、今の厚みの位置へ動かす"""
+        for s_th, sp_th in (
+            (getattr(self, "slider_thick_x", None), getattr(self, "spin_thick_x", None)),
+            (getattr(self, "slider_thick_y", None), getattr(self, "spin_thick_y", None)),
+            (getattr(self, "slider_thick_z", None), getattr(self, "spin_thick_z", None)),
+            (getattr(self, "slider_thick_wall", None), getattr(self, "spin_thick_wall", None)),
+        ):
+            if s_th is None or sp_th is None:
+                continue
+            s_th.blockSignals(True)
+            s_th.setRange(0, THICK_SLIDER_MAX)
+            s_th.setSingleStep(THICK_SINGLE_STEP)
+            s_th.setPageStep(THICK_PAGE_STEP)
+            s_th.setValue(thick_to_slider(sp_th.value()))
+            s_th.blockSignals(False)
+            s_th.setToolTip("真ん中が 1m です。左へ動かすと薄く（左端 1cm）、右へ動かすと厚く（右端 100m）なります。")
 
     def _on_ui_mode_combo_changed(self, index: int):
         """UIスタイルの選択を保存（次回起動時に適用）"""
@@ -3919,9 +3960,6 @@ class MainWindow(QMainWindow):
         self.world_min = safe_min
         self.world_max = safe_max
 
-        max_span = float(np.max(safe_max - safe_min))
-        max_thick_slider = max(200, min(5000, int(max(10.0, max_span) * 10)))
-
         for idx, (s_pos, sp_pos, s_th, sp_th) in enumerate([
             (self.slider_pos_x, self.spin_pos_x, self.slider_thick_x, self.spin_thick_x),
             (self.slider_pos_y, self.spin_pos_y, self.slider_thick_y, self.spin_thick_y),
@@ -3933,13 +3971,10 @@ class MainWindow(QMainWindow):
             sp_pos.setValue(float(mid))
             sp_pos.blockSignals(False)
 
-            s_th.blockSignals(True)
-            s_th.setRange(1, max_thick_slider)
-            s_th.setValue(int(round(sp_th.value() * 10.0)))
-            s_th.blockSignals(False)
-
-        # シークのスライダーは、点群の範囲と設定の刻み幅から決める（倍率と範囲を必ず一緒に）
+        # シークのスライダーは、点群の範囲と設定の刻み幅から決める（倍率と範囲を必ず一緒に）。基点は点群の中央
+        self._sec_seek_center = [float(0.5 * (safe_min[i] + safe_max[i])) for i in range(3)]
         self._apply_section_seek_ranges()
+        self._apply_section_thick_sliders()
 
         self._on_section_x_changed()
         self._on_section_y_changed()
@@ -4389,6 +4424,7 @@ class MainWindow(QMainWindow):
             s_pos.blockSignals(True)
             s_pos.setValue(int(round(val * scale)))
             s_pos.blockSignals(False)
+        self._apply_section_seek_ranges(recenter=True)  # セットした基点を、スライダーの真ん中に置き直す
 
         self._on_section_x_changed()
         self._on_section_y_changed()
@@ -4422,7 +4458,7 @@ class MainWindow(QMainWindow):
             sp_th.setValue(thick_val)
             sp_th.blockSignals(False)
             s_th.blockSignals(True)
-            s_th.setValue(max(s_th.minimum(), min(s_th.maximum(), int(round(thick_val * 10.0)))))
+            s_th.setValue(thick_to_slider(thick_val))
             s_th.blockSignals(False)
             cb()
         self.status_label.setText(f"📐 断面スライスの厚みを {thick_val:.2f}m に設定しました")
@@ -4557,7 +4593,7 @@ class MainWindow(QMainWindow):
         self._on_section_wall_changed(from_user_seek=True, is_preview=False)
 
     def _on_slider_thick_wall_changed(self, val: int):
-        thick = val / 10.0
+        thick = thick_from_slider(val)
         self.spin_thick_wall.blockSignals(True)
         self.spin_thick_wall.setValue(thick)
         self.spin_thick_wall.blockSignals(False)
@@ -4566,7 +4602,7 @@ class MainWindow(QMainWindow):
 
     def _on_spin_thick_wall_changed(self, thick: float):
         self.slider_thick_wall.blockSignals(True)
-        self.slider_thick_wall.setValue(max(self.slider_thick_wall.minimum(), min(self.slider_thick_wall.maximum(), int(round(thick * 10.0)))))
+        self.slider_thick_wall.setValue(thick_to_slider(thick))
         self.slider_thick_wall.blockSignals(False)
         self._on_section_wall_changed(from_user_seek=False, is_preview=False)
 
@@ -4607,7 +4643,7 @@ class MainWindow(QMainWindow):
         self._on_section_x_changed(from_user_seek=True, is_preview=False)
 
     def _on_slider_thick_x_changed(self, val: int):
-        thick = val / 10.0
+        thick = thick_from_slider(val)
         self.spin_thick_x.blockSignals(True)
         self.spin_thick_x.setValue(thick)
         self.spin_thick_x.blockSignals(False)
@@ -4616,7 +4652,7 @@ class MainWindow(QMainWindow):
 
     def _on_spin_thick_x_changed(self, thick: float):
         self.slider_thick_x.blockSignals(True)
-        self.slider_thick_x.setValue(max(self.slider_thick_x.minimum(), min(self.slider_thick_x.maximum(), int(round(thick * 10.0)))))
+        self.slider_thick_x.setValue(thick_to_slider(thick))
         self.slider_thick_x.blockSignals(False)
         self._on_section_x_changed(from_user_seek=False, is_preview=False)
 
@@ -4648,7 +4684,7 @@ class MainWindow(QMainWindow):
         self._on_section_y_changed(from_user_seek=True, is_preview=False)
 
     def _on_slider_thick_y_changed(self, val: int):
-        thick = val / 10.0
+        thick = thick_from_slider(val)
         self.spin_thick_y.blockSignals(True)
         self.spin_thick_y.setValue(thick)
         self.spin_thick_y.blockSignals(False)
@@ -4657,7 +4693,7 @@ class MainWindow(QMainWindow):
 
     def _on_spin_thick_y_changed(self, thick: float):
         self.slider_thick_y.blockSignals(True)
-        self.slider_thick_y.setValue(max(self.slider_thick_y.minimum(), min(self.slider_thick_y.maximum(), int(round(thick * 10.0)))))
+        self.slider_thick_y.setValue(thick_to_slider(thick))
         self.slider_thick_y.blockSignals(False)
         self._on_section_y_changed(from_user_seek=False, is_preview=False)
 
@@ -4689,7 +4725,7 @@ class MainWindow(QMainWindow):
         self._on_section_z_changed(from_user_seek=True, is_preview=False)
 
     def _on_slider_thick_z_changed(self, val: int):
-        thick = val / 10.0
+        thick = thick_from_slider(val)
         self.spin_thick_z.blockSignals(True)
         self.spin_thick_z.setValue(thick)
         self.spin_thick_z.blockSignals(False)
@@ -4698,7 +4734,7 @@ class MainWindow(QMainWindow):
 
     def _on_spin_thick_z_changed(self, thick: float):
         self.slider_thick_z.blockSignals(True)
-        self.slider_thick_z.setValue(max(self.slider_thick_z.minimum(), min(self.slider_thick_z.maximum(), int(round(thick * 10.0)))))
+        self.slider_thick_z.setValue(thick_to_slider(thick))
         self.slider_thick_z.blockSignals(False)
         self._on_section_z_changed(from_user_seek=False, is_preview=False)
 

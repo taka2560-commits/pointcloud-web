@@ -53,13 +53,23 @@ def fit_spin_group(spins: Iterable[QAbstractSpinBox], widths: Iterable[int], lo:
     return width
 
 
+def _seek_texts(spin) -> Sequence[str]:
+    """
+    シークの数値欄に入りうる、いちばん桁の多い値。
+    基点をスライダーの真ん中に置き直すと、範囲は最大で点群の幅ぶん外へ伸びる（そのたびに欄の幅を変えないよう、先に見込む）
+    """
+    lo, hi = spin.minimum(), spin.maximum()
+    span = max(0.0, hi - lo)
+    return [spin.textFromValue(lo - span), spin.textFromValue(hi + span)]
+
+
 def fit_section_spins(win) -> None:
     """断面シークと厚みの数値欄の幅を、今の点群の座標の桁数に合わせる"""
     pos = [getattr(win, f"spin_pos_{a}", None) for a in "xyz"]
     thick = [getattr(win, f"spin_thick_{a}", None) for a in "xyz"]
     if all(sp is not None for sp in pos + thick):
         # 厚みは 5000m まで入るが、ふつうは 2 桁。めったに使わない桁数のために欄を広げない（広げるとスライダーが短くなる）
-        widths = [needed_spin_width(sp) for sp in pos] + [needed_spin_width(sp, ["99.99"]) for sp in thick]
+        widths = [needed_spin_width(sp, _seek_texts(sp)) for sp in pos] + [needed_spin_width(sp, ["99.99"]) for sp in thick]
         fit_spin_group(pos + thick, widths)
     wall_pos = getattr(win, "spin_pos_wall", None)
     wall_thick = getattr(win, "spin_thick_wall", None)
