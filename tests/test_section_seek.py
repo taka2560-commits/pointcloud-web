@@ -7,6 +7,10 @@
 - 点群を読み込むと、設定の刻みに関係なく倍率が 1cm に戻っていた
 - 5mm・1mm の刻みは、数値欄の小数が 2 桁のままで、上下ボタンを押しても値が動かなかった
 - 数値欄が幅 78px の固定で、桁の多い座標（-148769.06 m）が途中で切れて読めなかった
+
+「真ん中が起点」（2026-11-13、利用者の提案「スライダー起点を真ん中に」「どちらのスライダーも」）:
+- シーク: 基点がバーの真ん中。点群の最小・最大までは必ず届く
+- 厚み幅: 真ん中が 1m。左端 1cm、右端 100m（以前は 0.1m〜敷地の大きさを等間隔に割り当て、1m が左端に張り付いていた）
 """
 
 import os
@@ -24,7 +28,8 @@ from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication
 
 from gui.section_seek import (
-    SLIDER_INT_LIMIT, seek_scale, seek_slider_range, seek_slider_value, spin_decimals_for,
+    SLIDER_INT_LIMIT, THICK_SLIDER_MAX, centered_seek_span, seek_scale, seek_slider_range, seek_slider_value,
+    spin_decimals_for, thick_from_slider, thick_to_slider,
 )
 
 # 利用者のファイル（平面直角座標・高さ 7.20〜50.69m）と同じ範囲
@@ -206,6 +211,171 @@ class TestSeekSliderRange(_WinCase):
         left, right = self._ends("z")
         self.assertAlmostEqual(left, 7.20, places=2)
         self.assertAlmostEqual(right, 50.69, places=2)
+
+
+class TestCenterMath(unittest.TestCase):
+    def test_span_is_the_cloud_when_the_origin_is_its_middle(self):
+        a, b = centered_seek_span(0.5 * (7.2 + 50.69), 7.2, 50.69)
+        self.assertAlmostEqual(a, 7.2, places=9)
+        self.assertAlmostEqual(b, 50.69, places=9)
+
+    def test_span_keeps_the_origin_in_the_middle_and_covers_the_cloud(self):
+        for c in (7.2, 10.5, 28.0, 45.0, 50.69):
+            a, b = centered_seek_span(c, 7.2, 50.69)
+            self.assertAlmostEqual(0.5 * (a + b), c, places=9, msg="基点が真ん中")
+            self.assertLessEqual(a, 7.2 + 1e-9)
+            self.assertGreaterEqual(b, 50.69 - 1e-9)
+            self.assertLessEqual(b - a, 2 * (50.69 - 7.2) + 1e-9, "範囲は点群の幅の 2 倍まで")
+
+    def test_span_handles_odd_inputs(self):
+        self.assertEqual(centered_seek_span(99.0, 7.2, 50.69)[1] - 50.69, 50.69 - 7.2)  # 点群の外の基点は端へ寄せる
+        a, b = centered_seek_span(float("nan"), 0.0, 10.0)
+        self.assertEqual((a, b), (0.0, 10.0))
+        a, b = centered_seek_span(3.0, 3.0, 3.0)  # 厚みの無い点群
+        self.assertLess(a, 3.0)
+        self.assertGreater(b, 3.0)
+        self.assertEqual(centered_seek_span(5.0, 10.0, 0.0), (0.0, 10.0))  # 逆順
+
+    def test_thickness_middle_is_one_meter(self):
+        mid = THICK_SLIDER_MAX // 2
+        self.assertEqual(thick_from_slider(mid), 1.0)
+        self.assertEqual(thick_to_slider(1.0), mid)
+        self.assertEqual(thick_from_slider(0), 0.01)
+        self.assertEqual(thick_from_slider(THICK_SLIDER_MAX), 100.0)
+        self.assertEqual(thick_from_slider(mid // 2), 0.1, "0.1m は左から 1/4")
+        self.assertEqual(thick_from_slider(mid + mid // 2), 10.0, "10m は左から 3/4")
+
+    def test_thickness_is_monotonic_and_round_trips(self):
+        vals = [thick_from_slider(v) for v in range(THICK_SLIDER_MAX + 1)]
+        self.assertTrue(all(b >= a for a, b in zip(vals, vals[1:])))
+        self.assertGreater(len(set(vals)), 200, "細かく選べる")
+        for t in (0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0):  # 「厚み一括」のボタンの値など
+            self.assertAlmostEqual(thick_from_slider(thick_to_slider(t)), t, places=6, msg=f"{t}m")
+        # 切りのよい値になる
+        for v in vals:
+            q = 0.01 if v < 1.0 else (0.05 if v < 10.0 else 0.5)
+            self.assertAlmostEqual(round(v / q) * q, v, places=6)
+
+    def test_thickness_out_of_range_goes_to_the_ends(self):
+        self.assertEqual(thick_to_slider(5000.0), THICK_SLIDER_MAX)
+        self.assertEqual(thick_to_slider(0.0), 0)
+        self.assertEqual(thick_to_slider(-1.0), 0)
+        self.assertEqual(thick_to_slider(float("nan")), 0)
+        self.assertEqual(thick_from_slider(-5), 0.01)
+        self.assertEqual(thick_from_slider(10**6), 100.0)
+
+
+class TestCenteredSliders(_WinCase):
+    def _assert_centered(self, slider, msg=""):
+        self.assertLessEqual(abs(2 * slider.value() - (slider.minimum() + slider.maximum())), 2, f"つまみが真ん中にありません {msg}")
+
+    def test_seek_starts_in_the_middle(self):
+        win = self.win
+        self._load()
+        for axis_i, axis in enumerate("xyz"):
+            slider = getattr(win, f"slider_pos_{axis}")
+            self._assert_centered(slider, axis)
+            left, right = self._ends(axis)
+            self.assertAlmostEqual(left, WORLD_MIN[axis_i], delta=0.011)
+            self.assertAlmostEqual(right, WORLD_MAX[axis_i], delta=0.011)
+
+    def test_setting_the_origin_puts_it_in_the_middle(self):
+        """地面の近く（点群の下端）を基点にしても、つまみは真ん中。左右どちらへも動かせ、点群の上端まで届く"""
+        win = self.win
+        self._load()
+        pts = win.viewer.points_raw
+        low = np.argsort(pts[:, 2])[:5]
+        win.viewer.selected_indices = low.astype(np.int64)
+        want = pts[low].mean(axis=0)
+        win._set_section_origin_from_current_view()
+        scale = win._sec_pos_scale
+        for axis_i, axis in enumerate("xyz"):
+            slider, spin = getattr(win, f"slider_pos_{axis}"), getattr(win, f"spin_pos_{axis}")
+            self.assertAlmostEqual(spin.value(), want[axis_i], delta=0.006)
+            self._assert_centered(slider, axis)
+            self.assertLessEqual(slider.minimum() / scale, WORLD_MIN[axis_i] + 1e-6, "点群の最小まで届く")
+            self.assertGreaterEqual(slider.maximum() / scale, WORLD_MAX[axis_i] - 1e-6, "点群の最大まで届く")
+            self.assertLess(slider.minimum(), slider.value())
+            self.assertGreater(slider.maximum(), slider.value())
+            # スライダーで動かせる所は、数値欄にも入る
+            self.assertLessEqual(spin.minimum(), slider.minimum() / scale + 1e-6)
+            self.assertGreaterEqual(spin.maximum(), slider.maximum() / scale - 1e-6)
+            slider.setValue(slider.minimum())
+            self.assertAlmostEqual(spin.value(), slider.minimum() / scale, delta=0.006)
+            slider.setValue(slider.maximum())
+            self.assertAlmostEqual(spin.value(), slider.maximum() / scale, delta=0.006)
+            spin.setValue(want[axis_i])
+            self.assertIn("真ん中が基点", slider.toolTip())
+
+        # 刻みを変えても、基点は真ん中のまま
+        z_before = win.spin_pos_z.value()
+        win.combo_sec_step.setCurrentIndex(3)
+        self.assertAlmostEqual(win.spin_pos_z.value(), z_before, places=6)
+        self._assert_centered(win.slider_pos_z, "刻み変更後")
+
+        # つまみを動かしただけでは置き直さない（動かしている最中にバーの範囲が変わると使いにくい）
+        rng_before = (win.slider_pos_z.minimum(), win.slider_pos_z.maximum())
+        win.slider_pos_z.setValue(win.slider_pos_z.value() + 40)
+        win.spin_pos_z.setValue(win.spin_pos_z.value() + 1.0)
+        self.assertEqual((win.slider_pos_z.minimum(), win.slider_pos_z.maximum()), rng_before)
+
+        # 別の点群を読み込むと、基点は新しい点群の中央に戻る
+        self._load()
+        left, right = self._ends("z")
+        self.assertAlmostEqual(left, WORLD_MIN[2], delta=0.051)
+        self.assertAlmostEqual(right, WORLD_MAX[2], delta=0.051)
+        self._assert_centered(win.slider_pos_z, "読み込み直し後")
+
+    def test_thickness_slider_middle_is_one_meter(self):
+        win = self.win
+        mid = THICK_SLIDER_MAX // 2
+        sliders = [getattr(win, f"slider_thick_{a}") for a in ("x", "y", "z", "wall")]
+        spins = [getattr(win, f"spin_thick_{a}") for a in ("x", "y", "z", "wall")]
+        # 点群を読み込む前から、真ん中が 1m の目盛り
+        for slider, spin in zip(sliders, spins):
+            self.assertEqual((slider.minimum(), slider.maximum()), (0, THICK_SLIDER_MAX))
+            self.assertEqual(slider.value(), thick_to_slider(spin.value()))
+            self.assertIn("真ん中が 1m", slider.toolTip())
+        self.assertEqual(win.slider_thick_wall.value(), mid, "斜め壁の既定 1m は真ん中")
+
+        self._load()
+        win.chk_sec_z.setChecked(True)
+        for slider, spin in zip(sliders, spins):
+            self.assertEqual((slider.minimum(), slider.maximum()), (0, THICK_SLIDER_MAX))
+            spin.setValue(1.0)
+            self.assertEqual(slider.value(), mid, "1m は真ん中（以前は左端に張り付いていた）")
+            slider.setValue(mid // 2)
+            self.assertAlmostEqual(spin.value(), 0.1, places=6)
+            slider.setValue(0)
+            self.assertAlmostEqual(spin.value(), 0.01, places=6)
+            slider.setValue(THICK_SLIDER_MAX)
+            self.assertAlmostEqual(spin.value(), 100.0, places=6)
+            slider.setValue(mid + 30)
+            self.assertAlmostEqual(spin.value(), 2.0, places=6)
+        # スライダーで決めた厚みが、そのまま断面に使われる
+        win.sec_origin_mode_combo.setCurrentIndex(0)  # シーク位置を中心
+        win.spin_pos_z.setValue(20.0)
+        win.slider_thick_z.setValue(mid - 30)  # 0.5m
+        self.assertAlmostEqual(win.spin_thick_z.value(), 0.5, places=6)
+        self.assertAlmostEqual(win.viewer.clip_z_range[0], 19.75, places=4)
+        self.assertAlmostEqual(win.viewer.clip_z_range[1], 20.25, places=4)
+
+    def test_thickness_presets_and_typed_values(self):
+        win = self.win
+        self._load()
+        win.chk_sec_z.setChecked(True)
+        for t in (0.1, 0.5, 1.0, 2.0, 5.0):
+            win._apply_section_thickness_preset(t)
+            self.assertAlmostEqual(win.spin_thick_z.value(), t, places=6)
+            self.assertEqual(win.slider_thick_z.value(), thick_to_slider(t))
+        # 数値欄には、スライダーの右端（100m）より大きい厚みも入る。つまみは右端に寄るだけで、値は変わらない
+        win.spin_thick_z.setValue(250.0)
+        self.assertEqual(win.slider_thick_z.value(), THICK_SLIDER_MAX)
+        self.assertAlmostEqual(win.spin_thick_z.value(), 250.0, places=6)
+        # 切りのよくない値を打っても、数値欄の値はそのまま
+        win.spin_thick_z.setValue(2.37)
+        self.assertAlmostEqual(win.spin_thick_z.value(), 2.37, places=6)
+        self.assertEqual(win.slider_thick_z.value(), thick_to_slider(2.37))
 
 
 class TestSeekSpinWidth(_WinCase):
