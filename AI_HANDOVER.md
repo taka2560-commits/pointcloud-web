@@ -151,14 +151,18 @@
 ├── QA_REPORT_2026-10-31.md     # 総合品質管理チェック報告書（欠陥一覧・修正状況・backlog）
 ├── assets/icons/               # 新UIの SVG アイコン（コンボ/スピンの矢印・チェック）。spec の datas で同梱
 ├── docs/                       # UI/UX レビュー（UI_UX_REVIEW_*.md）、デザイン改修計画（DESIGN_STYLE_PLAN.md）、画面証跡 ui_review/（新UI）, ui_review/before/（改修前）, ui_review/classic/（従来UIモード）
-├── tools/                      # 開発補助: capture_ui_screens.py（実画面スクリーンショット）、check_contrast.py（コントラスト比）
+├── tools/                      # 開発補助: capture_ui_screens.py（実画面スクリーンショット）、check_contrast.py（コントラスト比）、write_build_info.py（配布版に埋め込む版の記録。ビルドの .bat が呼ぶ）
 ├── .gitattributes              # 改行コード固定（.py/.md 等は LF、.bat は CRLF、.e57 はバイナリ）
 │
 ├── core/                       # コアロジック（UI非依存）
 │   ├── e57_io.py               # E57入出力エンジン（ScaledInteger・ポーズ・全属性の完全ロスレス保持）
 │   ├── filters.py              # ノイズ除去・間引きアルゴリズム（SOR, ROR, DBSCAN, 孤立塊, ボクセル）
 │   ├── processor.py            # 点群処理マネージャー、FilterConfig、座標系変換関数
-│   └── logger.py               # システム履歴ロガー（日別ログ、例外トレース、クラッシュダンプ）
+│   ├── workdata.py             # 作業用データ（読み直しキャッシュと LOD データ）の一覧・削除、保存と作成の前の空きの見積もり
+│   ├── sysinfo.py              # ディスクの空き・メモリ・大きさの書き方（エクスプローラーと同じ数え方）
+│   ├── fsutil.py               # ファイルの置き換えの繰り返し（replace_file）と、削除を邪魔しない読み方（open_shared）
+│   ├── build_info.py           # 版（配布版は build_info.json、ソースからの起動は git）
+│   └── logger.py               # システム履歴ロガー（日別ログ、例外トレース。配布版は %LOCALAPPDATA%\E57PointCloudTool\logs）
 │
 ├── gui/                        # デスクトップGUI層（PySide6）
 │   ├── main_window.py          # メインウィンドウ、UIリボン、レイヤー管理、レシピ、ステータス
@@ -186,7 +190,8 @@
 │   ├── flow_layout.py          # 折り返しレイアウト（狭い画面で上部/下部バーのボタンが切れないようにする）
 │   ├── progress_dialog.py      # キャンセル対応モダン進捗ダイアログ（ApplicationModal）
 │   ├── styles.py               # モダンダークテーマQSSスタイルシート
-│   └── preview_dialog.py       # プレビュー用補助ダイアログ
+│   ├── preview_dialog.py       # プレビュー用補助ダイアログ
+│   └── system_tools.py         # システムの道具: 作業用データの管理の窓・書く前の空きの確認・版の表示（設定 → システム、ヘルプのメニュー）
 │
 ├── tests/                      # テストスイート（unittest 形式。quality_gate.py の Gate 5 が discover で一括実行）
 │   ├── test_io_integrity.py    # E57入出力の完全ロスレス性・属性保持テスト
@@ -204,7 +209,7 @@
 │   └── archive/                # 過去ビルドの退避フォルダ
 │
 ├── samples/                    # テスト用点群データ (.e57)。サンプル点群.e57 のみ Git 管理
-└── logs/                       # 実行時のシステム履歴ログフォルダ（日別UTF-8出力。Git 管理外）
+└── logs/                       # ソースから起動したときのシステム履歴ログ（日別UTF-8出力。Git 管理外）。配布版は %LOCALAPPDATA%\E57PointCloudTool\logs
 ```
 
 ※ Claude 用の git worktree `../点群マイツール-claude`（ブランチ `claude/*`）が同じ `.git` を共有しています。詳細は `AGENTS.md`。
@@ -241,6 +246,16 @@
 - **読み直しキャッシュ（`core/section_cache.py`）**: libe57 の `CompressedVectorReader.seek` は未実装（ErrorNotImplemented）で、箱に掛からない部分も毎回デコードするしかない（デコードが時間の 7 割、座標 1 項目だけ読んでも 7 割超）。そこで初回の読み直しでデコードした点を `<元ファイル>.cache/` に圧縮無しで書く: `header.json`（版・元ファイルの (サイズ, 更新時刻ns)・スキャンごとの点数と座標の持ち方）、`scanNN_xyz.npy`（ScaledInteger の元ファイルは**生整数のまま** int32（範囲が収まらなければ int64）＋ scale/offset、Float は同じ精度の float32/float64。復元は全点読込と同じ式なのでデコード結果・読み込み済みの点とビット単位で一致する。float32 へ丸めると量子化された座標が箱の境界で半分落ちるので採らない）、`scanNN_rgb.npy`（uint8）、`scanNN_int.npy`（float16）、`scanNN_chunks.npy`（100 万点ごとのチャンク表 [先頭, 点数, ローカル座標の範囲]）。2 回目からはチャンク表の範囲を表示座標へ変換して箱に掛かるチャンクだけを `np.load(mmap_mode="r")` で読む（`SectionReloadResult.n_chunks_read / n_chunks_total`）。スキャン単位で追加できる（範囲外で読まなかったスキャンは後で必要になったときに加わる）。署名か版が合わなければフォルダごと作り直す。書けない場所・空き容量不足・途中中止では部分ファイル（`.part.npy`）を消してキャッシュ無しで続ける。元ファイルの定義は `e57_point_field_schemas()`（`core/e57_io.py`）で読む（読み込み済みスキャンの `field_schemas` は座標系変換で XYZ が入れ替わっているため）。`iter_e57_point_chunks(raw_fields=...)` で ScaledInteger を生整数のまま受け取る。実測（合成 2,000 万点・4 スキャン・ランダム順）: 初回 3.7 秒（デコードのみ 2.3 秒 ＋ 0.34GB 書き込み）、2 回目 0.6 秒（全 20 チャンク読み）、1 スキャンだけ掛かる箱 0.17 秒。5.4 億点なら初回 100 秒＋書き込み、2 回目は全チャンクでも 15 秒前後、点の並びがまとまっていれば数秒の見込み。
 - **視点連動の高精細表示（LOD）**（`core/lod_store.py`、`gui/lod_controller.py`、断面パネル「🔎 高精細表示 (LOD)」、設定 `lod_enabled`）: 間引き読込の画面はどこまで寄ってもファイルの 1/k の密度なので、視点が止まるたびに画面に入っている範囲を元ファイルの密度で読んで重ね描きする。
 - **大きな作業用ファイルは mmap しない**（`core/npy_file.py`、2026-11-13）: 読み直しキャッシュと LOD データ（1 ファイル 6〜9GB）は、以前は `np.lib.format.open_memmap` / `np.load(mmap_mode="r")` で読み書きしていた。Windows では mmap で触れたページがプロセスの使用メモリに数えられ、書いたページはディスクへ書き終わるまで追い出せないので、利用者の 5.4 億点のファイルで作成中にメモリが 95〜97% まで埋まった。今は `NpyFileArray`（`arr[a:b]` と `read_ranges` でその範囲だけ読む）と `NpySequentialWriter`（先頭から順に書く）を使う。**新しく大きなファイルを扱うときも mmap を使わないこと。** 飛び飛びの位置へ書く必要があるとき（LOD の並べ替え）は、行き先の区間ごとの一時ファイルへ順に書いてから、区間ごとにメモリ上で並べて順に書く（`lod_store._build_one` の 2・3 段目。区間は `SEGMENT_POINTS` = 1,600 万点、一時ファイルは 1 点 21 バイト）。ファイルの形式（.npy）と版は変えていないので、以前に作った作業用データもそのまま読める。
+- **システムの道具（作業用データの管理・空きの確認・版・ログの場所）**（2026-11-13〜14。利用者の PC で C ドライブの空きが約 20GB、作業用データが 2 つで約 34GB だったことから）:
+  - **置き場所を決めるのは `core/section_cache.py: cache_dir_for()` だけ**。既定は元ファイルの横。`set_default_cache_root()` でまとめて変えられる（画面の設定 `workdata/dir`。`gui/system_tools.py` が起動時と変更時に渡す）。そのときのフォルダ名は `<元ファイル名>.<元フォルダの印 8 桁>.cache`。パスを自分で組み立てない（`src + ".cache"` と書くと、置き場所の設定が効かない）。
+  - **作業用データのファイルを置き換えるときは `core/fsutil.py: replace_file()` を使う**（`os.replace` を直接呼ばない）。Windows は、置き換え先をだれかが開いていると開き方に関係なく断る。一覧の読み取り（別スレッド）が `header.json` を開いた一瞬に、作る側の置き換えが重なって「読み直しキャッシュを作成できませんでした」になった（2026-11-14、既存テストが検出。ウイルス対策や索引作成でも起きうる）。`replace_file` は断られたら最長 2 秒まで繰り返す。読む側（`read_cache_header`）は削除を邪魔しない開き方（`open_shared`）にしてある。
+  - **消してよいのは、`header.json` でこのアプリのものと確かめられたフォルダの、このアプリが作る名前のファイルだけ**（`remove_cache_directory`）。先に `header.json` を「スキャン無し」に書き換えてから消すので、途中で止まっても中途半端なデータは使われない。ほかのファイルが入っていたら残して知らせる。`shutil.rmtree` で一覧から消さない。
+  - **調べるだけの処理は何も変えない**: `core/workdata.py` の `find_workdata` / `inspect_workdata_dir` / `workdata_need_for_scans` は、`SectionCache.open()` を使わない（`open()` は署名の合わないキャッシュをその場で消す）。
+  - **書く前に空きを確かめる**: 保存は `confirm_save_free_space()`（見込みなので「このまま保存する」も選べる）、高精細表示のデータ作成は `confirm_lod_build()`（足りなければ始めない。`core/lod_store.py` の作成時の確認と同じ式）。どちらも `gui/system_tools.py`。大きさは `core/sysinfo.py: format_bytes()` で書く（1GB = 1024³ バイト。エクスプローラーの表示と同じ数字になる）。
+  - **版**: 配布版は、`EXE配布パッケージ作成.bat` が `tools/write_build_info.py` で `build_info.json`（作った日時とコミット）を書き、spec が同梱し、`core/build_info.py` が読む。タイトル・バージョン情報・設定 → システム・ログの先頭に出る。`build_info.json` は git に入れない。
+  - **ログ**: 配布版は `%LOCALAPPDATA%\E57PointCloudTool\logs`（以前は EXE と同じフォルダで、配布版を作り直すと消えていた）。ソースからの起動はリポジトリの `logs/`。環境変数 `E57_LOG_DIR` でその場だけ替えられる（配布版の起動確認は、これを scratchpad に向けて行うと利用者の記録と混ざらない）。書けないときは利用者ごとのフォルダ → 一時フォルダへ替える。1 日 1 ファイルで、日付が変わると次の行から新しいファイルへ書く。90 日より古いものは起動時に消す。
+  - 確認の窓は `gui/system_tools.py: HOOKS`（`ask_delete` / `ask_low_space`）を通す。テストはここを差し替えて答えを決める。ホットファイル（`gui/main_window.py`）から呼ぶのは `install_system_tools` / `window_title_with_build` / `confirm_save_free_space` / `confirm_lod_build` の 4 つだけ。
+- **読み込み漏れの見張り**（`tests/test_static_names.py`、2026-11-14）: どこにも定義・import の無い名前を、全ファイルで機械的に探す。`gui/main_window.py` の `math` の import 漏れ（斜め壁の断面を視点追従でシークすると NameError。2026-10-27 から）は、その行を通るテストが無くて 2 週間以上残っていた。関数の中だけで定義された名前も「定義あり」と数えるので見逃しはあるが、import の足し忘れは捕まえる。
   - **LOD ストア**（`<元ファイル>.cache/lod_*`、1 点 17 バイト）: 読み直しキャッシュ（ファイル順）を元に 2 回走査で作る（`build_lod_store`。1 回目: レベル × 格子の点数、2 回目: 行き先へ書き込み。全点をメモリに載せない）。各点に通し番号のハッシュで**レベル** 0〜L を割り当て（L が 1/2、L-1 が 1/4、…。レベル 0〜ℓ を合わせると全点の 1/2^(L-ℓ) の一様な抜き取りで、足すほど密になる・重複なし）、各レベルの中を 128³ 格子の**モートン順**に並べる。八分木のどの節も各レベルの中で連続範囲になるので、`lod_cells.npy`（点のある格子）と `lod_starts.npy`（レベル × 格子の開始位置）だけで範囲が求まる。座標は pose 適用後のワールド座標（ファイルの軸）− 原点の float32（表示専用）。`LodStore` が開くときに点数 40 万超の節を 8 分割して**葉**を決める。
   - **選択**（`select_leaf_levels`）: 葉の箱を画面へ投影し、「画面上の広さ × 目標密度（1 点/画素）」を葉ごとの欲しい点数とする（葉の全点数で頭打ち）。合計が予算（600 万点）を超えるなら全体を同じ率で下げる（二分探索）。画面外・断面の箱に掛からない葉は描かない。欲しい点数がレベル 0 の半分に満たない葉は描かない（遠景は読み込み済みの点に任せる）。断面で絞ったあと予算の 6 割に満たなければ目標密度を上げて読み直す（`compute_lod_overlay` の refine。読む量は予算の 4 倍まで）。
   - **読み出しと表示**: `LodScene.gather_view` が選ばれた範囲だけ mmap から読み、座標系変換と中心オフセットを掛けた float32 にする（粗いレベルが先に並ぶので、回転中の半減描画がそのまま粗い表示になる）。`PointCloudViewer.set_view_overlay()` が種別 `"lod"` の重ね描きとして描く（断面の読み直しは種別 `"section"`。断面が無くても表示でき、陰影は掛けない）。`LodController` は 200ms ごとに視点・断面・レイヤーの変化を見て、350ms 止まったら `FunctionWorker` で作り直す（マウス処理には手を入れていない）。`camera_mvp()` は paintGL と同じ投影行列を返す。
@@ -301,7 +316,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - **テストとゲートは、この PC の本番アプリの保存設定を書き換えません**（2026-11-11 から）。MainWindow は閉じるときに設定を自動保存するため、以前はテストを回すたびに保存設定が初期値へ戻り、「最近使ったファイル」にテスト用の一時ファイルが入っていました。MainWindow を作るテスト・`quality_gate.py`・`tools/capture_ui_screens.py` は、最初に `tests/settings_sandbox.py: use_sandbox_settings()` を呼んで、保存設定を一時フォルダの INI へ向けます。**MainWindow を作るテストを足すときは、モジュールの先頭でこれを呼ぶこと**。確認用のスクリプトを書くときも同じです。
 - UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 292 件）
+### テスト内容（全5段階・単体テスト 378 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
@@ -321,6 +336,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 EXE配布パッケージ作成.bat
 ```
 - このバッチファイルを実行すると、自動的に以下の処理が行われます：
+  0. `tools/write_build_info.py` が `build_info.json`（作った日時とコミット）を書く。配布版の版の表示に使う（古い記録は先に消す）。
   1. `python -m PyInstaller --noconfirm E57_PointCloud_Tool.spec` によるEXEビルド（spec の `datas` でマニュアル3点と README を同梱、`collect_all` で pye57 / open3d のネイティブDLLを収集）。
   2. 既存の `dist/E57_PointCloud_Tool_Dist.zip` を `dist/archive/E57_PointCloud_Tool_Dist_<日付>_<時刻>.zip` へ退避。
   3. 最新の配布用ZIPファイル（`dist/E57_PointCloud_Tool_Dist.zip`）の自動生成。

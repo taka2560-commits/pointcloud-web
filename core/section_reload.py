@@ -32,6 +32,7 @@ from core.e57_io import FieldSchema, e57_point_field_schemas, file_signature, it
 from core.logger import log_info, log_warning
 from core.processor import scan_pose_transform, transform_coordinate_system
 from core.section_cache import SectionCache, local_from_stored
+from core.sysinfo import format_bytes
 
 DEFAULT_MAX_POINTS = 10_000_000
 DEFAULT_CHUNK_SIZE = 1_000_000
@@ -616,7 +617,7 @@ def reload_section_points(
     if cache_used:
         cache_note += f", キャッシュから {cache_used} スキャン ({chunks_read:,}/{chunks_total:,} チャンク)"
     if cache_built:
-        cache_note += f", キャッシュ作成 {cache_built} スキャン ({cache_bytes / 1e9:.2f}GB)"
+        cache_note += f", キャッシュ作成 {cache_built} スキャン ({format_bytes(cache_bytes)})"
     log_info(
         f"断面ボックスの読み直し: {box.describe()} → ボックス内 {n_in_box:,} 点 (表示 {len(pts):,} 点"
         f"{', 上限で間引き' if capped else ''}), 走査 {n_read:,} 点 / {len(plan)} スキャン"

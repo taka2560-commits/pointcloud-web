@@ -330,6 +330,11 @@ def build_commands(win) -> List[Command]:
         C("help.settings", GROUP_HELP, "設定を開く", "点サイズ・描画点数・操作感度・テーマなど", "", "せってい おぷしょん", _tab("settings")),
         C("help.log_folder", GROUP_HELP, "ログフォルダを開く", "不具合の調査に使う履歴ログの場所を開く", "", "ろぐ りれき",
           lambda w: __import__("core.logger", fromlist=["open_log_folder"]).open_log_folder()),
+        C("help.workdata", GROUP_HELP, "作業用データの管理", "断面の読み直しと高精細表示のためのデータの大きさを見る・消す・置き場所を変える", "",
+          "さぎょうよう でーた きゃっしゅ でぃすく あき ようりょう さくじょ おきばしょ cache",
+          lambda w: __import__("gui.system_tools", fromlist=["open_workdata_dialog"]).open_workdata_dialog(w)),
+        C("help.about", GROUP_HELP, "バージョン情報", "今動いている版（作った日時）とログの場所を見る", "", "ばーじょん はん びるど version",
+          lambda w: __import__("gui.system_tools", fromlist=["show_about_dialog"]).show_about_dialog(w)),
     ]
     return cmds
 

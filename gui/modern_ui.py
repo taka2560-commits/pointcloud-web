@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 
 from core.logger import get_app_dir, log_warning, open_log_folder
 from gui.flow_layout import replace_layout_with_flow
+from gui.system_tools import open_workdata_dialog, show_about_dialog
 from gui.ui_mode import UI_MODE_CLASSIC, set_saved_ui_mode
 
 _SETTINGS_ORG = "E57PointCloudTool"
@@ -644,13 +645,11 @@ def _install_menu_bar(win) -> None:
     m_help.addAction("使い方マニュアルを開く", lambda: _open_manual(win))
     m_help.addAction("ショートカット一覧...", lambda: _show_shortcut_sheet(win))
     m_help.addAction("システム履歴ログフォルダを開く", open_log_folder)
+    m_help.addAction("作業用データの管理...", lambda: open_workdata_dialog(win))
     m_help.addSeparator()
     m_help.addAction("従来UIに戻す（次回起動から）", lambda: _switch_to_classic(win))
-    m_help.addAction("バージョン情報", lambda: QMessageBox.information(
-        win, "バージョン情報",
-        "E57 点群ノイズ処理・断面スライサー ツール\n新UI（2026-10 デザイン改修）\n\n"
-        "従来UIに戻すには: ヘルプ → 従来UIに戻す、または起動引数 --classic-ui、環境変数 E57_UI_MODE=classic",
-    ))
+    # 版（作った日時）・ログの場所・作業用データの置き場所を出す。そのままコピーして問い合わせに貼れる（gui/system_tools.py）
+    m_help.addAction("バージョン情報", lambda: show_about_dialog(win))
 
 
 def _open_manual(win) -> None:

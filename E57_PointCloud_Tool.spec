@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
@@ -11,6 +12,10 @@ datas = [
     # 新UIのアイコン（コンボ/スピンの矢印・チェックマーク）。実行時は _internal/assets/icons 配下
     ('assets', 'assets'),
 ]
+# 版の記録（作った日時とコミット）。EXE配布パッケージ作成.bat が直前に tools/write_build_info.py で書く。
+# 実行時は core/build_info.py が読み、タイトル・バージョン情報・ログに出す
+if os.path.exists('build_info.json'):
+    datas.append(('build_info.json', '.'))
 binaries = []
 hiddenimports = []
 hiddenimports += collect_submodules('OpenGL')
