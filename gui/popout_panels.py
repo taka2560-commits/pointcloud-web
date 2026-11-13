@@ -22,7 +22,10 @@ PANELS: List[Tuple[str, str, str, str]] = [
     ("section", "section_group", "断面", "断面"),
     ("view", "view_group", "表示", "表示・カメラ"),
     ("settings", "settings_group", "設定", "設定・説明書"),
+    ("log", "log_group", "ログ", "処理状況・ログ"),
 ]
+# 小窓の大きさに合わせて中身を広げるパネル（ログは窓を大きくすれば、そのぶん多くの行が見える）
+EXPANDING_PANELS = ("log",)
 
 
 class PopoutWindow(QDialog):
@@ -233,8 +236,11 @@ class PanelPopouts(QObject):
         if side_lay is not None:
             side_lay.removeWidget(grp)
         w = PopoutWindow(win, key, self.title(key))
-        w.host_layout.addWidget(grp)
-        w.host_layout.addStretch(1)
+        if key in EXPANDING_PANELS:
+            w.host_layout.addWidget(grp, 1)
+        else:
+            w.host_layout.addWidget(grp)
+            w.host_layout.addStretch(1)
         if hasattr(grp, "set_expanded"):
             try:
                 grp.set_expanded(True)
@@ -249,6 +255,8 @@ class PanelPopouts(QObject):
         avail = screen.availableGeometry() if screen is not None else None
         width = max(380, min(hint.width() + 36, 560))
         height = hint.height() + 24
+        if key in EXPANDING_PANELS:
+            width, height = max(width, 640), max(height, 420)
         if avail is not None:
             height = min(height, int(avail.height() * 0.8))
         w.resize(width, max(160, height))
@@ -307,7 +315,13 @@ class PanelPopouts(QObject):
         """左パネルへ戻すときの挿入位置（決まった並び順で、次に居るグループの手前）"""
         win = self._win
         lay = win.sidebar_widget.layout()
-        keys = [k for k, _a, _s, _t in PANELS]
+        if key == "log":  # ログは保存の箱の次（いちばん下）
+            save = getattr(win, "save_group", None)
+            idx = lay.indexOf(save) if save is not None else -1
+            if idx >= 0:
+                return idx + 1
+            return max(0, lay.count() - 1)
+        keys = [k for k, _a, _s, _t in PANELS if k != "log"]
         for nxt in keys[keys.index(key) + 1 :]:
             g = self.group(nxt)
             if g is not None:

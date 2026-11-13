@@ -292,5 +292,74 @@ class TestLodBuildFailures(_Scene):
         self.assertEqual(info["built"] + info["already"], 3)
 
 
+class TestLodBuildSegments(_Scene):
+    """
+    2026-11-13: LOD の並べ替えを、最終ファイルを mmap して飛び飛びに書く方式から、
+    行き先の区間ごとの一時ファイルへ順に書いてから区間ごとに並べて書く方式に替えた
+    （5.4 億点でメモリが 97% まで埋まったため）。出力は区間の大きさに依らず、同じファイルになること。
+    """
+
+    DATA_FILES = ("lod_xyz.npy", "lod_rgb.npy", "lod_int.npy", "lod_cells.npy", "lod_starts.npy")
+
+    def _bytes(self):
+        paths = lod_paths(self.path)
+        out = {}
+        for name in self.DATA_FILES:
+            with open(paths[name], "rb") as f:
+                out[name] = f.read()
+        return out
+
+    def test_output_does_not_depend_on_segment_size(self):
+        scans = read_e57_scans(self.path, point_budget=self.load_budget)
+        ensure_section_cache(scans, chunk_size=CHUNK)
+        folder = os.path.dirname(lod_paths(self.path)["lod.json"])
+        build_lod_store(scans, base_points=BASE)  # 既定（この大きさでは 1 区間）
+        ref = self._bytes()
+        for seg in (1500, 7777, 57_803, 10_000_000):
+            remove_lod(self.path)
+            messages = []
+            build_lod_store(scans, base_points=BASE, segment_points=seg, progress_callback=lambda r, m: messages.append(m))
+            got = self._bytes()
+            for name in self.DATA_FILES:
+                self.assertEqual(ref[name], got[name], f"区間 {seg:,} 点: {name} が既定の作り方と違います")
+            self.assertFalse([n for n in os.listdir(folder) if "bucket" in n or n.endswith(".part.npy")], "一時ファイルが残っています")
+            self.assertTrue(any("3/3" in m for m in messages))
+        store = LodStore.open(self.path, leaf_max_points=LEAF_MAX)
+        self.assertEqual(store.n_points, self.n_total)
+        store.close()
+
+    def test_stale_bucket_files_are_not_appended_to(self):
+        """中断で残った一時ファイルがあっても、続きに書き足さない（点数が合わなくなるのを防ぐ）"""
+        scans = read_e57_scans(self.path, point_budget=self.load_budget)
+        ensure_section_cache(scans, chunk_size=CHUNK)
+        build_lod_store(scans, base_points=BASE)
+        ref = self._bytes()
+        remove_lod(self.path)
+        folder = os.path.dirname(lod_paths(self.path)["lod.json"])
+        for i in range(3):
+            with open(os.path.join(folder, f"lod_bucket{i:03d}.part.npy"), "wb") as f:
+                f.write(b"\x00" * 2100)
+        build_lod_store(scans, base_points=BASE, segment_points=20_000)
+        self.assertEqual(ref["lod_xyz.npy"], self._bytes()["lod_xyz.npy"])
+
+    def test_files_can_be_removed_while_objects_are_alive(self):
+        """mmap をやめたので、ストアやキャッシュのオブジェクトが生きていても、作業用データを消せる"""
+        from core.section_cache import SectionCache
+
+        scans = read_e57_scans(self.path, point_budget=self.load_budget)
+        ensure_section_cache(scans, chunk_size=CHUNK)
+        build_lod_store(scans, base_points=BASE)
+        store = LodStore.open(self.path, leaf_max_points=LEAF_MAX)
+        levels = np.full(len(store.leaf_corners_world()), store.n_levels - 1, dtype=np.int64)
+        xyz, rgb, inten = store.gather(levels)
+        self.assertEqual(len(xyz), self.n_total)
+        cache = SectionCache.open(self.path, create=False)
+        cs = cache.scan(0)
+        self.assertGreater(len(cs.load_chunk(0)[0]), 0)
+        self.assertTrue(remove_cache(self.path), "オブジェクトが生きている間は作業用データを消せませんでした")
+        self.assertIsNotNone(store)
+        self.assertIsNotNone(cs)
+
+
 if __name__ == "__main__":
     unittest.main()

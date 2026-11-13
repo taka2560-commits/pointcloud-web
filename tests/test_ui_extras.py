@@ -266,7 +266,9 @@ class TestQuickPalette(_WinCase):
 class TestPopouts(_WinCase):
     def _order(self):
         lay = self.win.sidebar_widget.layout()
-        return [lay.indexOf(getattr(self.win, a)) for _k, a, _s, _t in PANELS] + [lay.indexOf(self.win.save_group)]
+        # the log panel sits below the save box, so it goes last in the expected order
+        work = [lay.indexOf(getattr(self.win, a)) for k, a, _s, _t in PANELS if k != "log"]
+        return work + [lay.indexOf(self.win.save_group), lay.indexOf(self.win.log_group)]
 
     def test_pop_out_keeps_working_and_returns_in_order(self):
         win, po = self.win, self.ex.popouts
