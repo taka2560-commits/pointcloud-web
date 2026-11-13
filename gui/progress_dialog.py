@@ -3,6 +3,8 @@
 モダンダーク・シアンアクセントの進捗ダイアログ (モーダル)
 """
 
+import weakref
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
@@ -15,6 +17,28 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
 )
 from PySide6.QtGui import QColor, QFont
+
+from core.logger import log_warning
+
+# 進捗の窓が出た・消えたを知りたい相手（長い処理の完了の知らせ gui/task_notify.py が使う）。
+# 読み込み・保存・解析など、待たせる処理はすべてこの窓を出すので、ここを見張れば「長い処理の始まりと終わり」が分かる。
+# 弱い参照で持つ（相手のウィンドウが破棄されれば、勝手に外れる）
+_listeners: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def add_progress_listener(listener) -> None:
+    """progress_shown(dialog) / progress_hidden(dialog) を持つ相手を登録する"""
+    _listeners.add(listener)
+
+
+def _tell_listeners(method: str, dialog) -> None:
+    for listener in list(_listeners):
+        try:
+            getattr(listener, method)(dialog)
+        except RuntimeError:
+            pass  # 相手のウィンドウが先に破棄されている
+        except Exception as e:  # 知らせの失敗で、処理そのものは止めない
+            log_warning(f"進捗の窓の知らせに失敗しました（{method}）: {e}")
 
 
 class ModernProgressDialog(QDialog):
@@ -194,6 +218,14 @@ class ModernProgressDialog(QDialog):
     def _on_cancel(self):
         """ユーザーによる中止操作の通知"""
         self.cancelled.emit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        _tell_listeners("progress_shown", self)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        _tell_listeners("progress_hidden", self)
 
     def keyPressEvent(self, event):
         """Escキーで安全中断"""

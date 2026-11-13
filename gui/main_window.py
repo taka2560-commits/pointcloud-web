@@ -76,6 +76,7 @@ from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS, get_theme_qss
+from gui.load_guard import resolve_load_limit
 from gui.system_tools import confirm_lod_build, confirm_save_free_space, install_system_tools, window_title_with_build
 from gui.section_seek import (
     THICK_PAGE_STEP, THICK_SINGLE_STEP, THICK_SLIDER_MAX, centered_seek_span, seek_scale, seek_slider_range,
@@ -181,32 +182,6 @@ class CollapsibleGroupBox(QGroupBox):
 
     def is_expanded(self) -> bool:
         return self._is_expanded
-
-def get_system_ram_gb() -> float:
-    """PCの搭載物理メモリ容量 (GB) を取得 (大容量点群の安全読込推奨用)"""
-    try:
-        import ctypes
-
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        stat = MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-            return float(stat.ullTotalPhys / (1024 ** 3))
-    except Exception:
-        pass
-    return 16.0
 
 
 class MainWindow(QMainWindow):
@@ -4848,6 +4823,7 @@ class MainWindow(QMainWindow):
         path = text.strip()
         if not path or not os.path.exists(path):
             return
+        prev_out = self.output_edit.text()
         if os.path.isdir(path):
             e57_files = collect_e57_files(path)
             if not e57_files:
@@ -4862,13 +4838,23 @@ class MainWindow(QMainWindow):
             suggested_out = f"{norm_dir}_cleaned.e57"
             if not self.output_edit.text() or self.output_edit.text().endswith("_cleaned.e57"):
                 self.output_edit.setText(suggested_out)
-            self._load_file_to_viewer(norm_dir)
+            if self._load_file_to_viewer(norm_dir) is False:
+                self._restore_paths_after_cancelled_load(prev_out)
         elif os.path.isfile(path):
             base, ext = os.path.splitext(path)
             suggested_out = f"{base}_cleaned{ext}"
             if not self.output_edit.text() or self.output_edit.text().endswith("_cleaned.e57"):
                 self.output_edit.setText(suggested_out)
-            self._load_file_to_viewer(path)
+            if self._load_file_to_viewer(path) is False:
+                self._restore_paths_after_cancelled_load(prev_out)
+
+    def _restore_paths_after_cancelled_load(self, prev_out: str):
+        """
+        読み込みを取りやめたとき（未保存の確認・メモリの確認で「やめる」）、入力欄と出力欄を、いま画面にある点群のものへ戻す。
+        新しいファイルの名前が残っていると、そのまま保存したときに、今の点群が新しいファイル用の出力先へ書かれてしまう。
+        """
+        self.input_edit.setText(self._last_loaded_input_path or "")
+        self.output_edit.setText(prev_out)
 
     def _browse_input_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -4921,6 +4907,10 @@ class MainWindow(QMainWindow):
         """
         if not self._confirm_discard_changes("別のデータを読み込む"):
             return False
+        # 大容量点群保護: 読み込み上限を決める。PC のメモリに収まらない見込みなら、始める前に確かめる（gui/load_guard.py）
+        load_limit = resolve_load_limit(self, file_path)
+        if load_limit.cancelled:
+            return False
         self._last_loaded_input_path = file_path
         is_dir = os.path.isdir(file_path)
         fname = os.path.basename(os.path.normpath(file_path))
@@ -4952,20 +4942,7 @@ class MainWindow(QMainWindow):
 
         budget = self.budget_combo.currentData() if hasattr(self, "budget_combo") else 2000000
 
-        # 大容量点群保護: PCの空きRAMに合わせて安全ロード上限を決定
-        max_pts_setting = self.combo_load_budget.currentData() if hasattr(self, "combo_load_budget") else -1
-        if max_pts_setting == -1:
-            ram_gb = get_system_ram_gb()
-            if ram_gb >= 60.0:
-                eff_max_load = 120000000
-            elif ram_gb >= 28.0:
-                eff_max_load = 60000000  # 32GB RAM PC向け: 6,000万点
-            else:
-                eff_max_load = 30000000  # 16GB RAM PC向け: 3,000万点
-        elif max_pts_setting > 0:
-            eff_max_load = max_pts_setting
-        else:
-            eff_max_load = None  # 無制限全点ロード
+        eff_max_load = load_limit.max_points  # None = 全点。決め方は gui/load_guard.py と core/memguard.py
 
         coord_mode = self.coord_system_combo.currentData() if hasattr(self, "coord_system_combo") else "cartesian"
         self.load_worker = FileLoadWorker(file_path, point_budget=budget, max_load_points=eff_max_load, coord_mode=coord_mode)

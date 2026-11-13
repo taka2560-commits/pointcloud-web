@@ -268,6 +268,8 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     os.environ["E57_UI_MODE"] = "modern"
     reset_ui_mode_cache()
 
+    from tests.qt_cleanup import destroy_widget
+
     app = QApplication.instance() or QApplication(sys.argv)
     win = MainWindow()
     win.show()
@@ -846,7 +848,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
     assert not win.windowTitle().startswith("* ")
     print("  [OK] 新UI検査合格 (絵文字0・メニュー/ステータスバー・作業順・1000px幅で折り返し・未保存フラグ)")
 
-    win.close()
+    destroy_widget(win)  # 閉じるだけでなく破棄する（残すと、あとのウィンドウの見た目の切り替えで Qt が落ちることがある。tests/qt_cleanup.py）
     shutil.rmtree(qgate_tmp, ignore_errors=True)
     print("  [OK] 実機 OpenGL VBO 描画 & MainWindow 全操作・レイヤー拡張①〜⑥シナリオ検査合格")
 
@@ -872,7 +874,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         win_c.viewer.validate_invariants()
         print("  [OK] 従来UI（classic）スモーク合格 (起動・タブ切替・モード切替・絵文字ラベル維持)")
     finally:
-        win_c.close()
+        destroy_widget(win_c)
         os.environ.pop("E57_UI_MODE", None)
         reset_ui_mode_cache()
 
@@ -927,7 +929,7 @@ def gate_4_gui_and_opengl_smoke_check() -> None:
         win_k.viewer.validate_invariants()
         print("  [OK] 軌跡（明）テーマ スモーク合格 (起動・QSS 適用・その場切替・タブ切替・通知・選択・展開・効果の後始末)")
     finally:
-        win_k.close()
+        destroy_widget(win_k)
         os.environ.pop("E57_UI_THEME", None)
         os.environ.pop("E57_UI_MODE", None)
         reset_ui_mode_cache()

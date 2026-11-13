@@ -77,8 +77,13 @@ core/filters.py       : ノイズ除去・間引きアルゴリズム（SOR, ROR
 core/processor.py     : FilterConfig、座標系変換関数、パイプライン実行
 core/logger.py        : システム履歴ロガー（日別UTF-8出力。配布版は %LOCALAPPDATA%\E57PointCloudTool\logs）
 core/workdata.py      : 作業用データ（読み直し用・高精細表示用）の一覧・削除、書く前の空きの見積もり
+core/memguard.py      : 読み込みに要るメモリの見積もりと、PC のメモリに収まるかの判定
+core/crashlog.py      : 異常終了の記録（起動中の印 session_*.txt、落ちた瞬間の記録 crash_*.txt）
 core/build_info.py    : 版（配布版を作った日時とコミット）。タイトル・バージョン情報・ログに出す
 gui/system_tools.py   : 作業用データの管理の窓、保存前の空きの確認、版の表示
+gui/load_guard.py     : 読み込み前のメモリの確認の窓（収まらない設定のときだけ聞く）
+gui/task_notify.py    : 長い処理の完了の知らせ（タスクバーの点滅と Windows の通知）
+gui/diagnostics.py    : Qt の警告をログへ残す、前回の異常終了を起動時に知らせる
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）
 gui/main_window.py    : メイン画面UI、リボンバー、レイヤー管理、レシピセレクター
 gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread、汎用 FunctionWorker）

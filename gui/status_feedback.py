@@ -212,7 +212,9 @@ def install_unsaved_pill(win) -> Optional[UnsavedPill]:
     if sb is None:
         return None
     pill = UnsavedPill(win, sb)
-    sb.insertPermanentWidget(0, pill)
+    # 右端へ足す。以前の insertPermanentWidget(0, pill) は、位置 0 が範囲の外（左寄せの部品が先にある）なので、
+    # Qt が警告を出したうえで右端へ足していた。見た目は同じまま、起動のたびに出ていた警告だけを無くす
+    sb.addPermanentWidget(pill)
     pill.setVisible(bool(getattr(win, "_dirty", False)))
     win.unsaved_pill = pill
     return pill

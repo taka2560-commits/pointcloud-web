@@ -39,6 +39,12 @@ from core.e57_stream import (
 )
 
 
+LOAD_OUT_OF_MEMORY_TEXT = (
+    "メモリが足りず、読み込めませんでした。\n"
+    "設定 → システムの「大容量点群読込上限」を下げるか、ほかのアプリを閉じてから、もう一度開いてください。"
+)
+
+
 def collect_e57_files(path: str) -> List[str]:
     """
     ファイルパスならそのまま、フォルダパスならフォルダ直下の *.e57 を名前順で返す。
@@ -349,6 +355,10 @@ class FileLoadWorker(QThread):
             )
 
             self.finished_success.emit(preloaded)
+        except MemoryError as e:
+            # numpy や E57 のライブラリが配列を確保できなかった。英語の「Unable to allocate …」のままでは次の一手が分からない
+            log_exception(f"{type(self).__name__} でメモリ不足: {e}")
+            self.finished_error.emit(LOAD_OUT_OF_MEMORY_TEXT)
         except Exception as e:
             # ユーザーには要約を、ログにはトレースバック付きで記録する（原因調査のため）
             log_exception(f"{type(self).__name__} でエラー: {e}")
