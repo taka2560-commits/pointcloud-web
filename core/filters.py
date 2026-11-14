@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import numpy as np
 import open3d as o3d
 
+from core.cluster_grow import ground_point_mask, grow_connected_cluster
 from core.logger import log_warning
 
 # 代表点安全リミッター: 大規模点群をボクセル代表点に縮約してクラスタリングする際の代表点数の上限。
@@ -334,19 +335,9 @@ def segment_ground_points(
     if points is None or len(points) == 0:
         return np.array([], dtype=np.int64)
 
-    grid_size = max(0.05, float(grid_size))
-    height_threshold = max(0.001, float(height_threshold))
-
-    xy_cells = np.floor(points[:, :2] / grid_size).astype(np.int64)
-    _, inverse_idx = np.unique(xy_cells, axis=0, return_inverse=True)
-
-    n_cells = int(np.max(inverse_idx)) + 1 if len(inverse_idx) > 0 else 0
-    cell_min_z = np.full(n_cells, np.inf, dtype=np.float64)
-    np.minimum.at(cell_min_z, inverse_idx, points[:, 2])
-
-    local_min_z = cell_min_z[inverse_idx]
-    ground_mask = (points[:, 2] - local_min_z) <= height_threshold
-    return np.where(ground_mask)[0]
+    # 判定の中身は core/cluster_grow.py: ground_point_mask（連結塊の追跡と共用）。
+    # 以前は 2 列の np.unique(axis=0) で格子を見分けていて、5,490 万点で 41.7 秒かかっていた。結果は同じ
+    return np.flatnonzero(ground_point_mask(points, grid_size, height_threshold))
 
 
 def segment_largest_plane(
@@ -556,6 +547,7 @@ def extract_connected_cluster_from_seeds(
     マジックワンド（連結塊のワンクリック自動選択）
     指定されたシード点（選択点）から半径 radius 以内で3D空間的に繋がっている同一の塊（クラスタ）を
     高速に探索してインデックス配列を返す。通行人・車両・看板・浮遊ノイズ塊のピンポイント一括選択に最適。
+    上限（max_cluster_ratio）を超えたときは、そこまでにたどった点を返す（上限より少し多いことがある）。
 
     :param points: (N, 3) 形状の点群座標配列
     :param seed_indices: 起点となる点インデックス配列
@@ -568,65 +560,19 @@ def extract_connected_cluster_from_seeds(
     if points is None or len(points) == 0 or seed_indices is None or len(seed_indices) == 0:
         return np.array([], dtype=np.int64)
 
-    n = len(points)
-    seeds = np.asarray(seed_indices, dtype=np.int64)
-    seeds = seeds[(seeds >= 0) & (seeds < n)]
-    if len(seeds) == 0:
-        return np.array([], dtype=np.int64)
-
+    # 中身は core/cluster_grow.py（2026-11-14 に作り直し。以前は全点の KD 木と Python のループで、大きな点群で終わらなかった）。
+    # ここは、引数と戻り値の形を保つための入口。進み具合・中止・「上限で打ち切った」の合図が要るときは
+    # grow_connected_cluster を直接呼ぶ
     eff_radius = max(0.01, float(eps) if eps > 0 else float(radius))
-    max_pts = max(len(seeds), int(n * max(0.05, min(1.0, float(max_cluster_ratio)))))
-
-    # 地面伝播防止マスク（オプション）: シード点自体が地面にある場合は除外しないが、シードが高い位置にある場合は床面伝播を遮断
-    allowed_mask = np.ones(n, dtype=bool)
-    if exclude_ground and n > 50:
-        ground_idx = segment_ground_points(points, grid_size=max(0.8, eff_radius * 4.0), height_threshold=0.12)
-        if len(ground_idx) > 0 and len(ground_idx) < n:
-            seed_in_ground = np.isin(seeds, ground_idx)
-            # シードの過半数が地面以外のオブジェクト上にある場合のみ、地面への伝播をブロック
-            if np.mean(seed_in_ground) < 0.5:
-                allowed_mask[ground_idx] = False
-                allowed_mask[seeds] = True
-
     try:
-        from scipy.spatial import cKDTree
-
-        valid_indices = np.where(allowed_mask)[0]
-        if len(valid_indices) == 0:
-            return np.unique(seeds)
-
-        sub_pts = points[valid_indices]
-        tree = cKDTree(sub_pts)
-
-        # 全体インデックス -> valid_indices 内の局所インデックスへの逆引き
-        global_to_local = np.full(n, -1, dtype=np.int64)
-        global_to_local[valid_indices] = np.arange(len(valid_indices), dtype=np.int64)
-
-        visited_local = np.zeros(len(valid_indices), dtype=bool)
-        seed_locals = global_to_local[seeds]
-        seed_locals = seed_locals[seed_locals >= 0]
-        visited_local[seed_locals] = True
-        total_visited = int(np.sum(visited_local))
-
-        frontier = list(seed_locals)
-        # 大規模点群でも暴走しないよう最大探索ステップを制御しつつ幅優先探索
-        while frontier and total_visited < max_pts:
-            neighbors_list = tree.query_ball_point(sub_pts[frontier], r=eff_radius)
-            next_frontier = []
-            for nbrs in neighbors_list:
-                for nb in nbrs:
-                    if not visited_local[nb]:
-                        visited_local[nb] = True
-                        next_frontier.append(nb)
-                        total_visited += 1
-                        if total_visited >= max_pts:
-                            break
-                if total_visited >= max_pts:
-                    break
-            frontier = next_frontier
-
-        return np.sort(valid_indices[visited_local])
-    except Exception:
-        return np.unique(seeds)
+        result = grow_connected_cluster(
+            points, seed_indices, eps=eff_radius, exclude_ground=exclude_ground, max_cluster_ratio=max_cluster_ratio,
+        )
+    except ValueError as e:
+        # 起点が極端に離れているなど、範囲が広すぎて追跡できないとき。この入口は以前から例外を出さない約束なので、起点だけを返す
+        log_warning(f"連結塊の追跡ができませんでした（起点だけを返します）: {e}")
+        seeds = np.asarray(seed_indices, dtype=np.int64)
+        return np.unique(seeds[(seeds >= 0) & (seeds < len(points))])
+    return result.indices
 
 

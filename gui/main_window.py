@@ -58,9 +58,9 @@ from core.filters import (
     segment_largest_plane,
     keep_largest_clusters,
     filter_edge_veil_noise,
-    extract_connected_cluster_from_seeds,
     filter_statistical_outlier,
 )
+from core.cluster_grow import grow_connected_cluster
 from gui.worker_thread import (
     ProcessWorker,
     FileLoadWorker,
@@ -5362,21 +5362,31 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # 選べる点（表示中・未ロック・断面の中）だけを相手にする。座標は写さずに渡し、結果は元の点の番号で受け取る
         selectable_mask = self.viewer._get_selectable_mask()
-        cand_orig = np.where(selectable_mask)[0]
-        if len(cand_orig) == 0:
+        seed_orig = np.asarray(seed_orig, dtype=np.int64)
+        seed_orig = seed_orig[(seed_orig >= 0) & (seed_orig < len(selectable_mask))]
+        if len(selectable_mask) != len(self.viewer.points_raw) or not selectable_mask[seed_orig].any():
             return
 
-        # cand_orig 内でのシード位置を特定
-        seed_in_cand = np.where(np.isin(cand_orig, seed_orig))[0]
-        if len(seed_in_cand) == 0:
-            return
-
-        eps = float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.18
+        eps = max(0.05, float(self.cluster_eps_spin.value()) if hasattr(self, "cluster_eps_spin") else 0.18)
         n_seed = len(seed_orig)
+        max_ratio = 0.45    # 塊の点数の上限（いま選べる点の何割か）
 
-        def on_done(cluster_local):
-            cluster_orig = cand_orig[cluster_local]
+        def on_done(growth):
+            cluster_orig = growth.indices
+            if growth.capped:
+                # 上限を超えた（建物や地面までつながった・表示中の点が少ない）。途中までの範囲を選んだり消したりはしない
+                self.log_text.append(
+                    f"🪄 連結塊: つながっている範囲が、いま選べる点の {max_ratio:.0%}（{growth.limit:,} 点）を超えたため、"
+                    f"選択を変えませんでした（建物や地面までつながっているか、表示中の点が少ないときに起きます。連結距離 {eps:.2f}m）"
+                )
+                self.status_label.setText(
+                    f"⚠️ 連結塊が、いま選べる点の {max_ratio:.0%}（{growth.limit:,} 点）を超えました。"
+                    f"連結距離（いま {eps:.2f}m）を小さくするか、囲んで選んでください"
+                )
+                self.show_toast(f"⚠️ 連結塊が大きすぎます（{growth.limit:,} 点超）。選択は変えていません", 7000)
+                return
             if len(cluster_orig) == 0:
                 return
             if self.viewer.instant_delete_mode:
@@ -5396,11 +5406,11 @@ class MainWindow(QMainWindow):
                 self.status_label.setText(f"🪄 繋がっている塊 {len(cluster_orig):,} 点を一括選択しました (Delで即削除)")
                 self.show_toast(f"🪄 連結塊 {len(cluster_orig):,} 点を一括選択しました")
 
-        # 全候補点に対する KDTree 構築と連結追跡は数百万点で数秒〜数十秒かかるためバックグラウンドで実行
+        # 大きな塊では数秒〜十数秒かかるので、裏で動かす（進み具合が出て、中止できる。core/cluster_grow.py）
         self._run_in_background(
-            "🪄 連結塊の追跡", f"シード {n_seed:,} 点 / 候補 {len(cand_orig):,} 点",
-            extract_connected_cluster_from_seeds, self.viewer.points_raw[cand_orig], seed_in_cand,
-            eps=max(0.05, eps), max_cluster_ratio=0.45,
+            "🪄 連結塊の追跡", f"シード {n_seed:,} 点（連結距離 {eps:.2f}m）",
+            grow_connected_cluster, self.viewer.points_raw, seed_orig,
+            eps=eps, selectable_mask=selectable_mask, max_cluster_ratio=max_ratio,
             on_success=on_done,
         )
 
