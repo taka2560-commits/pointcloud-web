@@ -33,7 +33,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
 from gui.color_patch import ColorPatchMixin, SELECTION_COLOR
+from gui.display_patch import DisplayPatchMixin
 from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
+from gui.select_cull import SelectionCullMixin
 from gui.noise_palette import (
     MODE_NOISE_GLOW, MODE_NOISE_SPOT, apply_table as noise_apply_table, color_table as noise_color_table,
     is_light_background, is_noise_mode, rank_curve,
@@ -72,7 +74,7 @@ def wrap_hud_segments(text: str, max_width: int, measure) -> list:
     return lines
 
 
-class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
+class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, QOpenGLWidget):
     """3D点群ビューアクラス"""
 
     point_selected = Signal(list)       # 選択された点インデックスリスト
@@ -503,6 +505,7 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
                         pts_bytes = self.display_points.tobytes()
                         gl.glBufferData(gl.GL_ARRAY_BUFFER, len(pts_bytes), pts_bytes, gl.GL_DYNAMIC_DRAW)
                     self._vbo_points_dirty = False
+                self._upload_point_patches()  # 点が一部だけ変わったときは、その区画だけを送る（gui/display_patch.py）
 
                 # カラーVBO更新 (カラー変更時のみ転送)
                 if self._vbo_colors_dirty:
@@ -1017,7 +1020,7 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
                 sec_parts.append(
                     f"Z基点:{self.clip_z_origin:.2f}m [{self.clip_z_range[0]:.2f}〜{self.clip_z_range[1]:.2f}m / 厚{tz:.2f}m]"
                 )
-            vis_cnt = len(self.display_points) if self.display_points is not None else 0
+            vis_cnt = self.shown_point_count()  # 重複の枠（gui/display_patch.py）を除いた、描いている点の数
             guide_tag = ""
             if not getattr(self, "show_section_origin_plane", True) and not getattr(self, "show_section_box", True):
                 guide_tag = " (枠非表示 / Shift+B:再表示)"
@@ -1247,6 +1250,9 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
             self.display_points = None
             self.display_colors = None
             self.display_orig_indices = None
+            self._preview_base_points = None
+            self._preview_base_colors = None
+            self._forget_display_state()
             self.layer_mask = None
             self.layer_ids = None
             self.scan_ids = None
@@ -1349,6 +1355,10 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
         self.display_points = preloaded.display_points
         self.display_colors = preloaded.display_colors
         self.display_orig_indices = preloaded.display_orig_indices
+        # 断面の下書き表示の元も、新しい点群のものにする（前の点群の配列を持ち続けない）
+        self._preview_base_points = self.display_points
+        self._preview_base_colors = self.display_colors
+        self._forget_display_state()  # 受け取った表示用の配列は、元の配列と共有していることがある（部分更新しない）
 
         n = len(self.points_raw)
         self._init_default_layers()
@@ -1675,18 +1685,22 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
 
         return colors
 
-    def _get_layer_and_scan_visibility_mask(self) -> np.ndarray:
-        """現在のマルチレイヤー表示設定およびスキャン(器械点)表示設定を統合した可視マスクを返す"""
+    def _get_layer_and_scan_visibility_mask(self, idx: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        現在のマルチレイヤー表示設定およびスキャン(器械点)表示設定を統合した可視マスクを返す。
+        idx（点の番号の配列）を渡すと、その点だけについて返す（全点のマスク[idx] と同じ）。
+        """
         if self.points_raw is None or len(self.points_raw) == 0:
             return np.empty(0, dtype=bool)
         self._ensure_layer_sync()
-        n = len(self.points_raw)
+        n = len(self.points_raw) if idx is None else len(idx)
 
         layer_vis = np.zeros(n, dtype=bool)
         if self.layer_ids is not None:
+            layer_ids = self.layer_ids if idx is None else self.layer_ids[idx]
             for lid, linfo in self.layers.items():
                 if linfo.visible:
-                    layer_vis |= (self.layer_ids == lid)
+                    layer_vis |= (layer_ids == lid)
         else:
             layer_vis[:] = True
 
@@ -1694,38 +1708,43 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
             if all(self.scan_visibility.values()):
                 scan_vis = np.ones(n, dtype=bool)
             else:
+                scan_ids = self.scan_ids if idx is None else self.scan_ids[idx]
                 scan_vis = np.zeros(n, dtype=bool)
                 for sid, vis in self.scan_visibility.items():
                     if vis:
-                        scan_vis |= (self.scan_ids == sid)
+                        scan_vis |= (scan_ids == sid)
             return layer_vis & scan_vis
 
         return layer_vis
 
-    def _get_unlocked_mask(self) -> np.ndarray:
-        """ロックされていないレイヤーに属する点のブールマスクを返す"""
+    def _get_unlocked_mask(self, idx: Optional[np.ndarray] = None) -> np.ndarray:
+        """ロックされていないレイヤーに属する点のブールマスクを返す（idx を渡すと、その点だけについて）"""
         if self.points_raw is None or len(self.points_raw) == 0:
             return np.empty(0, dtype=bool)
         self._ensure_layer_sync()
-        n = len(self.points_raw)
+        n = len(self.points_raw) if idx is None else len(idx)
         if self.layer_ids is None:
             return np.ones(n, dtype=bool)
+        layer_ids = self.layer_ids if idx is None else self.layer_ids[idx]
         unlocked = np.ones(n, dtype=bool)
         for lid, linfo in self.layers.items():
             if linfo.locked:
-                unlocked &= (self.layer_ids != lid)
+                unlocked &= (layer_ids != lid)
         return unlocked
 
-    def _get_section_inlier_mask(self) -> np.ndarray:
-        """現在のXYZ断面スライスおよび2点ピック斜め壁スライスの統合インライアマスクを返す (float32 SIMD高速化)"""
+    def _get_section_inlier_mask(self, idx: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        現在のXYZ断面スライスおよび2点ピック斜め壁スライスの統合インライアマスクを返す (float32 SIMD高速化)。
+        idx（点の番号の配列）を渡すと、その点だけについて返す（全点のマスク[idx] と同じ）。
+        """
         if self.points_centered is None or len(self.points_centered) == 0:
             return np.empty(0, dtype=bool)
 
         # 断面スライスがすべて無効の場合は即座に全Trueを返却 (余計な演算をゼロ化)
         if not (self.clip_x_enabled or self.clip_y_enabled or self.clip_z_enabled or self.clip_wall_enabled):
-            return np.ones(len(self.points_centered), dtype=bool)
+            return np.ones(len(self.points_centered) if idx is None else len(idx), dtype=bool)
 
-        pts = self.points_centered
+        pts = self.points_centered if idx is None else np.take(self.points_centered, idx, axis=0)
         cx, cy, cz = float(self.center_offset[0]), float(self.center_offset[1]), float(self.center_offset[2])
         in_sec = np.ones(len(pts), dtype=bool)
 
@@ -1775,6 +1794,7 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
             d_perp = (pts[:, 0] - cx_rel) * nx + (pts[:, 1] - cy_rel) * ny
             mask &= (d_perp >= self.clip_wall_range[0]) & (d_perp <= self.clip_wall_range[1])
 
+        mask = self._drop_duplicate_slots(mask)  # 部分更新で残っている重複の枠（gui/display_patch.py）は、下書きに入れない
         surv = np.where(mask)[0]
         self.display_points = np.ascontiguousarray(pts[surv])
         if self._preview_base_colors is not None and len(self._preview_base_colors) == len(pts):
@@ -1786,6 +1806,7 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
     def _update_display_arrays(self):
         """断面スライス・レイヤー可視性・スキャン可視性・Point Budgetを適用して描画バッファを生成"""
         self._vbo_dirty = True
+        self._forget_display_state()  # 部分更新（gui/display_patch.py）の覚えを捨てる
         self._drop_overlay_if_box_changed()
         if self.points_raw is None or len(self.points_raw) == 0:
             self.display_points = None
@@ -1826,11 +1847,13 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
             step = max(1, int(math.ceil(n_surv / budget)))
             sampled_idx = surviving_indices[::step]
 
+        # np.take は、[番号の配列] での取り出しと同じ結果で、約 3 倍速い（5,490 万点で 0.5 秒 → 0.17 秒）
         self.display_orig_indices = sampled_idx
-        self.display_points = np.ascontiguousarray(self.points_centered[sampled_idx])
-        self.display_colors = np.ascontiguousarray(self.active_colors[sampled_idx])
+        self.display_points = np.ascontiguousarray(np.take(self.points_centered, sampled_idx, axis=0))
+        self.display_colors = np.ascontiguousarray(np.take(self.active_colors, sampled_idx, axis=0))
         self._preview_base_points = self.display_points
         self._preview_base_colors = self.display_colors
+        self._note_display_rebuilt(n_surv, budget)  # 間引いていなければ、次からは部分更新できる
 
     def validate_invariants(self) -> None:
         """
@@ -1872,6 +1895,15 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
             assert self.display_colors is not None and len(self.display_colors) == n_disp, "display_pointsとdisplay_colorsの長さが不一致です"
             assert self.display_orig_indices is not None and len(self.display_orig_indices) == n_disp, "display_pointsとdisplay_orig_indicesの長さが不一致です"
             assert not np.any(np.isnan(self.display_points)), "display_pointsにNaNが含まれています"
+            # 表示用の配列の決まり（gui/display_patch.py）: 番号は昇順（同じ番号が続くのは、重複の枠だけ）
+            _shown = self.display_orig_indices
+            if n_disp > 1:
+                assert np.all(_shown[1:] >= _shown[:-1]), "display_orig_indicesが昇順ではありません"
+                if self.display_points is self._preview_base_points:
+                    _dups = int(np.count_nonzero(_shown[1:] == _shown[:-1]))
+                    assert _dups == self._display_dups, f"重複の枠の数が合いません: 配列 {_dups} / 覚え {self._display_dups}"
+            if n_disp > 0:
+                assert np.array_equal(self.display_points, self.points_centered[_shown]), "display_pointsが元の点と対応していません"
             assert not np.any(np.isnan(self.display_colors)), "display_colorsにNaNが含まれています"
 
         if self.overlay_points is not None:
@@ -2039,8 +2071,7 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
 
         self.layer_ids[idx] = int(target_layer_id)
         self._sync_mask_from_ids()
-        self._recolor_indices(idx)  # 移した点の色（レイヤーの固有色・ノイズの赤）だけを作り直す
-        self._update_display_arrays()
+        self._update_after_layer_move(idx)  # 移した点の色と表示だけを直す（多いときは全部。gui/display_patch.py）
         self.update()
         self._emit_layer_counts()
         return len(idx)
@@ -2094,8 +2125,7 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
 
         if total_moved > 0:
             self._sync_mask_from_ids()
-            self._recolor_indices(np.concatenate(moved_parts))  # 移した点の色だけを作り直す（多いときは全部）
-            self._update_display_arrays()
+            self._update_after_layer_move(np.concatenate(moved_parts))  # 移した点の色と表示だけを直す（多いときは全部）
             self.update()
             self._emit_layer_counts()
 
@@ -3057,7 +3087,12 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
             and self.display_points is not None
             and len(self.display_points) == len(self.display_orig_indices)
         ):
-            self.display_colors = np.ascontiguousarray(self.active_colors[self.display_orig_indices], dtype=np.float32)
+            self.display_colors = np.ascontiguousarray(
+                np.take(self.active_colors, self.display_orig_indices, axis=0), dtype=np.float32
+            )
+            # ここを通るのは、確定した表示のときだけ（長さが合う）。断面の下書き表示の元になる色も、新しい色にする
+            if self.display_points is self._preview_base_points:
+                self._preview_base_colors = self.display_colors
             self._vbo_colors_dirty = True
         else:
             self._update_display_arrays()
@@ -3661,7 +3696,8 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
                 return np.array(self.points_raw[orig_idx], dtype=np.float64)
         return np.asarray(centered_pt, dtype=np.float64) + self.center_offset
 
-    def _project_to_screen(self, pts_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _mvp_matrix(self) -> np.ndarray:
+        """画面への投影の行列（4x4, float32）。clip = [x, y, z, 1] @ 行列"""
         aspect = self.width() / max(1, self.height())
         proj = QMatrix4x4()
         near_plane = max(0.1, self.camera_distance * 0.01)
@@ -3675,7 +3711,10 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
 
         view = self._get_view_matrix()
         mvp = proj * view
-        mvp_np = np.array(mvp.data(), dtype=np.float32).reshape((4, 4))
+        return np.array(mvp.data(), dtype=np.float32).reshape((4, 4))
+
+    def _project_to_screen(self, pts_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        mvp_np = self._mvp_matrix()
 
         ones = np.ones((len(pts_centered), 1), dtype=np.float32)
         pts4 = np.hstack([pts_centered, ones])
@@ -3691,13 +3730,16 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
 
         return scr_x, scr_y, valid_z
 
-    def _get_selectable_mask(self) -> np.ndarray:
-        """断面スライス・現在表示ONのレイヤー＆スキャン・かつ未ロックのレイヤーに基づく選択対象マスクを取得 (SIMD高速化)"""
+    def _get_selectable_mask(self, idx: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        断面スライス・現在表示ONのレイヤー＆スキャン・かつ未ロックのレイヤーに基づく選択対象マスクを取得 (SIMD高速化)。
+        idx（点の番号の配列）を渡すと、その点だけについて返す（全点のマスク[idx] と同じ）。
+        """
         if self.points_centered is None or len(self.points_centered) == 0:
             return np.empty(0, dtype=bool)
-        in_section = self._get_section_inlier_mask()
-        layer_scan_vis = self._get_layer_and_scan_visibility_mask()
-        unlocked_mask = self._get_unlocked_mask()
+        in_section = self._get_section_inlier_mask(idx)
+        layer_scan_vis = self._get_layer_and_scan_visibility_mask(idx)
+        unlocked_mask = self._get_unlocked_mask(idx)
         return in_section & layer_scan_vis & unlocked_mask
 
     def _apply_selection_with_modifiers(self, new_selected: np.ndarray, label_prefix="範囲選択", modifiers=None):
@@ -3763,8 +3805,18 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
         if self.points_centered is None or len(self.points_centered) == 0:
             return
 
-        cand_indices = np.where(self._get_selectable_mask())[0]
-        if len(cand_indices) == 0:
+        # 形を囲む画面上の四角。その近くにありうる点だけを候補にする（選ばれる点は、全点から探すときと同じ）
+        if self.selection_shape == self.SELECT_RECT:
+            rect = QRect(self.selection_start, self.selection_end).normalized()
+            box = (rect.left(), rect.right(), rect.top(), rect.bottom())
+        elif self.selection_shape == self.SELECT_CIRCLE:
+            cx, cy = self.selection_start.x(), self.selection_start.y()
+            radius = math.hypot(self.selection_end.x() - cx, self.selection_end.y() - cy)
+            box = (cx - radius, cx + radius, cy - radius, cy + radius)
+        else:
+            return
+        cand_indices = self._selection_candidates(*box)
+        if cand_indices is None:
             return
 
         pts = self.points_centered[cand_indices]
@@ -3798,14 +3850,16 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
         if self.points_centered is None or len(self.points_centered) == 0 or len(self.polygon_points) < 3:
             return
 
-        cand_indices = np.where(self._get_selectable_mask())[0]
-        if len(cand_indices) == 0:
+        poly = np.array([[p.x(), p.y()] for p in self.polygon_points], dtype=np.float32)
+        cand_indices = self._selection_candidates(
+            float(poly[:, 0].min()), float(poly[:, 0].max()), float(poly[:, 1].min()), float(poly[:, 1].max())
+        )
+        if cand_indices is None:
             return
 
         pts = self.points_centered[cand_indices]
         scr_x, scr_y, valid_z = self._project_to_screen(pts)
 
-        poly = np.array([[p.x(), p.y()] for p in self.polygon_points], dtype=np.float32)
         n_poly = len(poly)
         inside = np.zeros(len(pts), dtype=bool)
 
@@ -3827,13 +3881,6 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
         if self.points_centered is None or len(self.points_centered) == 0 or len(self.brush_stroke_points) == 0:
             return
 
-        cand_indices = np.where(self._get_selectable_mask())[0]
-        if len(cand_indices) == 0:
-            return
-
-        pts = self.points_centered[cand_indices]
-        scr_x, scr_y, valid_z = self._project_to_screen(pts)
-
         r = float(max(4, self.brush_radius))
         r_sq = r * r
 
@@ -3842,6 +3889,14 @@ class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
         max_x = float(np.max(stroke_xy[:, 0])) + r
         min_y = float(np.min(stroke_xy[:, 1])) - r
         max_y = float(np.max(stroke_xy[:, 1])) + r
+
+        # なぞった所を囲む四角の近くにありうる点だけを候補にする（選ばれる点は、全点から探すときと同じ）
+        cand_indices = self._selection_candidates(min_x, max_x, min_y, max_y)
+        if cand_indices is None:
+            return
+
+        pts = self.points_centered[cand_indices]
+        scr_x, scr_y, valid_z = self._project_to_screen(pts)
 
         bbox_mask = (
             valid_z

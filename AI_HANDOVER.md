@@ -194,6 +194,8 @@
 │   ├── preview_dialog.py       # プレビュー用補助ダイアログ
 │   ├── system_tools.py         # システムの道具: 作業用データの管理の窓・書く前の空きの確認・版の表示（設定 → システム、ヘルプのメニュー）
 │   ├── color_patch.py          # 色の部分更新（選択・レイヤーが変わった点の色だけを作り直し、GPU へも変わった区画だけを送る）
+│   ├── display_patch.py        # 表示の部分更新（消した・戻した点の所だけ表示用の配列を書き換え、GPU へも変わった区画だけを送る）
+│   ├── select_cull.py          # 選択の候補のふるい（区画ごとの箱で、形の近くにありうる点だけを画面へ投影する）
 │   ├── load_guard.py           # 読み込み前のメモリの確認（収まらない設定のときだけ聞く。見積もりは core/memguard.py）
 │   ├── task_notify.py          # 長い処理の完了の知らせ（進捗の窓を見張り、タスクバーの点滅と Windows の通知）
 │   ├── diagnostics.py          # Qt の警告をログへ残す、前回の異常終了を起動時に知らせる（main.py から呼ぶ）
@@ -263,10 +265,20 @@
   - 確認の窓は `gui/system_tools.py: HOOKS`（`ask_delete` / `ask_low_space`）を通す。テストはここを差し替えて答えを決める。ホットファイル（`gui/main_window.py`）から呼ぶのは `install_system_tools` / `window_title_with_build` / `confirm_save_free_space` / `confirm_lod_build` の 4 つだけ。
 - **色の部分更新**（`gui/color_patch.py`、2026-11-14。5,490 万点・全点表示で、選択のたびに約 2 秒かかっていたことから）: 選択やレイヤーが変わったとき、変わった点の色だけを作り直し、GPU へも変わった区画だけを送る。
   - **色の式は `gui/gl_viewer.py: _base_colors(idx)` にしか置かない**。配色を足す・直すときは、この中に書き、全点ぶんの配列は必ず `take()` を通す（`idx` を渡したときに、その点だけを同じ式で作れるようにするため）。一部だけ作った色が、全点ぶん作った色のその行と同じであることを、`tests/test_color_patch.py` が全部の配色で確かめる。
-  - **呼び分け**: 選択（`selected_indices`）を変えたら `_sync_selection_colors()`。レイヤーを移したら `_recolor_indices(移した点)` → `_update_display_arrays()`。配色・陰影・レイヤーの色・高さの範囲など、全点に関わるものを変えたら、これまでどおり `_update_active_colors()` → `_update_display_colors_only()`。迷ったら全部を作り直すほうを呼ぶ（遅いだけで、結果は正しい）。
+  - **呼び分け**: 選択（`selected_indices`）を変えたら `_sync_selection_colors()`。レイヤーを移したら `_update_after_layer_move(移した点)`（色と表示を、移した点の所だけ直す。下の「表示の部分更新」）。配色・陰影・レイヤーの色・高さの範囲など、全点に関わるものを変えたら、これまでどおり `_update_active_colors()` → `_update_display_colors_only()`。迷ったら全部を作り直すほうを呼ぶ（遅いだけで、結果は正しい）。
   - `active_colors` と `display_colors` を、その場で（一部だけ）書き換えてよいのは `gui/color_patch.py` だけ。読み込みの直後は `active_colors`・`display_colors`・`colors_raw` が同じ配列を指している（メモリの節約）ので、書き換える前に必ず `_colors_are_private()` を通る。
-  - 表示している点の番号（`display_orig_indices`）は、昇順に並んでいること（表示用の配列の中の位置を、二分探索で求めている）。
+  - 表示している点の番号（`display_orig_indices`）は、昇順に並んでいること（表示用の配列の中の位置を、二分探索で求めている）。同じ番号が続くことはある（下の「表示の部分更新」の重複の枠）。
   - **色の式が読む設定を足したら、`gui/color_patch.py: _color_stamp()` にも足す**。全部を作り直したときの設定の控えで、部分更新の入口で違っていたら全部を作り直す（設定だけ変えて色を作り直さない経路があっても、次の更新で追いつくための守り）。点群を入れ替える所では `_forget_color_state()` を呼ぶ。
+- **表示の部分更新**（`gui/display_patch.py`、2026-11-14。5,490 万点・全点表示で、点を消す・戻すたびに約 1.6 秒かかっていたことから）: レイヤーを移した点の所だけ、表示用の配列（`display_points` / `display_colors` / `display_orig_indices`）を書き換え、GPU へも変わった区画だけを送る。
+  - **表示用の配列には、同じ点が続けて何回か入っていることがある**（重複の枠）。表示から外れた点の枠を詰めずに、すぐ手前の枠の点の写しで埋めているため。同じ点を同じ色で描くだけなので絵は変わらないが、**`len(display_points)` は描いている点の数ではない。点の数は `shown_point_count()`**。番号は昇順のまま（同じ番号が続くのは、重複の枠だけ）。`_update_display_arrays()` を呼べば、重複の無い配列に戻る。断面の下書き表示（`_update_display_arrays_fast_preview`）は、重複の枠を除いて作る。
+  - **呼び分け**: 点のレイヤーを書き換えたら（`layer_ids[idx] = …` → `_sync_mask_from_ids()` のあと）`_update_after_layer_move(idx)`。表示する点を決める設定（断面・レイヤーやスキャンの表示・表示点数の上限）を変えたら、これまでどおり `_update_display_arrays()`。迷ったら `_update_display_arrays()`（遅いだけで、結果は正しい）。
+  - **`_update_display_arrays` が読む設定を足したら、`gui/display_patch.py: _display_rule_stamp()` にも足す**。全部を作り直したときの設定の控えで、部分更新の入口で違っていたら全部を作り直す（壁の向きの反転 `flip_wall_aligned_view` のように、設定だけ変えて表示を作り直さない経路があるための守り）。表示用の配列を、`_update_display_arrays` を通さずに差し替える所（`set_preloaded_data` など）では `_forget_display_state()` を呼ぶ。
+  - 表示点数の上限で間引いているとき（何点おきに描くかは、残った点の順番で決まる）・下書き表示の途中・表示用の配列が元の配列と共有のときは、いつも全部を作り直す。部分更新の結果（表示している点の集まり・座標・色）が、全部を作り直した結果と同じであることを、`tests/test_display_patch.py` が、作り直す前の実装を答え合わせ用に持って確かめる。`validate_invariants()` も、番号の昇順と重複の枠の数を見る。
+- **選択の候補のふるい**（`gui/select_cull.py`、2026-11-14。5,490 万点で、ブラシでなぞるたびに約 2 秒かかっていたことから）: 矩形・円・多角形・ブラシの選択で、形を囲む画面上の四角の近くにありうる点だけを候補にする（`_selection_candidates`）。
+  - **選ばれる点は、全部の点から探すときと 1 つも違わないこと**。ふるいは「落とさない」側に倒してあり（四角を 2px 広げる・視点のすぐ近くの区画は面で捨てない）、候補を作ったあとの計算（`_get_selectable_mask(idx)`・`_project_to_screen`・形の判定）は以前と同じ式を通る。`tests/test_select_cull.py` が、ふるったときと、ふるわないときの結果を、形・視点・断面・ロックを変えて突き合わせる。
+  - 新しい選択の形を足すときは、形を**必ず含む**四角を `_selection_candidates` に渡す（四角が形より小さいと、点が落ちる）。画面への投影の行列は `_mvp_matrix()` の 1 か所（`_project_to_screen` とふるいが、同じ行列を使う）。投影の式を変えたら、`gui/select_cull.py: _blocks_near_screen_box` の逆の式も直す。
+  - マスクを作る 4 つの関数（`_get_selectable_mask` / `_get_section_inlier_mask` / `_get_layer_and_scan_visibility_mask` / `_get_unlocked_mask`）は、`idx` を渡すと、その点だけについて返す。**全点のマスク[idx] と同じ結果になること**（条件を足すときは、`idx` のときも同じ式を通す）。
+  - 区画の箱は、点が近い番号に並んでいるファイル（スキャンの順・八分木の順）で効く。並びがばらばらの点群では、自動で今までどおり全部の点から探す（遅くはならない）。
 - **連結塊の追跡（マジックワンド）**（`core/cluster_grow.py`、2026-11-14。利用者の報告「連結塊の機能を使うと途中でフリーズした」から）: 選んだ点から、連結距離 eps 以内の点を次々にたどった範囲を返す。
   - **答えを変えない**: 結果は、点を 1 つずつたどる方法（以前の作り）と 1 点も違わないこと。`tests/test_cluster_grow.py` が、以前の作りを答え合わせ用に持っていて、連結距離・起点・窓の大きさを変えて突き合わせる。格子の隣どうしだけでつなぐ近似は、速いが eps〜2.6×eps 離れた点までつなぎ、実データで結果が変わった（8 点 → 990 点）ので採らなかった。答えを保っている決まりごと（格子の 1 辺は eps/√3 より小さく・窓の XY は地面の格子の区切りにぴったり合わせる・地面の判定は選べる点だけで、するかどうかは選べる点の全部の点数で決める・起点は地面の上でも外さない・上限ちょうどは打ち切らない）は、`TestRulesThatKeepTheAnswer` が見張る（わざと壊した版を見つけられることを確かめてある）。
   - **全点を相手にしない**: 起点のまわりの窓の中だけで計算し、塊が窓の端に届いたら窓を広げる。選べる点の全部に対して KD 木を作ったり、地面を抽出したりしない（5,490 万点で 51 秒かかり、これがフリーズの正体だった）。KD 木は、行き止まりで確かめるときに、その場の少しの点にだけ使う。
@@ -359,7 +371,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - **テストで作ったウィンドウと 3D 画面は、`tests/qt_cleanup.py: destroy_widget()` で本当に破棄します**（2026-11-14）。閉じただけのウィンドウが残ると、あとのテストが遅くなるだけでなく、従来 UI のウィンドウが残ったまま新 UI のウィンドウが作られたときに Qt の中でアクセス違反が起き、テストのプロセスごと落ちました（14 回に 3 回）。`tests/test_static_names.py` が呼び忘れを見張ります。テストのプロセスが落ちたとき（終了コード 139）は、`python -X faulthandler -m unittest …` で走らせると、落ちた行が出ます。
 - UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 566 件）
+### テスト内容（全5段階・単体テスト 613 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）

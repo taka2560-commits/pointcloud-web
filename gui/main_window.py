@@ -2230,10 +2230,11 @@ class MainWindow(QMainWindow):
         self.viewer.layers = state.layers
         self.viewer._sync_mask_from_ids()
         if state.changed is not None and not state.layers_changed:
-            self.viewer._recolor_indices(state.changed)  # レイヤーの定義が同じなら、色を作り直すのは戻した点だけ
+            # レイヤーの定義が同じなら、色と表示を直すのは戻した点だけ（gui/display_patch.py）
+            self.viewer._update_after_layer_move(state.changed)
         else:
             self.viewer._update_active_colors()
-        self.viewer._update_display_arrays()
+            self.viewer._update_display_arrays()
         self.viewer.update()
         self.viewer._emit_layer_counts()
 
@@ -4224,7 +4225,7 @@ class MainWindow(QMainWindow):
         """断面ボックス内の全点表示 ON/OFF（断面有効中は即時再構築）"""
         self.viewer.set_section_full_detail(checked)
         if self.viewer.is_section_active():
-            n_disp = len(self.viewer.display_points) if self.viewer.display_points is not None else 0
+            n_disp = self.viewer.shown_point_count()
             self.show_toast(f"🔬 断面ボックス内の全点表示: {'ON' if checked else 'OFF'}（表示 {n_disp:,} 点）")
 
     def _on_section_reload_clicked(self):
