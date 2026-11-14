@@ -329,6 +329,26 @@ class TestCullingEffect(_Case):
         np.testing.assert_array_equal(np.sort(erased[0]), np.flatnonzero(ok & ((d2 <= 81) | on_line)))
 
 
+class TestSelectionSignal(_Case):
+    def test_point_selected_passes_the_python_list_as_it_is(self):
+        # 選んだ点の一覧は、Python の list のまま受け取れること（Qt に要素ごとの写しを作らせない）
+        v = self.v
+        self.load(n=120_000, seed=13)
+        got = []
+        v.point_selected.connect(got.append)
+        sel = np.arange(500, 90_500, dtype=np.int64)
+        v._apply_selection_with_modifiers(sel, "テスト", Qt.NoModifier)
+        self.assertEqual(len(got), 1)
+        self.assertIs(type(got[0]), list)
+        self.assertEqual(len(got[0]), 90_000)
+        self.assertEqual(got[0][:3], [500, 501, 502])
+        self.assertIs(type(got[0][0]), int)
+        v.invert_selection()
+        self.assertEqual(len(got[1]), 30_000)
+        v.clear_selection()
+        self.assertEqual(got[2], [])
+
+
 class TestBlockBoxes(_Case):
     def test_boxes_enclose_their_points_and_follow_the_point_cloud(self):
         v = self.v

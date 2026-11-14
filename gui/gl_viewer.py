@@ -34,6 +34,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
 from gui.color_patch import ColorPatchMixin, SELECTION_COLOR
 from gui.display_patch import DisplayPatchMixin
+from gui.layer_sync import LayerSyncMixin
 from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
 from gui.select_cull import SelectionCullMixin
 from gui.noise_palette import (
@@ -74,10 +75,12 @@ def wrap_hud_segments(text: str, max_width: int, measure) -> list:
     return lines
 
 
-class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, QOpenGLWidget):
+class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, LayerSyncMixin, QOpenGLWidget):
     """3D点群ビューアクラス"""
 
-    point_selected = Signal(list)       # 選択された点インデックスリスト
+    # 選択された点インデックスリスト（Python の list をそのまま渡す。Signal(list) にすると、Qt が要素ごとに写すので、
+    # 450 万点の選択で 約 1 秒かかる）
+    point_selected = Signal(object)
     status_changed = Signal(str)        # ステータスメッセージ
     measure_updated = Signal(str)       # 計測結果メッセージ
     MEASURE_PICK_MAX_PX = 12.0          # 計測で点を拾うときのクリック位置からの許容距離 [px]
@@ -1196,8 +1199,18 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, Q
             ),
         }
 
-    def _ensure_layer_sync(self):
-        """layer_maskが外部から直接変更された場合でもlayer_idsとの整合性を維持する"""
+    def _ensure_layer_sync(self, force: bool = False):
+        """
+        layer_maskが外部から直接変更された場合でもlayer_idsとの整合性を維持する。
+        前に確かめたときから変わっていなければ、全点の比べを省く（gui/layer_sync.py）。force=True なら、必ず全点を比べる。
+        """
+        if not force and self._layers_known_synced():
+            return
+        self._check_layer_sync()
+        self._note_layers_synced()
+
+    def _check_layer_sync(self):
+        """_ensure_layer_sync の中身: 全点を比べて、layer_mask に合わせて layer_ids を直す"""
         if self.points_raw is None:
             self.layer_mask = None
             self.layer_ids = None
@@ -1211,23 +1224,18 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, Q
                 self.layer_mask = np.ones(n, dtype=bool)
             return
         if self.layer_mask is not None and len(self.layer_mask) == n:
-            noise_ids = [lid for lid in self.layers if self.is_noise_layer(lid)]
-            if self.LAYER_NOISE not in noise_ids:
-                noise_ids.append(self.LAYER_NOISE)
-            expected_mask = ~np.isin(self.layer_ids, noise_ids)
-            if not np.array_equal(self.layer_mask, expected_mask):
-                to_noise = (~self.layer_mask) & np.isin(self.layer_ids, noise_ids, invert=True)
-                to_normal = self.layer_mask & np.isin(self.layer_ids, noise_ids)
+            is_noise = self._is_noise_point(self._noise_layer_ids())  # np.isin(layer_ids, ノイズ扱いの番号) と同じ
+            if not np.array_equal(self.layer_mask, ~is_noise):
+                to_noise = (~self.layer_mask) & ~is_noise
+                to_normal = self.layer_mask & is_noise
                 self.layer_ids[to_noise] = self.LAYER_NOISE
                 self.layer_ids[to_normal] = self.LAYER_NORMAL
 
     def _sync_mask_from_ids(self):
         """layer_idsの変更をlayer_maskへ反映する (ID=0および自動除去ノイズレイヤーをFalse[除外]に設定)"""
         if self.layer_ids is not None:
-            noise_ids = [lid for lid in self.layers if self.is_noise_layer(lid)]
-            if self.LAYER_NOISE not in noise_ids:
-                noise_ids.append(self.LAYER_NOISE)
-            self.layer_mask = ~np.isin(self.layer_ids, noise_ids)
+            self.layer_mask = ~self._is_noise_point(self._noise_layer_ids())
+            self._note_layers_synced()  # layer_ids から作ったので、合っている（次の _ensure_layer_sync は全点を比べない）
 
     def set_point_cloud(
         self,
@@ -1921,7 +1929,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, Q
         """有効点数・ノイズ点数の更新シグナルとレイヤー一覧変更シグナルを発火"""
         if self.layer_mask is None:
             return
-        n_norm = int(np.sum(self.layer_mask))
+        n_norm = int(np.count_nonzero(self.layer_mask))
         n_noise = int(len(self.layer_mask) - n_norm)
         self.layers_updated.emit(n_norm, n_noise)
         self.layer_list_changed.emit()
@@ -2188,9 +2196,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, Q
         self._ensure_layer_sync()
         if self.layer_ids is None:
             return {lid: 0 for lid in self.layers}
-        unique_ids, counts = np.unique(self.layer_ids, return_counts=True)
-        count_map = {int(k): int(v) for k, v in zip(unique_ids, counts)}
-        return {lid: count_map.get(lid, 0) for lid in self.layers}
+        return self._count_points_per_layer()  # layer_ids が変わっていなければ、数え直さない（gui/layer_sync.py）
 
     def set_scan_visibility(self, scan_id: int, visible: bool):
         """特定のスキャン(器械点)の表示/非表示を切り替え"""
@@ -2202,12 +2208,11 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, Q
         """各スキャン(器械点)IDごとの点数を辞書で返す"""
         if self.scan_ids is None:
             return {}
-        unique_ids, counts = np.unique(self.scan_ids, return_counts=True)
-        return {int(k): int(v) for k, v in zip(unique_ids, counts)}
+        return self._count_points_per_scan()  # 読み込みのあとは変わらないので、数え直さない（gui/layer_sync.py）
 
     def save_layer_project(self, filepath: str) -> None:
         """作業途中のレイヤー状態(layer_ids, レイヤー定義, スキャン表示設定)を.npzファイルに保存"""
-        self._ensure_layer_sync()
+        self._ensure_layer_sync(force=True)  # 保存の前は、必ず全点を比べて確かめる
         if self.points_raw is None or self.layer_ids is None:
             raise ValueError("保存する点群データがありません")
 

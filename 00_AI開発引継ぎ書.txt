@@ -89,6 +89,7 @@ gui/noise_palette.py  : 空中に浮いたノイズを探すための、反射�
 gui/color_patch.py    : 色の部分更新（選択・レイヤーが変わった点の色だけを作り直し、GPU へも変わった区画だけを送る）
 gui/display_patch.py  : 表示の部分更新（消した・戻した点の所だけ表示用の配列を書き換え、GPU へも変わった区画だけを送る）
 gui/select_cull.py    : 選択の候補のふるい（区画ごとの箱で、形の近くにありうる点だけを画面へ投影する）
+gui/layer_sync.py     : レイヤーの整合の確認と点数の数え直し（変わっていなければ、全点の比べ・数え直しを省く）
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）
 gui/main_window.py    : メイン画面UI、リボンバー、レイヤー管理、レシピセレクター
 gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread、汎用 FunctionWorker）
