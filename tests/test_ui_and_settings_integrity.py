@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+from tests.qt_cleanup import destroy_widget  # noqa: E402
 
 use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 import unittest
@@ -38,9 +39,7 @@ class TestUIAndSettingsIntegrity(unittest.TestCase):
         self.win.show()
 
     def tearDown(self):
-        self.win.close()
-        self.win.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.win)
 
     # -------------------------------------------------------------
     # 1. ⚙ 設定パネルと Viewer の同期・不変条件テスト

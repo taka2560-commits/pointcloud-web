@@ -17,6 +17,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+from tests.qt_cleanup import destroy_widget  # noqa: E402
 
 use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 
@@ -930,6 +931,7 @@ class TestClassicUiHasNoButtonKit(unittest.TestCase):
         QApplication.instance() or QApplication(sys.argv)
         os.environ["E57_UI_MODE"] = "classic"
         reset_ui_mode_cache()
+        win = None
         try:
             win = MainWindow()
             win.show()
@@ -939,12 +941,12 @@ class TestClassicUiHasNoButtonKit(unittest.TestCase):
                 self.assertFalse(hasattr(win, attr), attr)
             self.assertIs(win.toast_label.parentWidget(), win.bottom_overlay_bar)
             self.assertTrue(win.save_manual_btn.icon().isNull())
-            win.close()
-            win.deleteLater()
         finally:
             os.environ.pop("E57_UI_MODE", None)
             reset_ui_mode_cache()
-        QApplication.processEvents()
+            # 閉じるだけでなく、ここで本当に破棄する。従来 UI のウィンドウが残ったまま、あとのテストが新 UI の
+            # ウィンドウを作ると、Qt の中でアクセス違反が起きてテストごと落ちた（tests/qt_cleanup.py の説明を参照）
+            destroy_widget(win)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ E57ファイルの読み込みおよび書き込みを担当するモジュー�
 - 出力時は一時ファイル経由のアトミック書き込みにより、エラー時のファイル破損（空ファイル化）を完全防止
 """
 
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from pye57 import libe57
 from pye57.utils import get_fields, get_node
 from pyquaternion import Quaternion
 
-from core.logger import log_warning
+from core.logger import log_info, log_warning
 
 
 @dataclass
@@ -290,8 +291,9 @@ class E57ScanData:
         self._name: Optional[str] = name
         self.original_point_count: int = original_point_count if original_point_count is not None else len(self.points)
         self.is_subsampled: bool = bool(is_subsampled)
-        # 初期読み込み時の座標参照および軽量シグネチャ（座標値が外部でインプレース変更されたかの厳密判定用）
-        self._initial_points_ref = self.points
+        # 読み込み時の軽量シグネチャ（座標値が外部でインプレース変更されたかの厳密判定用）。
+        # 以前は座標の配列そのものへの参照（_initial_points_ref）も持っていたが、どこからも読まれていなかった。
+        # 座標系を変えて読み込むと配列が差し替わるので、古い配列（1 点 24 バイト）を使わないまま持ち続けていた
         self._initial_points_signature = _compute_points_signature(self.points)
         # 取り込み時に適用された座標系変換モード（"cartesian" = 元ファイルのまま）。
         # core.processor.transform_scan_coordinate_system / restore_scan_original_coordinates が更新する。
@@ -547,6 +549,23 @@ def file_signature(file_path: str) -> Tuple[int, int]:
     return (int(st.st_size), int(st.st_mtime_ns))
 
 
+def subsample_step(total_points: int, point_budget: Optional[int]) -> int:
+    """
+    読み込み上限 point_budget に対する間引きの間隔（1 = 全点）。
+    総点数が上限の 1.5 倍を超えるときだけ間引く（少し超えるだけなら全点を読む）。
+    読み込み（iter_e57_scans）と、読み込み前のメモリの見積もり（core/memguard.py）が同じ式を使う。
+    """
+    if point_budget is not None and point_budget > 0 and total_points > int(point_budget * 1.5):
+        return max(1, int(math.ceil(total_points / point_budget)))
+    return 1
+
+
+def subsampled_count(n_points: int, step: int) -> int:
+    """step 点に 1 点で読んだときの点数（iter_e57_scans と同じ数え方: スキャンの先頭から step おき）"""
+    n_points = max(0, int(n_points))
+    return n_points if step <= 1 else (n_points + step - 1) // step
+
+
 def read_e57_scans(
     file_path: str,
     progress_callback: Optional[Any] = None,
@@ -624,10 +643,7 @@ def iter_e57_scans(
             total_file_points += cnt
 
         # サンプリングステップの決定（予算指定あり、かつ総点数が予算の1.5倍超の場合）
-        global_step = 1
-        if point_budget is not None and point_budget > 0 and total_file_points > int(point_budget * 1.5):
-            import math
-            global_step = max(1, int(math.ceil(total_file_points / point_budget)))
+        global_step = subsample_step(total_file_points, point_budget)
 
         for i in range(scan_count):
             if wanted is not None and i not in wanted:
@@ -645,6 +661,11 @@ def iter_e57_scans(
             has_pose_flag, rotation, translation = _extract_pose_safely(scan_node)
 
             if not scan_node.isDefined("points"):
+                continue
+            if n_points <= 0:
+                # 点が 1 つも無いスキャン（ほかのソフトが書いた空のスキャン）は読み飛ばす。
+                # 以前は「座標データが見つかりません」となり、ほかのスキャンに点があってもファイル全体を開けなかった
+                log_info(f"スキャン #{i} は点が 0 点のため読み飛ばしました: {os.path.basename(file_path)}")
                 continue
 
             points_node = get_node(scan_node, "points")
@@ -967,6 +988,49 @@ def e57_point_field_schemas(file_path: str, scan_index: int) -> Dict[str, FieldS
             if sch is not None:
                 schemas[sch.name] = sch
         return schemas
+    finally:
+        imf.close()
+
+
+@dataclass
+class ScanLayout:
+    """1 スキャンの点数・点フィールド定義・pose（ヘッダだけ読んで得る。読み込みに要るメモリの見積もりに使う）"""
+    n_points: int
+    schemas: Dict[str, FieldSchema]
+    rotation: Optional[np.ndarray] = None
+    translation: Optional[np.ndarray] = None
+
+
+def e57_scan_layouts(file_path: str) -> List[ScanLayout]:
+    """
+    ファイルの全スキャンの配置（点数・点フィールド定義・pose）を、ヘッダだけ読んで返す。
+    点は読まないので、十数 GB のファイルでも一瞬で済む（実データ 16.8GB・5.4 億点で 0.01 秒）。
+    points の無いスキャンは点数 0 として返す（読み込みは、そのスキャンを飛ばす）。
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"ファイルが見つかりません: {file_path}")
+    out: List[ScanLayout] = []
+    imf = libe57.ImageFile(file_path, "r")
+    try:
+        root = imf.root()
+        if not root.isDefined("data3D"):
+            return out
+        data3d = get_node(root, "data3D")
+        for i in range(data3d.childCount()):
+            scan_node = get_node(data3d, i)
+            if not scan_node.isDefined("points"):
+                out.append(ScanLayout(0, {}))
+                continue
+            points_node = get_node(scan_node, "points")
+            proto_node = libe57.StructureNode(points_node.prototype())
+            schemas: Dict[str, FieldSchema] = {}
+            for f_idx in range(proto_node.childCount()):
+                sch = _schema_of_proto_field(get_node(proto_node, f_idx))
+                if sch is not None:
+                    schemas[sch.name] = sch
+            _, rotation, translation = _extract_pose_safely(scan_node)
+            out.append(ScanLayout(int(points_node.childCount()), schemas, rotation, translation))
+        return out
     finally:
         imf.close()
 

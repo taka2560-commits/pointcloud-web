@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+from tests.qt_cleanup import destroy_widget  # noqa: E402
 
 use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 
@@ -248,9 +249,7 @@ class TestMainWindowCache(_Scene):
         QApplication.processEvents()
 
     def tearDown(self):
-        self.win.close()
-        self.win.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.win)
         remove_cache(self.path)
 
     def test_second_click_uses_cache(self):

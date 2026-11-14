@@ -31,6 +31,9 @@ def use_sandbox_settings() -> str:
     """
     from PySide6 import QtCore
 
+    # テストのあいだは、Windows の通知とタスクバーの点滅を出さない（gui/task_notify.py が見る）
+    os.environ.setdefault("E57_NO_OS_NOTIFY", "1")
+
     current = QtCore.QSettings
     if getattr(current, _MARK, False):
         return os.environ[_ENV_KEY]

@@ -9,7 +9,8 @@
     - 配布版を 1 日に 3 回作り直したが、画面にもログにも版が出ず、どの版で起きたことか区別できなかった。
 
 ホットファイル（gui/main_window.py）から呼ぶのは次の 4 つだけ。中身はすべてここと core/ にある。
-    install_system_tools(win)       … __init__ で 1 回。置き場所の設定を core へ渡し、設定 → システムに 2 行足す
+    install_system_tools(win)       … __init__ で 1 回。置き場所の設定を core へ渡し、設定 → システムに行を足す。
+                                       長い処理の完了の知らせ（gui/task_notify.py）もここで取り付ける
     window_title_with_build()       … タイトルに版を添える
     confirm_save_free_space(...)    … 保存を始める前
     confirm_lod_build(win, scans)   … 高精細表示のデータを作る前
@@ -40,6 +41,7 @@ from core.workdata import (
     WorkData, check_free, estimate_save_bytes, find_workdata, remove_workdata, summarize, workdata_need_for_scans,
 )
 from gui.button_kit import set_button_icon, set_disabled_reason, tokens_for
+from gui.task_notify import install_long_task_notify, make_notify_checkbox
 
 _SETTINGS_ORG = "E57PointCloudTool"
 _SETTINGS_APP = "Settings"
@@ -819,14 +821,18 @@ class _ShowWatcher(QObject):
 def install_system_tools(win) -> None:
     """
     MainWindow の __init__ から 1 回呼ぶ（新UI・従来UI の両方）。
-    置き場所の設定を core へ渡し、設定 → システムに「作業用データ」と「版」の行を足す。
+    置き場所の設定を core へ渡し、設定 → システムに「完了の知らせ」「作業用データ」「版」の行を足す。
+    長い処理の完了の知らせ（gui/task_notify.py）も、ここで取り付ける。
     """
     apply_workdata_dir_setting()
+    install_long_task_notify(win)
     tab = getattr(win, "tab_system", None)
     lay = tab.layout() if tab is not None else None
     if not isinstance(lay, QGridLayout):
         return
     row = lay.rowCount()
+    lay.addWidget(make_notify_checkbox(win, tab), row, 0, 1, 2)
+    row += 1
 
     box = QWidget(tab)
     h = QHBoxLayout(box)

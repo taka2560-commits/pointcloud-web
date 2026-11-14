@@ -14,6 +14,7 @@ import ast
 import builtins
 import glob
 import os
+import re
 import sys
 import unittest
 
@@ -76,6 +77,69 @@ class TestNoUndefinedNames(unittest.TestCase):
                 rel = os.path.relpath(path, ROOT)
                 problems.append(f"{rel}: " + ", ".join(f"{name} ({line} 行)" for name, line in found[:8]))
         self.assertEqual(problems, [], "どこにも定義・import の無い名前を使っています:\n" + "\n".join(problems))
+
+
+_WIN_DELETE_RE = re.compile(r"\b((?:self\.|cls\.)?win\w*)\.deleteLater\(\)")
+_WIN_CLOSE_RE = re.compile(r"^\s*((?:self\.|cls\.)?win\w*)\.close\(\)\s*$")
+
+
+def window_cleanup_problems(source: str):
+    """
+    ウィンドウ（win… という名前）を、閉じただけ・破棄を予約しただけで終えている所を挙げる。
+    認める書き方は 2 つ: tests/qt_cleanup.py の destroy_widget() を使う / close() → deleteLater() → DeferredDelete を流す。
+    """
+    lines = source.splitlines()
+    problems = []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        m = _WIN_DELETE_RE.search(line)
+        if m:
+            after = "\n".join(lines[i + 1:i + 5])
+            if "DeferredDelete" not in after and "flush_deferred_deletes(" not in after:
+                problems.append((i + 1, f"{m.group(1)}.deleteLater() のあとで、破棄を実行していません"))
+        m = _WIN_CLOSE_RE.match(line)
+        if m:
+            after = "\n".join(lines[i + 1:i + 3])
+            if f"{m.group(1)}.deleteLater()" not in after:
+                problems.append((i + 1, f"{m.group(1)}.close() だけで、破棄していません"))
+    return problems
+
+
+class TestWindowsAreReallyDestroyed(unittest.TestCase):
+    """
+    テストと品質ゲートが、作ったウィンドウを閉じたあと本当に破棄していること。
+    閉じただけのウィンドウが残ると、あとのテストが遅くなり、Qt の中でアクセス違反が起きてテストごと落ちることがある
+    （2026-11-14 に見つけた。いきさつは tests/qt_cleanup.py）。
+    """
+
+    def _files(self):
+        files = glob.glob(os.path.join(ROOT, "tests", "*.py")) + [os.path.join(ROOT, "quality_gate.py")]
+        return sorted(p for p in files if os.path.basename(p) != os.path.basename(__file__))
+
+    def test_checker_finds_the_two_mistakes(self):
+        leak = "win.close()\nwin.deleteLater()\nQApplication.processEvents()\n"
+        self.assertEqual([p[0] for p in window_cleanup_problems(leak)], [2])
+        only_close = "    win_c.close()\n    os.environ.pop('X', None)\n"
+        self.assertEqual([p[0] for p in window_cleanup_problems(only_close)], [1])
+        good = (
+            "self.win.close()\nself.win.deleteLater()\n"
+            "QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)\nQApplication.processEvents()\n"
+            "destroy_widget(win)\n"
+        )
+        self.assertEqual(window_cleanup_problems(good), [])
+
+    def test_every_window_is_destroyed_after_use(self):
+        problems = []
+        for path in self._files():
+            with open(path, "r", encoding="utf-8") as f:
+                source = f.read()
+            rel = os.path.relpath(path, ROOT)
+            for line, what in window_cleanup_problems(source):
+                problems.append(f"{rel} ({line} 行): {what}")
+            if "MainWindow()" in source and "destroy_widget(" not in source and "DeferredDelete" not in source:
+                problems.append(f"{rel}: MainWindow を作っていますが、破棄していません")
+        self.assertEqual(problems, [], "ウィンドウを破棄していない所があります（tests/qt_cleanup.py の destroy_widget を使う）:\n" + "\n".join(problems))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+from tests.qt_cleanup import destroy_widget  # noqa: E402
 
 use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 
@@ -408,8 +409,7 @@ class TestViewerOverlay(unittest.TestCase):
 
     def tearDown(self):
         self.v.set_point_cloud(None)
-        self.v.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.v, close=False)
 
     def _set_overlay(self):
         self.v.set_section_overlay(self.ov_pts, self.ov_cols, self.ov_ints, self.ov_sids, n_in_box=len(self.ov_pts), capped=False)
@@ -536,9 +536,7 @@ class TestMainWindowReload(_Scene):
         QApplication.processEvents()
 
     def tearDown(self):
-        self.win.close()
-        self.win.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.win)
         super().tearDown()
 
     def test_button_guards_without_data_or_section(self):

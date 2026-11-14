@@ -15,6 +15,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+from tests.qt_cleanup import destroy_widget  # noqa: E402
 
 use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 
@@ -53,8 +54,7 @@ class TestSectionFullDetail(unittest.TestCase):
 
     def tearDown(self):
         self.v.set_point_cloud(None)
-        self.v.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.v, close=False)
 
     def test_no_section_applies_budget(self):
         """断面無効時は表示予算どおり間引かれ、ボックス内点数は 0"""
@@ -173,9 +173,7 @@ class TestSectionFullDetailUI(unittest.TestCase):
         self.win._reset_app_settings()
 
     def tearDown(self):
-        self.win.close()
-        self.win.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.win)
 
     def test_checkbox_drives_viewer(self):
         win = self.win

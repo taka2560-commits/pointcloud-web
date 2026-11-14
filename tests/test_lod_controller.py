@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from tests.settings_sandbox import use_sandbox_settings  # noqa: E402
+from tests.qt_cleanup import destroy_widget  # noqa: E402
 
 use_sandbox_settings()  # この PC の本番アプリの保存設定を、テストで書き換えない
 
@@ -86,8 +87,7 @@ class TestLodController(_Scene):
     def tearDown(self):
         self.c.shutdown()
         self.v.set_point_cloud(None)
-        self.v.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.v, close=False)
 
     def _overlay_world(self):
         return self.v.overlay_points.astype(np.float64) + self.v.center_offset
@@ -257,9 +257,7 @@ class TestMainWindowLod(_Scene):
 
     def tearDown(self):
         QMessageBox.question = self._orig_question
-        self.win.close()
-        self.win.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.win)
         s = QSettings("E57PointCloudTool", "Settings")
         if self._settings_backup is None:
             s.remove("lod_enabled")
