@@ -4,7 +4,8 @@ E57点群ノイズ処理ツール GUIアプリケーション エントリーポ
 起動の順番（2026-11-14 から）
     1. ログを用意する
     2. 異常終了の記録を始める（core/crashlog.py。前回までに正常に終了しなかった起動があれば、ログへ書く）
-    3. 画面の部品と重いライブラリ（PySide6・OpenGL・open3d・pye57）を読み込む
+    3. 描画に使う GPU の希望を出す（gui/gpu_select.py。OpenGL を使い始める前でないと効かない。2026-11-15 から）
+       そのあと、画面の部品と重いライブラリ（PySide6・OpenGL・open3d・pye57）を読み込む
     4. ウィンドウを作って、イベントループを回す
 3 を 1・2 のあとに置くのは、ライブラリを読み込む途中で落ちたり例外が出たりしたときにも、記録が残るようにするため
 （以前はファイルの先頭で読み込んでいて、そこで起きたことはどこにも残らなかった）。
@@ -54,6 +55,11 @@ def main():
         log_warning(line)
 
     try:
+        # OpenGL を使い始める前に、描画に使う GPU の希望を出す（内蔵 GPU と高性能の GPU の両方が載っている PC 向け。gui/gpu_select.py）
+        from gui.gpu_select import apply_gpu_choice
+
+        log_info(f"・描画の GPU の選び方: {apply_gpu_choice()}")
+
         from PySide6.QtCore import Qt, QTimer
         from PySide6.QtWidgets import QApplication
 
