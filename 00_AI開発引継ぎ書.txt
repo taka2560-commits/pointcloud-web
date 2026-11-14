@@ -52,6 +52,8 @@
   ・新UIの配色はテーマ（dark / kiseki）としてトークンだけを分け、モーションは gui/motion.py に集約する（詳細は docs/DESIGN_STYLE_PLAN.md §9・§10）。
   ・新UIの色・文字サイズ・角丸は gui/design_tokens.py でのみ変更。インライン QSS と絵文字ラベルは追加しない。
   ・不具合時は 起動引数 --classic-ui / 環境変数 E57_UI_MODE=classic / 設定「UIスタイル」で改修前に戻せる。
+  ・点群は、高性能の GPU（NVIDIA）があればそちらで描く（gui/gpu_select.py。2026-11-15）。表示がおかしいときは
+    起動引数 --gpu=system / 環境変数 E57_GPU=system / 設定「システム → 描画の GPU」で、今までの動き（Windows に任せる）に戻せる。
   ・改修直前の main には Git タグ before-ui-redesign-2026-10-31 を付与済み。
 
 [ルール6] 複数AIでの並行開発（詳細は AGENTS.md）
@@ -90,6 +92,7 @@ gui/color_patch.py    : 色の部分更新（選択・レイヤーが変わっ�
 gui/display_patch.py  : 表示の部分更新（消した・戻した点の所だけ表示用の配列を書き換え、GPU へも変わった区画だけを送る）
 gui/select_cull.py    : 選択の候補のふるい（区画ごとの箱で、形の近くにありうる点だけを画面へ投影する）
 gui/layer_sync.py     : レイヤーの整合の確認と点数の数え直し（変わっていなければ、全点の比べ・数え直しを省く）
+gui/gpu_select.py     : 描画に使う GPU の選び方（高性能の GPU を優先 / Windows に任せる。main.py が、画面の部品を読む前に呼ぶ）
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）
 gui/main_window.py    : メイン画面UI、リボンバー、レイヤー管理、レシピセレクター
 gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread、汎用 FunctionWorker）

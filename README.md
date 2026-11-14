@@ -47,6 +47,7 @@ python main.py
 - **UI スタイル（新UI / 従来UI）**: 既定は新UI です。改修前の画面に戻すには「ヘルプ → 従来UIに戻す」または「設定 → システム → UIスタイル」（次回起動から）。起動引数 `--classic-ui` / `--modern-ui`、環境変数 `E57_UI_MODE=classic` でも切り替えられます。
 - **テーマ（新UI）**: 「設定 → システム → テーマ」で「ダーク (標準)」と「軌跡 (明るい地・黒い帯)」をその場で切り替えられます。起動引数 `--theme=kiseki`、環境変数 `E57_UI_THEME=kiseki` でも指定できます。
 - **アニメーション**: 押下・通知・タブ切り替えの短い動きは「設定 → システム」で切れます。
+- **描画の GPU**: 内蔵 GPU と高性能の GPU（NVIDIA）の両方が載っている PC では、点群を高性能の GPU で描きます（既定）。「設定 → システム → 描画の GPU」で「Windows に任せる」（省電力）に変えられます（次回起動から）。起動引数 `--gpu=system` / `--gpu=high`、環境変数 `E57_GPU=system` でも指定できます。実際に描いている GPU は、同じ所の「いまの描画」と、起動のログの「OpenGL描画環境」で分かります。
 
 ---
 
@@ -167,7 +168,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 - 設計憲章・アーキテクチャ・過去の教訓: `AI_HANDOVER.md`
 - 複数AI・複数開発者での並行開発ルール（作業場所・担当ファイル・マージ手順）: `AGENTS.md`
 - 品質管理の報告（欠陥一覧・修正状況・backlog・コミットの記録）: `QA_REPORT_2026-10-31.md`
-- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 643 件）／`--quick`（GUI を開かない軽量版）
+- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 665 件）／`--quick`（GUI を開かない軽量版）
 - テストとゲートは、この PC の本番アプリの保存設定を書き換えません（`tests/settings_sandbox.py`）。MainWindow を作るテストや確認スクリプトを足すときは、先頭で `use_sandbox_settings()` を呼んでください。
 - 配布パッケージの作成: `EXE配布パッケージ作成.bat`（`dist/E57_PointCloud_Tool_Dist.zip` ができます）
 
@@ -207,6 +208,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 │   ├── lod_controller.py       # 高精細表示 (LOD) の制御
 │   ├── progress_dialog.py / preview_dialog.py / measure_text.py / flow_layout.py
 │   ├── ui_mode.py              # 新UI / 従来UI とテーマの選択
+│   ├── gpu_select.py           # 描画に使う GPU の選び方（高性能の GPU を優先 / Windows に任せる）
 │   ├── design_tokens.py        # 新UI の色・文字サイズ・QSS の唯一の定義
 │   ├── modern_ui.py            # 新UI を従来の画面へ後付けする
 │   ├── motion.py               # 短いアニメーション
@@ -230,7 +232,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 │   ├── layer_sync.py           # レイヤーの整合の確認と点数の数え直し（変わっていなければ省く）
 │   └── styles.py               # 従来UI のスタイル
 ├── assets/icons/               # アイコン（SVG）
-├── tests/                      # 単体テスト（643 件）。settings_sandbox.py はテスト用の設定の置き場
+├── tests/                      # 単体テスト（665 件）。settings_sandbox.py はテスト用の設定の置き場
 ├── tools/                      # 画面キャプチャ・コントラスト確認・版の記録（write_build_info.py）の道具
 └── docs/                       # デザインの計画・UI レビュー・画面の記録
 ```

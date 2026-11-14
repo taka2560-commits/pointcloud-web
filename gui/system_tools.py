@@ -41,6 +41,7 @@ from core.workdata import (
     WorkData, check_free, estimate_save_bytes, find_workdata, remove_workdata, summarize, workdata_need_for_scans,
 )
 from gui.button_kit import set_button_icon, set_disabled_reason, tokens_for
+from gui.gpu_select import install_gpu_row
 from gui.task_notify import install_long_task_notify, make_notify_checkbox
 
 _SETTINGS_ORG = "E57PointCloudTool"
@@ -821,7 +822,7 @@ class _ShowWatcher(QObject):
 def install_system_tools(win) -> None:
     """
     MainWindow の __init__ から 1 回呼ぶ（新UI・従来UI の両方）。
-    置き場所の設定を core へ渡し、設定 → システムに「完了の知らせ」「作業用データ」「版」の行を足す。
+    置き場所の設定を core へ渡し、設定 → システムに「描画の GPU」「完了の知らせ」「作業用データ」「版」の行を足す。
     長い処理の完了の知らせ（gui/task_notify.py）も、ここで取り付ける。
     """
     apply_workdata_dir_setting()
@@ -831,6 +832,7 @@ def install_system_tools(win) -> None:
     if not isinstance(lay, QGridLayout):
         return
     row = lay.rowCount()
+    row = install_gpu_row(win, tab, lay, row)      # 描画の GPU（gui/gpu_select.py）
     lay.addWidget(make_notify_checkbox(win, tab), row, 0, 1, 2)
     row += 1
 
