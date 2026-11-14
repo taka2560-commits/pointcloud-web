@@ -28,6 +28,8 @@ gui/gl_viewer.py: PointCloudViewer に混ぜて使う（ビューア本体の変
       以前は「次の選択で全部を作り直す」ことで直っていたので、その動きを保つため（2026-11-14 の独立レビューで判明）。
     ・変わる点が多いとき（全体の 1/4 を超える）は、全部を作り直すほうが速いので、そちらを通る。
     ・迷ったら全部を作り直す（表示用の配列の長さが合わない・並びが想定と違う、など）。
+    ・表示用の配列には、同じ点が続けて何回か入っていることがある（gui/display_patch.py の「重複の枠」）。
+      色を書き換えるときは、その点の枠をすべて書き換える（_patch_display_colors）。
 """
 
 import numpy as np
@@ -39,6 +41,52 @@ from gui.noise_palette import SELECTION_COLOR
 PATCH_BLOCK = 65536             # GPU へ送り直すときの区画の大きさ（点数）。1 区画 = 768KB
 FULL_REBUILD_FRACTION = 4       # 変わる点が全体の 1/4 を超えたら、全部を作り直す
 FULL_UPLOAD_FRACTION = 2        # 送り直す区画が全体の 1/2 を超えたら、まるごと送る
+
+
+def expand_ranges(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """[left[i], right[i]) を順に並べた位置の配列（空の範囲は飛ばす）"""
+    count = np.asarray(right, dtype=np.int64) - np.asarray(left, dtype=np.int64)
+    keep = count > 0
+    if not keep.all():
+        left, count = left[keep], count[keep]
+    total = int(count.sum())
+    if total == len(count):                      # どれも 1 つずつ
+        return np.asarray(left, dtype=np.int64)
+    step = np.ones(total, dtype=np.int64)
+    starts = np.cumsum(count) - count
+    step[0] = left[0]
+    step[starts[1:]] = left[1:] - (left[:-1] + count[:-1] - 1)
+    return np.cumsum(step)
+
+
+def queue_blocks(pending, n_shown: int, positions: np.ndarray):
+    """
+    表示用の配列の中で変わった位置（positions）を含む区画を、前に覚えた区画（pending）と合わせる。
+    戻り値: (表示点数, 区画の番号の配列)。まるごと送るほうが速いとき（区画が全体の半分以上）は None
+    """
+    blocks = np.unique(np.asarray(positions) // PATCH_BLOCK)
+    if pending is not None and pending[0] == n_shown:
+        blocks = np.union1d(pending[1], blocks)
+    if len(blocks) * PATCH_BLOCK * FULL_UPLOAD_FRACTION >= n_shown:
+        return None
+    return (n_shown, blocks)
+
+
+def upload_blocks(vbo, array: np.ndarray, blocks: np.ndarray) -> None:
+    """array（VBO と同じ並び）のうち、区画 blocks だけを VBO へ送り直す。GL のコンテキストが有効な所（paintGL の中）で呼ぶ"""
+    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
+    # 大きさは 32 ビットで返るので、2GB を超える VBO（約 1.8 億点の表示）では合わず、毎回まるごと送る（絵は正しい）
+    if int(gl.glGetBufferParameteriv(gl.GL_ARRAY_BUFFER, gl.GL_BUFFER_SIZE)) != array.nbytes:
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, array.nbytes, array, gl.GL_DYNAMIC_DRAW)   # 大きさが合わなければ、まるごと
+        return
+    row_bytes = array.strides[0]
+    # 隣り合う区画は、1 回にまとめて送る
+    breaks = np.flatnonzero(np.diff(blocks) != 1) + 1
+    for run in np.split(blocks, breaks):
+        start = int(run[0]) * PATCH_BLOCK
+        stop = min(len(array), (int(run[-1]) + 1) * PATCH_BLOCK)
+        chunk = array[start:stop]
+        gl.glBufferSubData(gl.GL_ARRAY_BUFFER, start * row_bytes, chunk.nbytes, chunk)
 
 
 class ColorPatchMixin:
@@ -153,28 +201,29 @@ class ColorPatchMixin:
         if len(changed) == 0:
             return
         # 表示している点は、元の点の番号の昇順に並んでいる（_update_display_arrays / FileLoadWorker）
-        pos = np.minimum(np.searchsorted(shown, changed), len(shown) - 1)
-        hit = shown[pos] == changed
-        pos = pos[hit]
+        left = np.searchsorted(shown, changed)
+        if getattr(self, "_display_dups", 0) > 0:
+            # 同じ点が続けて入っている枠がある（gui/display_patch.py）。その点の枠を、すべて書き換える
+            right = np.searchsorted(shown, changed, side="right")
+            pos = expand_ranges(left, right)
+            src = np.repeat(changed, right - left)
+        else:
+            pos = np.minimum(left, len(shown) - 1)
+            hit = shown[pos] == changed
+            pos = pos[hit]
+            src = changed[hit]
         if len(pos) == 0:
             return
-        colors[pos] = self.active_colors[changed[hit]]
+        colors[pos] = self.active_colors[src]
         self._queue_color_upload(pos)
 
     def _queue_color_upload(self, positions: np.ndarray) -> None:
         """表示用の配列の中で色が変わった位置（positions）を含む区画を、次の描画で GPU へ送り直すように覚える"""
         if self._vbo_colors_dirty:
             return                               # まるごと送り直す予定なら、覚えなくてよい
-        n_shown = len(self.display_colors)
-        blocks = np.unique(positions // PATCH_BLOCK)
-        pending = self._color_patch
-        if pending is not None and pending[0] == n_shown:
-            blocks = np.union1d(pending[1], blocks)
-        if len(blocks) * PATCH_BLOCK * FULL_UPLOAD_FRACTION >= n_shown:
-            self._color_patch = None
+        self._color_patch = queue_blocks(self._color_patch, len(self.display_colors), positions)
+        if self._color_patch is None:
             self._vbo_colors_dirty = True        # 大半が変わったなら、まるごと送るほうが速い
-            return
-        self._color_patch = (n_shown, blocks)
 
     def _upload_color_patches(self) -> None:
         """
@@ -189,20 +238,7 @@ class ColorPatchMixin:
         if colors is None or pending[0] != len(colors) or getattr(self, "_vbo_colors", None) is None:
             return                               # 表示用の配列が入れ替わった（そのときは、まるごと送り直されている）
         try:
-            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_colors)
-            # 大きさは 32 ビットで返るので、2GB を超える VBO（約 1.8 億点の表示）では合わず、毎回まるごと送る（絵は正しい）
-            if int(gl.glGetBufferParameteriv(gl.GL_ARRAY_BUFFER, gl.GL_BUFFER_SIZE)) != colors.nbytes:
-                gl.glBufferData(gl.GL_ARRAY_BUFFER, colors.nbytes, colors, gl.GL_DYNAMIC_DRAW)   # 大きさが合わなければ、まるごと
-                return
-            blocks = pending[1]
-            row_bytes = colors.strides[0]
-            # 隣り合う区画は、1 回にまとめて送る
-            breaks = np.flatnonzero(np.diff(blocks) != 1) + 1
-            for run in np.split(blocks, breaks):
-                start = int(run[0]) * PATCH_BLOCK
-                stop = min(len(colors), (int(run[-1]) + 1) * PATCH_BLOCK)
-                chunk = colors[start:stop]
-                gl.glBufferSubData(gl.GL_ARRAY_BUFFER, start * row_bytes, chunk.nbytes, chunk)
+            upload_blocks(self._vbo_colors, colors, pending[1])
         except Exception as e:  # noqa: BLE001  ドライバによる失敗は、次の描画でまるごと送り直して立て直す
             self._vbo_colors_dirty = True
             if not self._color_patch_warned:

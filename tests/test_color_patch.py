@@ -645,7 +645,8 @@ class TestGpuUpload(_ViewerCase):
         # 区画を覚えたあとで表示が入れ替わったら（点数が変わる）、覚えていた区画は使わずに、まるごと送る
         v._apply_selection_with_modifiers(np.arange(0, 200, dtype=np.int64), "テスト", Qt.NoModifier)
         self.assertIsNotNone(v._color_patch)
-        v.move_indices_to_noise(np.arange(5000, 9000, dtype=np.int64))      # ノイズは非表示なので、表示点数が減る
+        v.set_point_budget(200_000)                                         # 間引くので、表示用の配列が作り直される
+        self.assertLess(len(v.display_points), n)
         self.assertTrue(v._vbo_colors_dirty)
         after = self._picture()
         self.assertIsNone(v._color_patch)
