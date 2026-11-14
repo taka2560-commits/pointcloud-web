@@ -84,6 +84,7 @@ gui/system_tools.py   : 作業用データの管理の窓、保存前の空き�
 gui/load_guard.py     : 読み込み前のメモリの確認の窓（収まらない設定のときだけ聞く）
 gui/task_notify.py    : 長い処理の完了の知らせ（タスクバーの点滅と Windows の通知）
 gui/diagnostics.py    : Qt の警告をログへ残す、前回の異常終了を起動時に知らせる
+gui/noise_palette.py  : 空中に浮いたノイズを探すための、反射強度の配色（弱い反射ほど明るい水色）
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）
 gui/main_window.py    : メイン画面UI、リボンバー、レイヤー管理、レシピセレクター
 gui/worker_thread.py  : 非同期バックグラウンドワーカー（QThread、汎用 FunctionWorker）

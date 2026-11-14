@@ -194,7 +194,8 @@
 │   ├── system_tools.py         # システムの道具: 作業用データの管理の窓・書く前の空きの確認・版の表示（設定 → システム、ヘルプのメニュー）
 │   ├── load_guard.py           # 読み込み前のメモリの確認（収まらない設定のときだけ聞く。見積もりは core/memguard.py）
 │   ├── task_notify.py          # 長い処理の完了の知らせ（進捗の窓を見張り、タスクバーの点滅と Windows の通知）
-│   └── diagnostics.py          # Qt の警告をログへ残す、前回の異常終了を起動時に知らせる（main.py から呼ぶ）
+│   ├── diagnostics.py          # Qt の警告をログへ残す、前回の異常終了を起動時に知らせる（main.py から呼ぶ）
+│   └── noise_palette.py        # 空中に浮いたノイズを探すための、反射強度の配色（色の表・順位の変換・見えやすさの検査）
 │
 ├── tests/                      # テストスイート（unittest 形式。quality_gate.py の Gate 5 が discover で一括実行）
 │   ├── test_io_integrity.py    # E57入出力の完全ロスレス性・属性保持テスト
@@ -258,6 +259,12 @@
   - **版**: 配布版は、`EXE配布パッケージ作成.bat` が `tools/write_build_info.py` で `build_info.json`（作った日時とコミット）を書き、spec が同梱し、`core/build_info.py` が読む。タイトル・バージョン情報・設定 → システム・ログの先頭に出る。`build_info.json` は git に入れない。
   - **ログ**: 配布版は `%LOCALAPPDATA%\E57PointCloudTool\logs`（以前は EXE と同じフォルダで、配布版を作り直すと消えていた）。ソースからの起動はリポジトリの `logs/`。環境変数 `E57_LOG_DIR` でその場だけ替えられる（配布版の起動確認は、これを scratchpad に向けて行うと利用者の記録と混ざらない）。書けないときは利用者ごとのフォルダ → 一時フォルダへ替える。1 日 1 ファイルで、日付が変わると次の行から新しいファイルへ書く。90 日より古いものは起動時に消す。
   - 確認の窓は `gui/system_tools.py: HOOKS`（`ask_delete` / `ask_low_space`）を通す。テストはここを差し替えて答えを決める。ホットファイル（`gui/main_window.py`）から呼ぶのは `install_system_tools` / `window_title_with_build` / `confirm_save_free_space` / `confirm_lod_build` の 4 つだけ。
+- **反射強度の配色「ノイズ探索」**（`gui/noise_palette.py`、2026-11-14。利用者の依頼から）: 空中に浮いた点を探すための配色。配色の一覧に 2 つある（「ノイズ探索」と「ノイズ探索・淡色」）。
+  - 根拠は実データ: 利用者の 3 現場で、周りに点がほとんど無い点（30cm の立方体に 6 点未満）の 33〜39% が、反射強度のいちばん弱い 10% の帯にあった。いちばん強い 20% の帯には 2〜11% しか無い。これまでの配色は弱い反射が暗い色で、暗い背景に溶けていた（白黒では空中の点の 4 割が見分けられない明るさ）。
+  - **色を足す・直すときの決まり**（`tests/test_noise_palette.py` が見張る）: 弱い反射ほど背景から離れた明るさにする。どの色も背景（ダーク・ブラック・ホワイト）とのコントラスト比 3 以上。選択中の点の黄色 (1.0, 0.9, 0.1) とノイズレイヤーの赤 (0.95, 0.25, 0.25) に近い色を使わない（暖色を使わない）。
+  - 色は、強度の値ではなく点群の中での順位で決める（`rank_curve`）。3D 画面は「正規化済みの強度 → 色」を 1 つの表にまとめて引く（`color_table` / `apply_table`）。表は読み込んだ点から作り、重ね描き（読み直し・高精細表示）にも同じ表を使う。点群が入れ替わったら作り直す（`PointCloudViewer._noise_color_table`）。
+  - この配色には凹凸の陰影を掛けない（陰影は色を最大 3 割暗くし、コントラストの保証が崩れる）。背景を白にしたら明暗を反転した表に替える（`set_bg_color` が色を作り直す）。
+  - 配色の名前に、ほかの配色の合図になる語（Heat・Plasma・Turbo・Viridis・高さ など）を入れない。`_intensity_colormap` などは名前に含まれる語で色の表を選んでいる。
 - **読み込み前のメモリの確認**（`core/memguard.py`・`gui/load_guard.py`、2026-11-14。利用者の PC でページファイルが 90GB まで膨らんでいたことから）:
   - 見積もりの式は、読み込み（`core/e57_io.py: iter_e57_scans` と `gui/worker_thread.py: FileLoadWorker`）が作る配列を数えたもの。**読み込みが持つ配列を増やす・減らすときは、`core/memguard.py` の式も同じコミットで直す**。`tests/test_memguard.py` が、本物の読み込み結果が持っている配列を属性をたどって全部集め、大きさの合計を見積もりと突き合わせる（1 バイトでもずれると落ちる。スキャンに配列の属性を足しただけでも落ちる）。
   - 間引きの間隔は `core/e57_io.py: subsample_step()` だけが決める（読み込みと見積もりが同じ関数を使う）。「自動最適化」の段階は `core/memguard.py: auto_load_limit()`。
@@ -337,7 +344,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - **テストで作ったウィンドウと 3D 画面は、`tests/qt_cleanup.py: destroy_widget()` で本当に破棄します**（2026-11-14）。閉じただけのウィンドウが残ると、あとのテストが遅くなるだけでなく、従来 UI のウィンドウが残ったまま新 UI のウィンドウが作られたときに Qt の中でアクセス違反が起き、テストのプロセスごと落ちました（14 回に 3 回）。`tests/test_static_names.py` が呼び忘れを見張ります。テストのプロセスが落ちたとき（終了コード 139）は、`python -X faulthandler -m unittest …` で走らせると、落ちた行が出ます。
 - UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 472 件）
+### テスト内容（全5段階・単体テスト 500 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
