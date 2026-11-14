@@ -77,6 +77,7 @@ from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.styles import DARK_THEME_QSS, get_theme_qss
 from gui.load_guard import resolve_load_limit
+from gui.noise_palette import legend_text as noise_legend_text
 from gui.system_tools import confirm_lod_build, confirm_save_free_space, install_system_tools, window_title_with_build
 from gui.section_seek import (
     THICK_PAGE_STEP, THICK_SINGLE_STEP, THICK_SLIDER_MAX, centered_seek_span, seek_scale, seek_slider_range,
@@ -5113,7 +5114,8 @@ class MainWindow(QMainWindow):
                 self.settings_palette_combo.blockSignals(True)
                 self.settings_palette_combo.setCurrentIndex(idx)
                 self.settings_palette_combo.blockSignals(False)
-        self.show_toast(f"🎨 配色切替: {mode_name}")
+        legend = noise_legend_text(mode_name)  # ノイズ探索の配色は、色の読み方を添える（明暗がふつうの反射強度と逆なので）
+        self.show_toast(f"🎨 配色切替: {mode_name}" + (f" ｜ {legend}" if legend else ""), 9000 if legend else 2600)
 
     def _on_color_palette_changed(self, index: int):
         pal_key = self.settings_palette_combo.itemData(index) if hasattr(self, "settings_palette_combo") else "turbo"

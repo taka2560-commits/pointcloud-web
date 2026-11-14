@@ -33,6 +33,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
 from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
+from gui.noise_palette import (
+    MODE_NOISE_GLOW, MODE_NOISE_SPOT, apply_table as noise_apply_table, color_table as noise_color_table,
+    is_light_background, is_noise_mode, rank_curve,
+)
 
 
 @dataclass
@@ -98,6 +102,9 @@ class PointCloudViewer(QOpenGLWidget):
     COLOR_MODE_INTENSITY_PLASMA = "反射強度 (Plasma / 高コントラスト)"
     COLOR_MODE_INTENSITY_TURBO = "反射強度 (Turbo / レインボー)"
     COLOR_MODE_INTENSITY_VIRIDIS = "反射強度 (Viridis / 知覚均一)"
+    # 空中に浮いたノイズを探す配色: 弱い反射ほど背景から浮き立たせる（色の表と、実データで調べた根拠は gui/noise_palette.py）
+    COLOR_MODE_INTENSITY_NOISE = MODE_NOISE_GLOW
+    COLOR_MODE_INTENSITY_NOISE_SOFT = MODE_NOISE_SPOT
     COLOR_MODE_LAYER = "レイヤー別色分け"
     COLOR_MODE_SCAN = "スキャン別 (器械点)"
     COLOR_MODE_SOLID = "単色"
@@ -117,6 +124,8 @@ class PointCloudViewer(QOpenGLWidget):
         COLOR_MODE_INTENSITY_PLASMA,
         COLOR_MODE_INTENSITY_TURBO,
         COLOR_MODE_INTENSITY_VIRIDIS,
+        COLOR_MODE_INTENSITY_NOISE,
+        COLOR_MODE_INTENSITY_NOISE_SOFT,
         COLOR_MODE_LAYER,
         COLOR_MODE_SCAN,
         COLOR_MODE_SOLID,
@@ -222,6 +231,7 @@ class PointCloudViewer(QOpenGLWidget):
         self._cached_shading_factors: Optional[np.ndarray] = None
         self._cached_height_range: Optional[Tuple[float, float]] = None      # 高さ色分けの (z_min, z_max)
         self._cached_intensity_stretch: Optional[Tuple[float, float]] = None  # 反射強度の (p2, p98)
+        self._cached_noise_tables = None  # ノイズ探索の配色用: (点数, 反射強度の値 → 順位の表, {(配色, 背景が明るいか): 色の表})
 
         # 3D表示強化設定 (① 凹凸・陰影強調 / ② 距離連動ポイントサイズ)
         self.shading_enabled: bool = True
@@ -1375,6 +1385,7 @@ class PointCloudViewer(QOpenGLWidget):
         self._cached_shading_factors = None
         self._cached_height_range = None
         self._cached_intensity_stretch = None
+        self._cached_noise_tables = None
 
     def _compute_shading_factors(self) -> np.ndarray:
         """
@@ -1490,6 +1501,27 @@ class PointCloudViewer(QOpenGLWidget):
         self._cached_normalized_intensities = res
         return res
 
+    def _noise_color_table(self, mode: str) -> np.ndarray:
+        """
+        ノイズ探索の配色の「正規化済みの反射強度 → 色」の表。
+        読み込んだ点の強さの順位から作り、重ね描き（元ファイルの読み直し・高精細表示）にも同じ表を使う（同じ強さは同じ色になる）。
+        点群が入れ替わったら作り直す。背景の明暗ごとに別の表を持つ。
+        """
+        n = len(self.intensities_raw) if self.intensities_raw is not None else 0
+        cache = self._cached_noise_tables
+        if cache is None or cache[0] != n:
+            cache = (n, rank_curve(self._normalize_intensities()) if n else None, {})
+            self._cached_noise_tables = cache
+        key = (mode, self._bg_is_light())
+        if key not in cache[2]:
+            cache[2][key] = noise_color_table(mode, cache[1], key[1])
+        return cache[2][key]
+
+    def _bg_is_light(self) -> bool:
+        """背景色が明るいか（ノイズ探索の配色は、白い背景では明暗を反転させた表を使う）"""
+        c = self.bg_color
+        return is_light_background(c.redF(), c.greenF(), c.blueF())
+
     def _is_height_mode(self, mode: str) -> bool:
         return "高さ" in mode or mode in (
             self.COLOR_MODE_HEIGHT,
@@ -1530,7 +1562,9 @@ class PointCloudViewer(QOpenGLWidget):
         return self._colormap_turbo(t)
 
     def _intensity_colormap(self, t: np.ndarray, mode: str) -> np.ndarray:
-        """反射強度系モードのパレット選択 (白黒, Heat, Plasma, Turbo, Viridis)"""
+        """反射強度系モードのパレット選択 (白黒, Heat, Plasma, Turbo, Viridis, ノイズ探索)"""
+        if is_noise_mode(mode):
+            return noise_apply_table(t, self._noise_color_table(mode))
         if "Heat" in mode or "温熱" in mode or self.color_palette == self.PALETTE_HEAT:
             return self._colormap_heat(t)
         if "Plasma" in mode or self.color_palette == self.PALETTE_PLASMA:
@@ -1596,7 +1630,8 @@ class PointCloudViewer(QOpenGLWidget):
             self.active_colors = np.tile([0.3, 0.8, 0.95], (n, 1)).astype(np.float32)
 
         # ① 凹凸・エッジ輪郭強調 (疑似EDL/陰影コントラスト強調) の適用
-        if getattr(self, "shading_enabled", False):
+        #    ノイズ探索の配色には掛けない（陰影は色を最大 3 割暗くし、「どの点も背景に溶けない」明るさの保証が崩れる）
+        if getattr(self, "shading_enabled", False) and not is_noise_mode(mode):
             shade = self._compute_shading_factors()
             strength = float(getattr(self, "shading_strength", 0.65))
             factor = 1.0 + (shade - 1.0) * strength
@@ -2605,7 +2640,7 @@ class PointCloudViewer(QOpenGLWidget):
             cols = np.tile(np.asarray([0.3, 0.8, 0.95], dtype=np.float32), (n, 1))
 
         # 陰影は「隣の点＝スキャン順で隣」を前提にした計算なので、空間順に並べ替えた LOD の重ね描きには掛けない
-        if getattr(self, "shading_enabled", False) and self.overlay_kind != "lod":
+        if getattr(self, "shading_enabled", False) and self.overlay_kind != "lod" and not is_noise_mode(mode):
             shade = self._shading_factors_of(pts_c, _t_int() if ints is not None else None)
             factor = 1.0 + (shade - 1.0) * float(getattr(self, "shading_strength", 0.65))
             cols = np.clip(cols * factor[:, np.newaxis], 0.0, 1.0)
@@ -2842,6 +2877,10 @@ class PointCloudViewer(QOpenGLWidget):
 
     def set_bg_color(self, color: QColor):
         self.bg_color = color
+        if is_noise_mode(self.color_mode) and self.points_centered is not None:
+            # ノイズ探索の配色は、背景の明暗に合わせて色の表を替える（白い背景では、弱い反射を濃い色にする）
+            self._update_active_colors()
+            self._update_display_colors_only()
         self.update()
 
     def set_color_mode(self, mode: str):
