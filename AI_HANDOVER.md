@@ -196,6 +196,7 @@
 │   ├── color_patch.py          # 色の部分更新（選択・レイヤーが変わった点の色だけを作り直し、GPU へも変わった区画だけを送る）
 │   ├── display_patch.py        # 表示の部分更新（消した・戻した点の所だけ表示用の配列を書き換え、GPU へも変わった区画だけを送る）
 │   ├── select_cull.py          # 選択の候補のふるい（区画ごとの箱で、形の近くにありうる点だけを画面へ投影する）
+│   ├── layer_sync.py           # レイヤーの整合の確認と点数の数え直し（変わっていなければ、全点の比べ・数え直しを省く）
 │   ├── load_guard.py           # 読み込み前のメモリの確認（収まらない設定のときだけ聞く。見積もりは core/memguard.py）
 │   ├── task_notify.py          # 長い処理の完了の知らせ（進捗の窓を見張り、タスクバーの点滅と Windows の通知）
 │   ├── diagnostics.py          # Qt の警告をログへ残す、前回の異常終了を起動時に知らせる（main.py から呼ぶ）
@@ -279,6 +280,11 @@
   - 新しい選択の形を足すときは、形を**必ず含む**四角を `_selection_candidates` に渡す（四角が形より小さいと、点が落ちる）。画面への投影の行列は `_mvp_matrix()` の 1 か所（`_project_to_screen` とふるいが、同じ行列を使う）。投影の式を変えたら、`gui/select_cull.py: _blocks_near_screen_box` の逆の式も直す。
   - マスクを作る 4 つの関数（`_get_selectable_mask` / `_get_section_inlier_mask` / `_get_layer_and_scan_visibility_mask` / `_get_unlocked_mask`）は、`idx` を渡すと、その点だけについて返す。**全点のマスク[idx] と同じ結果になること**（条件を足すときは、`idx` のときも同じ式を通す）。
   - 区画の箱は、点が近い番号に並んでいるファイル（スキャンの順・八分木の順）で効く。並びがばらばらの点群では、自動で今までどおり全部の点から探す（遅くはならない）。
+- **レイヤーの整合の確認と点数**（`gui/layer_sync.py`、2026-11-14。5,490 万点で、点を消す・戻すたびに、全点の比べと数え直しで約 1〜3 秒かかっていたことから）: `_ensure_layer_sync()` は、前に確かめたときから変わっていなければ全点の比べを省き、`get_layer_counts()` / `get_scan_counts()` は、変わっていなければ数え直さない。
+  - **`layer_ids` をその場で書き換えたら（`layer_ids[idx] = …`）、必ず `_sync_mask_from_ids()` を呼ぶ**。ここで `layer_mask` を作り直し、「合っている」という覚えと、点数の覚えの版（`_layer_version`）を進める。呼ばないと、整合の確認も点数も「変わっていない」と見なされる（以前は、次の `_ensure_layer_sync()` が書き換えを黙って元に戻していた）。ビューアの中の移動と `gui/layer_history.py`（元に戻す）は、そうなっている。
+  - `layer_mask` を外から変えるときは、**配列ごと差し替える**（`viewer.layer_mask = 新しい配列` → `_ensure_layer_sync()`。`_restore_layer_snapshot` の形）。差し替えは必ず気づく。その場の書き換えは、True の数が変わるものだけ気づく。
+  - 保存の前など、確実に確かめたい所は `_ensure_layer_sync(force=True)`（必ず全点を比べる）。`validate_invariants()` は、`layer_mask` と `layer_ids` が本当に合っているかを全点で見る。
+  - 「ノイズ扱いのレイヤーの点か」は `_is_noise_point(_noise_layer_ids())` で作る。`np.isin(layer_ids, 番号の組)` を全点に使わない（番号が 2 つ以上あると、5,490 万点で 0.23 秒かかる。番号ごとの比べなら 1 つ 0.012 秒）。
 - **連結塊の追跡（マジックワンド）**（`core/cluster_grow.py`、2026-11-14。利用者の報告「連結塊の機能を使うと途中でフリーズした」から）: 選んだ点から、連結距離 eps 以内の点を次々にたどった範囲を返す。
   - **答えを変えない**: 結果は、点を 1 つずつたどる方法（以前の作り）と 1 点も違わないこと。`tests/test_cluster_grow.py` が、以前の作りを答え合わせ用に持っていて、連結距離・起点・窓の大きさを変えて突き合わせる。格子の隣どうしだけでつなぐ近似は、速いが eps〜2.6×eps 離れた点までつなぎ、実データで結果が変わった（8 点 → 990 点）ので採らなかった。答えを保っている決まりごと（格子の 1 辺は eps/√3 より小さく・窓の XY は地面の格子の区切りにぴったり合わせる・地面の判定は選べる点だけで、するかどうかは選べる点の全部の点数で決める・起点は地面の上でも外さない・上限ちょうどは打ち切らない）は、`TestRulesThatKeepTheAnswer` が見張る（わざと壊した版を見つけられることを確かめてある）。
   - **全点を相手にしない**: 起点のまわりの窓の中だけで計算し、塊が窓の端に届いたら窓を広げる。選べる点の全部に対して KD 木を作ったり、地面を抽出したりしない（5,490 万点で 51 秒かかり、これがフリーズの正体だった）。KD 木は、行き止まりで確かめるときに、その場の少しの点にだけ使う。
@@ -326,7 +332,7 @@
 - レイヤー編集の Undo は **全点コピーではなく差分**で保持します。履歴が持つのは「直前の `_push_layer_undo_state()` 時点の `layer_ids` の写し（shadow）1 本」と、ステップごとの「変化した点のインデックス＋変化前の layer_id＋レイヤー定義辞書の複製」だけです。`layer_mask` は `layer_ids` とレイヤー定義（`is_noise`）から `_sync_mask_from_ids()` で再計算するため保存しません。
 - `push()` の時点では何が変わるか分からないため、差分は次の `push()` / `undo()` のときに shadow と現在値を比較して確定します。変更が無かった push（0 点移動）はステップとして数えません。
 - `MainWindow.layer_undo_stack` / `layer_redo_stack` は履歴オブジェクト内の list をそのまま公開しており、`len()` / `bool()` / `clear()` が従来どおり使えます（`clear()` は shadow もリセットします）。
-- **注意**: Undo/Redo で `layer_ids` を戻した直後は `layer_mask` が古いままです。`_ensure_layer_sync()` は古い mask を正として ids を上書きするため、必ず `_apply_layer_state()`（mask 同期）を先に呼んでから選択解除などの他処理を行ってください（この順序を誤ると Redo が復元できません）。
+- **注意**: Undo/Redo で `layer_ids` を戻した直後は `layer_mask` が古いままです。必ず `_apply_layer_state()`（mask 同期）を先に呼んでから選択解除などの他処理を行ってください。順序を誤ると、`layer_mask` と点数の覚えが古いまま残ります（`gui/layer_sync.py`。全点を比べ直す場面 = `_ensure_layer_sync(force=True)` や `layer_mask` の差し替えのあとでは、古い mask を正として ids を上書きするので、Redo が復元できません）。
 
 ---
 
@@ -371,7 +377,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - **テストで作ったウィンドウと 3D 画面は、`tests/qt_cleanup.py: destroy_widget()` で本当に破棄します**（2026-11-14）。閉じただけのウィンドウが残ると、あとのテストが遅くなるだけでなく、従来 UI のウィンドウが残ったまま新 UI のウィンドウが作られたときに Qt の中でアクセス違反が起き、テストのプロセスごと落ちました（14 回に 3 回）。`tests/test_static_names.py` が呼び忘れを見張ります。テストのプロセスが落ちたとき（終了コード 139）は、`python -X faulthandler -m unittest …` で走らせると、落ちた行が出ます。
 - UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 613 件）
+### テスト内容（全5段階・単体テスト 643 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）

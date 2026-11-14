@@ -5651,7 +5651,11 @@ class MainWindow(QMainWindow):
         if self.viewer.layer_mask is None or not self.layer_history.can_undo():
             return
 
-        restored = self.layer_history.undo(self._current_layer_state())
+        try:
+            restored = self.layer_history.undo(self._current_layer_state())
+        except Exception:
+            self.viewer._forget_layer_sync()  # 途中で失敗したら、次の確認で全点を比べ直す（gui/layer_sync.py）
+            raise
         if restored is not None:
             # layer_ids はインプレースで戻っているが layer_mask はまだ古い。別の処理が _ensure_layer_sync() で
             # 古い mask を正として ids を上書きしないよう、選択解除より先に mask を同期・反映する
@@ -5670,7 +5674,11 @@ class MainWindow(QMainWindow):
         if self.viewer.layer_mask is None or not self.layer_history.can_redo():
             return
 
-        restored = self.layer_history.redo(self._current_layer_state())
+        try:
+            restored = self.layer_history.redo(self._current_layer_state())
+        except Exception:
+            self.viewer._forget_layer_sync()
+            raise
         if restored is not None:
             self._apply_layer_state(restored)  # Undo と同じ理由で選択解除より先に反映する
         self._sync_undo_buttons()
@@ -5688,7 +5696,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "保存する点群データがありません。")
             return
 
-        self.viewer._ensure_layer_sync()
+        self.viewer._ensure_layer_sync(force=True)  # 保存の前は、必ず全点を比べて確かめる
         export_mode = self.export_mode_combo.currentData() if hasattr(self, "export_mode_combo") else "normal"
         split_masks = None
         layer_mask = self.viewer.layer_mask
