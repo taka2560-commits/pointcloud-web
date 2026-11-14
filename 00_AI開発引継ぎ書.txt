@@ -74,6 +74,7 @@ AGENTS.md / CLAUDE.md : 複数AI並行開発の共通ルール（作業場所・
 QA_REPORT_2026-10-31.md: 総合品質管理チェック報告書（欠陥一覧・修正状況・backlog）
 core/e57_io.py        : E57完全ロスレス入出力エンジン
 core/filters.py       : ノイズ除去・間引きアルゴリズム（SOR, ROR, DBSCAN, 孤立塊等）
+core/cluster_grow.py  : 連結塊の追跡（マジックワンド）と地面の判定。答えは変えず、窓の中だけで速く求める
 core/processor.py     : FilterConfig、座標系変換関数、パイプライン実行
 core/logger.py        : システム履歴ロガー（日別UTF-8出力。配布版は %LOCALAPPDATA%\E57PointCloudTool\logs）
 core/workdata.py      : 作業用データ（読み直し用・高精細表示用）の一覧・削除、書く前の空きの見積もり
