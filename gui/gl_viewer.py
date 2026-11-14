@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QKeyEvent,
 )
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
+from gui.color_patch import ColorPatchMixin, SELECTION_COLOR
 from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
 from gui.noise_palette import (
     MODE_NOISE_GLOW, MODE_NOISE_SPOT, apply_table as noise_apply_table, color_table as noise_color_table,
@@ -71,7 +72,7 @@ def wrap_hud_segments(text: str, max_width: int, measure) -> list:
     return lines
 
 
-class PointCloudViewer(QOpenGLWidget):
+class PointCloudViewer(ColorPatchMixin, QOpenGLWidget):
     """3D点群ビューアクラス"""
 
     point_selected = Signal(list)       # 選択された点インデックスリスト
@@ -512,6 +513,7 @@ class PointCloudViewer(QOpenGLWidget):
                         cols_bytes = self.display_colors.tobytes()
                         gl.glBufferData(gl.GL_ARRAY_BUFFER, len(cols_bytes), cols_bytes, gl.GL_DYNAMIC_DRAW)
                     self._vbo_colors_dirty = False
+                self._upload_color_patches()  # 色が一部だけ変わったときは、その区画だけを送る（gui/color_patch.py）
 
                 gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_points)
                 gl.glVertexPointer(3, gl.GL_FLOAT, 0, None)
@@ -1241,6 +1243,7 @@ class PointCloudViewer(QOpenGLWidget):
             self.points_raw = None
             self.points_centered = None
             self.active_colors = None
+            self._forget_color_state()
             self.display_points = None
             self.display_colors = None
             self.display_orig_indices = None
@@ -1338,6 +1341,7 @@ class PointCloudViewer(QOpenGLWidget):
         self.colors_raw = preloaded.colors_raw
         self.intensities_raw = preloaded.intensities_raw
         self.active_colors = preloaded.active_colors
+        self._forget_color_state()  # 受け取った色は、色の式で作ったものではない（最初の更新で、全部を作り直す）
         self.world_bounds_min = preloaded.world_bounds_min
         self.world_bounds_max = preloaded.world_bounds_max
         self.bounds_min = preloaded.bounds_min
@@ -1583,77 +1587,93 @@ class PointCloudViewer(QOpenGLWidget):
 
         self._ensure_layer_sync()
         n = len(self.points_centered)
+        colors = self._base_colors()
+
+        # 選択中の点を黄色でハイライト（どの点を塗ったかを覚えておく。選択が変わったときは、その点だけを塗り直す: gui/color_patch.py）
+        valid = self._valid_selection()
+        if len(valid) > 0:
+            colors[valid] = SELECTION_COLOR
+        self._colored_selection = valid
+
+        self.active_colors = np.ascontiguousarray(colors, dtype=np.float32)
+        self._colors_stamp = self._color_stamp()  # いまの設定で作った、という控え（設定が変わったら、部分更新せずに作り直す）
+        # 重ね描き（元ファイル読み直し）も同じ配色で作り直す
+        if self._overlay_source is not None:
+            self._recolor_overlay()
+
+    def _base_colors(self, idx: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        選択の黄色を除いた色（配色・陰影・レイヤーの固有色）。色の式は、ここにしか置かない。
+        idx（点の番号の配列）を渡すと、その点だけを同じ式で作る。全点ぶん作った結果の idx の行と、必ず同じ値になること
+        （選択やレイヤーが変わったときに、変わった点だけを作り直すのに使う。tests/test_color_patch.py が見張る）。
+        """
+        whole = idx is None
+        n = len(self.points_centered) if whole else len(idx)
         mode = self.color_mode
+
+        def take(values: np.ndarray) -> np.ndarray:
+            return values if whole else values[idx]
 
         # 1. RGB (実色写真)
         if mode in (self.COLOR_MODE_RGB, "RGB", "RGB (実色写真)"):
             if self.colors_raw is not None:
-                self.active_colors = self.colors_raw.copy()
+                colors = self.colors_raw.copy() if whole else self.colors_raw[idx]
             elif self.intensities_raw is not None:
                 # 写真がない場合は反射強度でフォールバック
-                t = self._normalize_intensities()
-                self.active_colors = self._colormap_grayscale(t)
+                colors = self._colormap_grayscale(take(self._normalize_intensities()))
             else:
                 # 写真も強度もない場合は高さでフォールバック
-                t = self._normalize_heights()
-                self.active_colors = self._colormap_turbo(t)
+                colors = self._colormap_turbo(take(self._normalize_heights()))
 
         # 2. 高さ (Z) 系カラーマップ (Turbo, Viridis, Jet, Plasma, Terrain, Heat, Cool-Warm)
         elif self._is_height_mode(mode):
-            self.active_colors = self._height_colormap(self._normalize_heights(), mode)
+            colors = self._height_colormap(take(self._normalize_heights()), mode)
 
         # 3. 反射強度系カラーマップ (白黒, Heat, Plasma, Turbo, Viridis)
         elif self._is_intensity_mode(mode):
             if self.intensities_raw is not None:
-                self.active_colors = self._intensity_colormap(self._normalize_intensities(), mode)
+                colors = self._intensity_colormap(take(self._normalize_intensities()), mode)
             else:
                 # 反射強度データがない場合は高さでフォールバック
-                t = self._normalize_heights()
-                self.active_colors = self._colormap_turbo(t)
+                colors = self._colormap_turbo(take(self._normalize_heights()))
 
         # 4. スキャン別 (器械点)
         elif mode in (self.COLOR_MODE_SCAN, "スキャン別 (器械点)") and self.scan_ids is not None:
             palette_len = len(self.SCAN_PALETTE)
-            idx_mod = np.mod(np.maximum(0, self.scan_ids), palette_len)
-            self.active_colors = self.SCAN_PALETTE[idx_mod].copy()
+            idx_mod = np.mod(np.maximum(0, take(self.scan_ids)), palette_len)
+            colors = self.SCAN_PALETTE[idx_mod].copy()
 
         # 5. レイヤー別色分け
         elif mode in (self.COLOR_MODE_LAYER, "レイヤー別色分け") and self.layer_ids is not None:
-            self.active_colors = np.tile([0.22, 0.74, 0.97], (n, 1)).astype(np.float32)
+            colors = np.tile([0.22, 0.74, 0.97], (n, 1)).astype(np.float32)
+            layer_ids = take(self.layer_ids)
             for lid, linfo in self.layers.items():
-                mask = (self.layer_ids == lid)
+                mask = (layer_ids == lid)
                 if np.any(mask):
-                    self.active_colors[mask] = linfo.color
+                    colors[mask] = linfo.color
 
         # 6. 単色またはその他
         else:
-            self.active_colors = np.tile([0.3, 0.8, 0.95], (n, 1)).astype(np.float32)
+            colors = np.tile([0.3, 0.8, 0.95], (n, 1)).astype(np.float32)
 
         # ① 凹凸・エッジ輪郭強調 (疑似EDL/陰影コントラスト強調) の適用
         #    ノイズ探索の配色には掛けない（陰影は色を最大 3 割暗くし、「どの点も背景に溶けない」明るさの保証が崩れる）
         if getattr(self, "shading_enabled", False) and not is_noise_mode(mode):
-            shade = self._compute_shading_factors()
+            shade = take(self._compute_shading_factors())
             strength = float(getattr(self, "shading_strength", 0.65))
             factor = 1.0 + (shade - 1.0) * strength
-            self.active_colors = np.clip(self.active_colors * factor[:, np.newaxis], 0.0, 1.0).astype(np.float32)
+            colors = np.clip(colors * factor[:, np.newaxis], 0.0, 1.0).astype(np.float32)
 
         # 各レイヤー固有色の上書き (ノイズレイヤーやuse_layer_color=Trueのカスタムレイヤー)
         if self.layer_ids is not None and self.color_mode != self.COLOR_MODE_LAYER:
+            layer_ids = take(self.layer_ids)
             for lid, linfo in self.layers.items():
                 if lid == self.LAYER_NOISE or linfo.use_layer_color:
-                    mask = (self.layer_ids == lid)
+                    mask = (layer_ids == lid)
                     if np.any(mask):
-                        self.active_colors[mask] = linfo.color
+                        colors[mask] = linfo.color
 
-        # 選択中の点を黄色でハイライト
-        if len(self.selected_indices) > 0:
-            valid = self.selected_indices[self.selected_indices < n]
-            self.active_colors[valid] = [1.0, 0.9, 0.1]
-
-        self.active_colors = np.ascontiguousarray(self.active_colors, dtype=np.float32)
-        # 重ね描き（元ファイル読み直し）も同じ配色で作り直す
-        if self._overlay_source is not None:
-            self._recolor_overlay()
+        return colors
 
     def _get_layer_and_scan_visibility_mask(self) -> np.ndarray:
         """現在のマルチレイヤー表示設定およびスキャン(器械点)表示設定を統合した可視マスクを返す"""
@@ -2019,9 +2039,7 @@ class PointCloudViewer(QOpenGLWidget):
 
         self.layer_ids[idx] = int(target_layer_id)
         self._sync_mask_from_ids()
-        # レイヤー別カラーモード以外では元の色配列は不変のため、全点の再計算をスキップして高速化
-        if self.color_mode == self.COLOR_MODE_LAYER or self.active_colors is None or len(self.active_colors) != len(self.points_raw):
-            self._update_active_colors()
+        self._recolor_indices(idx)  # 移した点の色（レイヤーの固有色・ノイズの赤）だけを作り直す
         self._update_display_arrays()
         self.update()
         self._emit_layer_counts()
@@ -2046,6 +2064,7 @@ class PointCloudViewer(QOpenGLWidget):
         self._ensure_layer_sync()
 
         total_moved = 0
+        moved_parts = []
         n_pts = len(self.points_raw)
         unlocked_mask = self._get_unlocked_mask() if respect_lock else None
 
@@ -2071,11 +2090,11 @@ class PointCloudViewer(QOpenGLWidget):
 
             self.layer_ids[idx] = target_layer_id
             total_moved += len(idx)
+            moved_parts.append(idx)
 
         if total_moved > 0:
             self._sync_mask_from_ids()
-            if self.color_mode == self.COLOR_MODE_LAYER or self.active_colors is None or len(self.active_colors) != n_pts:
-                self._update_active_colors()
+            self._recolor_indices(np.concatenate(moved_parts))  # 移した点の色だけを作り直す（多いときは全部）
             self._update_display_arrays()
             self.update()
             self._emit_layer_counts()
@@ -3708,8 +3727,7 @@ class PointCloudViewer(QOpenGLWidget):
             action_str = label_prefix
 
         self.selected_indices = combined
-        self._update_active_colors()
-        self._update_display_colors_only()
+        self._sync_selection_colors()
         self.update()
         self.point_selected.emit(self.selected_indices.tolist())
         self.status_changed.emit(f"{action_str}完了: {len(self.selected_indices):,} 点を選択中")
@@ -3723,8 +3741,7 @@ class PointCloudViewer(QOpenGLWidget):
             return
         inverted = np.setdiff1d(selectable_indices, self.selected_indices).astype(np.int64)
         self.selected_indices = inverted
-        self._update_active_colors()
-        self._update_display_colors_only()
+        self._sync_selection_colors()
         self.update()
         self.point_selected.emit(self.selected_indices.tolist())
         self.status_changed.emit(f"選択反転完了: {len(self.selected_indices):,} 点を選択中")
@@ -3737,8 +3754,7 @@ class PointCloudViewer(QOpenGLWidget):
         self.is_selecting = False
         if self.measure_mode and (len(self.measure_points) > 0 or self.measure_result_text):
             self.clear_measure_points()
-        self._update_active_colors()
-        self._update_display_colors_only()
+        self._sync_selection_colors()
         self.update()
         self.point_selected.emit([])
         self.status_changed.emit("選択を解除しました (Esc)")

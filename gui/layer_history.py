@@ -36,6 +36,10 @@ class LayerState:
     """履歴に渡す現在のレイヤー状態（layer_ids は参照のまま渡す。コピーは履歴側で必要分だけ行う）"""
     layer_ids: Optional[np.ndarray]
     layers: Dict[int, Any]
+    # undo() / redo() が返す状態にだけ入る。レイヤーが変わった点の番号と、レイヤーの定義（色・表示・ロックなど）が変わったか。
+    # 画面側は、定義が変わっていなければ、変わった点の色だけを作り直す（gui/color_patch.py）
+    changed: Optional[np.ndarray] = None
+    layers_changed: bool = True
 
 
 @dataclass
@@ -184,8 +188,9 @@ class LayerUndoHistory:
                 layers=_copy_layers(state.layers),
             )
         )
+        layers_changed = not _layers_equal(state.layers, entry.layers)
         state.layer_ids[entry.idx] = entry.values
-        new_state = LayerState(state.layer_ids, _copy_layers(entry.layers))
+        new_state = LayerState(state.layer_ids, _copy_layers(entry.layers), changed=entry.idx, layers_changed=layers_changed)
         self._take_shadow(new_state)
         return new_state
 
@@ -201,8 +206,9 @@ class LayerUndoHistory:
                 layers=_copy_layers(state.layers),
             )
         )
+        layers_changed = not _layers_equal(state.layers, entry.layers)
         state.layer_ids[entry.idx] = entry.values
-        new_state = LayerState(state.layer_ids, _copy_layers(entry.layers))
+        new_state = LayerState(state.layer_ids, _copy_layers(entry.layers), changed=entry.idx, layers_changed=layers_changed)
         self._take_shadow(new_state)
         self._pending_expected = False
         return new_state

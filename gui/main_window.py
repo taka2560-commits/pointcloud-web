@@ -2229,7 +2229,10 @@ class MainWindow(QMainWindow):
         """差分履歴が戻した状態（layer_ids はインプレース更新済み）をビューアへ反映"""
         self.viewer.layers = state.layers
         self.viewer._sync_mask_from_ids()
-        self.viewer._update_active_colors()
+        if state.changed is not None and not state.layers_changed:
+            self.viewer._recolor_indices(state.changed)  # レイヤーの定義が同じなら、色を作り直すのは戻した点だけ
+        else:
+            self.viewer._update_active_colors()
         self.viewer._update_display_arrays()
         self.viewer.update()
         self.viewer._emit_layer_counts()
@@ -5398,8 +5401,7 @@ class MainWindow(QMainWindow):
                 self.show_toast(f"🪄 連結塊 {moved:,} 点を丸ごと即消去しました")
             else:
                 self.viewer.selected_indices = np.asarray(cluster_orig, dtype=np.int64)
-                self.viewer._update_active_colors()
-                self.viewer._update_display_arrays()
+                self.viewer._sync_selection_colors()  # 色を作り直すのは、選択が変わった点だけ
                 self.viewer.update()
                 self.viewer.point_selected.emit(self.viewer.selected_indices.tolist())
                 self.log_text.append(f"🪄 連結塊選択: シード {n_seed:,} 点から同一塊 {len(cluster_orig):,} 点を一括選択しました")
