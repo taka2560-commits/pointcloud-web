@@ -30,6 +30,11 @@
     空中の高い所の塊を選んだとき、窓の中のいちばん低い点（塊の底）を地面と見まちがえないため。
     窓の XY は地面の格子にそろえて切る（格子の途中で切ると、その格子の最低点が変わってしまう）。
 
+    塊そのものの底（2026-11-15、利用者の依頼）: 地面の判定は、下に床の無い所（空中のノイズ・現場の外・床のレイヤーを
+    隠した所）では、塊の底を地面とみなしてしまい、底の 12cm が選ばれなかった。たどり終わったあとに、支えている面
+    （塊の足もとの外まで続いている面）でない「地面扱いの点」を塊に足す（_own_bottom）。ここだけは、以前と答えが変わる。
+    即削除モードで確かめずに消してよい大きさは too_big_for_instant_delete が決める（画面は、大きな塊を選択にとどめる）。
+
     格子だけでつなぐ方法（CloudCompare の連結成分の抽出と同じ考え方）も試したが、採らなかった。
     速いが、eps 〜 2.6×eps 離れた点までつなぐことがあり、実データで「以前は 8 点 → 990 点」のように結果が変わった。
     壁のそばのノイズを選んだときに壁まで巻き込むおそれがあるので、答えを変えない作りにした。
@@ -48,6 +53,12 @@ GROUND_GRID_EPS = 4.0             # 地面の抽出の格子（連結距離の�
 GROUND_HEIGHT = 0.12              # 局所の最低点からこの高さまでを地面とみなす（m）。以前の作りと同じ値
 GROUND_MIN_POINTS = 50            # これ以下の点数では、地面の判定をしない。以前の作りと同じ値
 GROUND_DENSE_CELLS = 16_000_000   # 地面の格子がこの数までなら、格子の表を直接持つ（速い）。超えたら並べ替えで求める
+BOTTOM_SUPPORT_REACH = 0.5        # 支えている面をたどる距離（地面の格子の何倍か。0.8m の格子で 0.4m。連結距離より広く取る）
+BOTTOM_Z_REACH = 1000.0           # 塊の底・足もとの面として相手にする高さの範囲（塊の上下から何 m まで）
+BOTTOM_MAX_CELLS = 25_000_000     # 塊の真下を調べる格子の表の上限（これを超える広さの塊では、底を足さない）
+INSTANT_DELETE_MAX_POINTS = 1_000_000   # 即削除モードで、確かめずに消してよい塊の点数の上限
+INSTANT_DELETE_MAX_RATIO = 0.10         # 同じく、選べる点に対する割合の上限
+INSTANT_DELETE_RATIO_FLOOR = 20_000     # 割合の上限は、この点数を超える塊にだけ当てはめる（小さな点群で、小さな塊まで止めないため）
 INITIAL_MARGIN_MIN = 4.0          # 最初の窓の余白（m）
 INITIAL_MARGIN_EPS = 30.0         # 最初の窓の余白（連結距離の何倍か）
 MARGIN_GROWTH = 2.0               # 塊が窓の端に届いたとき、余白を何倍にするか
@@ -79,6 +90,20 @@ class ClusterGrowth:
     margin: float = 0.0        # 最後の窓の余白（m）
     seconds: float = 0.0       # かかった時間
     checks: int = 0            # 行き止まりで確かめた回数（最後の窓）
+    n_selectable: int = 0      # 相手にしてよい点の数（選べる点の全部）
+    n_bottom: int = 0          # 「塊そのものの底」として足した点数（地面とみなされていた点）
+
+
+def too_big_for_instant_delete(n_cluster: int, n_selectable: int) -> bool:
+    """
+    即削除モードで、確かめずに消すには大きすぎる塊か。
+    100 万点を超える、または、選べる点の 1 割を超える（2 万点を超える塊に限る）とき True。
+    呼び出し側は、消さずに選択にとどめて、利用者に知らせる（Del で消せる）。
+    """
+    n_cluster = int(n_cluster)
+    if n_cluster > INSTANT_DELETE_MAX_POINTS:
+        return True
+    return n_cluster > INSTANT_DELETE_RATIO_FLOOR and n_cluster > int(n_selectable) * INSTANT_DELETE_MAX_RATIO
 
 
 class _Ticker:
@@ -93,6 +118,7 @@ class _Ticker:
         self.rounds = 0
         self.margin = 0.0
         self.checks = 0
+        self.quiet = False     # True の間は、たどった点数の文を出さない（塊の底の確かめ。数えているのが塊の点ではないため）
 
     def check(self) -> None:
         if self._cancelled is not None and self._cancelled():
@@ -114,6 +140,9 @@ class _Ticker:
 
     def growing(self, total: int) -> None:
         # 窓を 3 回広げても収まらないのは、大きな物（建物・地面）につながっているとき。文は進捗の窓の幅に収まる長さにする
+        if self.quiet:
+            self.check()
+            return
         text = "大きな範囲をたどっています..." if self.rounds >= 3 else "つながりをたどっています..."
         self.say(
             0.15 + 0.03 * min(self.rounds, 10) + 0.5 * min(1.0, total / self._max_pts),
@@ -407,6 +436,137 @@ def _fill_window(pts: np.ndarray, seed_pos: np.ndarray, eps: float, max_pts: int
     return cells.member_mask(visited), capped, touches
 
 
+def _grid_numbers(values: np.ndarray, grid: float) -> np.ndarray:
+    """地面の格子の番号（ground_point_mask と同じ式。同じ型のまま割る）"""
+    return np.floor(values / grid).astype(np.int64)
+
+
+def _dilate(mask: np.ndarray) -> np.ndarray:
+    """真偽の表を、まわり 1 格子ぶん（8 方向）広げる"""
+    out = mask.copy()
+    out[1:, :] |= mask[:-1, :]
+    out[:-1, :] |= mask[1:, :]
+    side = out.copy()
+    out[:, 1:] |= side[:, :-1]
+    out[:, :-1] |= side[:, 1:]
+    return out
+
+
+def _own_bottom(points: np.ndarray, cluster_idx: np.ndarray, band_idx: np.ndarray, eps: float, grid: float,
+                window_cells, ticker: _Ticker):
+    """
+    塊そのものの底を見つける。
+
+    地面の判定（格子ごとの最低点から GROUND_HEIGHT まで）は、下に床の無い所では、塊の底を「地面」とみなしてしまう
+    （空中のノイズ・現場の外・床のレイヤーを隠した / ロックした所）。そこで、塊をたどり終わったあとに、次の決まりで底を足す。
+
+      1. 足もと = 塊の点がある地面の格子。まわり = 足もと + 8 方向の隣。その外側の 1 列を「外の輪」と呼ぶ
+      2. 支えている面: 「外の輪」にある地面扱いの点から、地面扱いの点だけを次々にたどって行き着ける点。
+         床・地面・屋根のように、塊の足もとの外まで続いている面は、ここに入る（今までどおり、塊に足さない）。
+         たどる距離は BOTTOM_SUPPORT_REACH × 格子（0.4m。eps より広い）。床の点がまばらな所や斜面でも、面を面として扱うため
+      3. 塊の底: 「まわり」にある地面扱いの点のうち、支えている面に入らず、塊から eps 以内でたどれる点。これを塊に足す
+         （足した点から、さらに別の物へは広げない）
+
+    床に立つ人・車・屋根の上の物は、足もとの面が外まで続いているので、今までと同じ結果になる。
+    薄く広がった塊（厚さ 12cm 以下の部分が、足もとから 1 格子より外まで続く）は、その部分が「支えている面」と区別できないので、
+    今までどおり足さない（起点の半分以上がその部分にあれば、地面の決まりそのものが外れて、丸ごと選ばれる）。
+
+    points = 全点の座標、cluster_idx = 塊の点の番号（昇順）、band_idx = 窓の柱の中で地面とみなした点の番号（昇順）、
+    window_cells = 窓に入っている地面の格子の範囲 (x0, x1, y0, y1)。窓が選べる点の全部を含むときは None。
+    戻り値: (足す点の番号（昇順）, 窓が足りないか)。窓が足りない = 判定に要る格子が窓の外にある（窓を広げてやり直す）。
+    """
+    empty = np.empty(0, dtype=np.int64)
+    if len(cluster_idx) == 0 or len(band_idx) == 0:
+        return empty, False
+    ticker.check()
+    xy = points[cluster_idx, :2]               # 列を 1 つずつ取り出すより、行ごとにまとめて取り出すほうが速い
+    cx = _grid_numbers(xy[:, 0], grid)
+    cy = _grid_numbers(xy[:, 1], grid)
+    del xy
+    x0, x1 = int(cx.min()) - 3, int(cx.max()) + 3
+    y0, y1 = int(cy.min()) - 3, int(cy.max()) + 3
+    nx, ny = x1 - x0 + 1, y1 - y0 + 1
+    if nx * ny > BOTTOM_MAX_CELLS:
+        return empty, False
+    foot = np.zeros((nx, ny), dtype=bool)
+    foot[cx - x0, cy - y0] = True
+    near = _dilate(foot)                       # 足もと + まわり 1 格子
+    wide = _dilate(near)                       # さらに外側の 1 列（外の輪）まで
+    xy = points[band_idx, :2]
+    bx = _grid_numbers(xy[:, 0], grid)
+    by = _grid_numbers(xy[:, 1], grid)
+    del xy
+    inside = (bx >= x0) & (bx <= x1) & (by >= y0) & (by <= y1)
+    inside[inside] = wide[bx[inside] - x0, by[inside] - y0]
+    if inside.any():
+        # 塊の高さから大きく外れた点（壊れた座標の外れ値）は相手にしない。塊の底にも、塊の足もとの面にもなりえず、
+        # 残すと、たどる範囲が広すぎて格子に分けられなくなる
+        cz = points[cluster_idx, 2]
+        bz = points[band_idx[inside], 2]
+        inside[inside] = (bz >= float(cz.min()) - BOTTOM_Z_REACH) & (bz <= float(cz.max()) + BOTTOM_Z_REACH)
+        del cz, bz
+    g_idx = band_idx[inside]                   # 「まわり」と「外の輪」にある、地面扱いの点
+    if len(g_idx) == 0:
+        return empty, False
+    gx, gy = bx[inside] - x0, by[inside] - y0
+    del bx, by, inside
+    in_near = near[gx, gy]
+    pos = np.minimum(np.searchsorted(cluster_idx, g_idx), len(cluster_idx) - 1)
+    cand = in_near & (cluster_idx[pos] != g_idx)        # 足す候補（すでに塊に入っている起点は除く）
+    if not cand.any():
+        return empty, False
+    ticker.check()
+
+    # 支えている面: 外の輪から、地面扱いの点だけを伝って行き着ける点
+    reach = max(eps, grid * BOTTOM_SUPPORT_REACH)
+
+    pts_g = []
+
+    def reached_from(start: np.ndarray) -> np.ndarray:
+        if not pts_g:
+            pts_g.append(np.asarray(points[g_idx], dtype=np.float64))
+        p = pts_g[0]
+        out, _capped, _touches = _fill_window(p, start, reach, len(p) + 1, p.min(axis=0) - reach, p.max(axis=0) + reach,
+                                              (False, False, False), ticker)
+        return out
+
+    if not in_near.all():
+        cand &= ~reached_from(np.flatnonzero(~in_near))
+        if not cand.any():
+            return empty, False
+    extra = g_idx[cand]
+
+    # 塊の底: 候補のうち、塊から eps 以内でたどれる点（eps は格子の 1/4 以下なので、相手は同じ格子か隣の格子にいる）
+    has = np.zeros((nx, ny), dtype=bool)
+    has[gx[cand], gy[cand]] = True
+    local = cluster_idx[_dilate(has)[cx - x0, cy - y0]]
+    if len(local) == 0:
+        return empty, False
+    pts = np.concatenate([np.asarray(points[local], dtype=np.float64), np.asarray(points[extra], dtype=np.float64)])
+    member, _capped, _touches = _fill_window(pts, np.arange(len(local)), eps, len(pts) + 1,
+                                             pts.min(axis=0) - eps, pts.max(axis=0) + eps, (False, False, False), ticker)
+    del pts
+    got = extra[member[len(local):]]           # 昇順のまま
+    if len(got) == 0:
+        return empty, False
+
+    # 窓の外の格子の点は見えていない。足す点が、窓の外と隣り合う格子の「地面扱いの点」とつながっていたら、
+    # その先に面が続いているかどうかが分からない（窓を広げてやり直す）
+    if window_cells is not None:
+        wx0, wx1, wy0, wy1 = window_cells
+        unknown = np.ones((nx, ny), dtype=bool)
+        a0, a1, b0, b1 = max(x0, wx0), min(x1, wx1), max(y0, wy0), min(y1, wy1)
+        if a0 <= a1 and b0 <= b1:
+            unknown[a0 - x0:a1 - x0 + 1, b0 - y0:b1 - y0 + 1] = False
+        if unknown.any():
+            at_edge = np.flatnonzero(_dilate(unknown)[gx, gy])
+            if len(at_edge):
+                maybe_support = reached_from(at_edge)
+                if maybe_support[np.searchsorted(g_idx, got)].any():
+                    return empty, True
+    return got, False
+
+
 def grow_connected_cluster(
     points: np.ndarray,
     seed_indices: np.ndarray,
@@ -417,6 +577,7 @@ def grow_connected_cluster(
     progress_callback: Optional[Callable[[float, str], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     initial_margin: Optional[float] = None,
+    keep_own_bottom: bool = True,
 ) -> ClusterGrowth:
     """
     起点（seed_indices）から、3D 空間でつながっている塊ぜんたいの点の番号を返す。
@@ -432,12 +593,19 @@ def grow_connected_cluster(
     :param progress_callback: 進み具合の知らせ (0〜1, 文)。呼び出し側が、この中で中止の例外を出してもよい
     :param is_cancelled: True を返したら InterruptedError で止まる
     :param initial_margin: 最初の窓の余白（m）。None なら自動
+    :param keep_own_bottom: 地面を伝わないとき、塊そのものの底（下に床が無い所で「地面」とみなされた点）を塊に足す
+                            （_own_bottom の決まり）。False なら、2026-11-15 までの動き（底の 12cm が欠ける）
     """
     t0 = time.perf_counter()
     empty = np.empty(0, dtype=np.int64)
     n = 0 if points is None else len(points)
     if n == 0 or seed_indices is None or len(seed_indices) == 0:
         return ClusterGrowth(empty)
+    if points.dtype != np.float64:
+        # 地面の格子の番号（座標 / 格子）と、窓の端（float64）を、同じ型で計算する。float32 のまま割ると、格子の境目のすぐ下の点が
+        # 「番号は隣の格子・窓の判定はこちら側」になり、窓の大きさで地面の分類が変わる（2026-11-15 の独立レビュー）。
+        # 画面は float64 の points_raw を渡すので、写しは作られない
+        points = np.asarray(points, dtype=np.float64)
     seeds = np.unique(np.asarray(seed_indices, dtype=np.int64))
     seeds = seeds[(seeds >= 0) & (seeds < n)]
     selectable = None
@@ -481,10 +649,13 @@ def grow_connected_cluster(
 
         # 2. 地面を伝って建物ぜんたいへ広がるのを防ぐ。起点の半分以上が地面の上なら、地面も塊として扱う（以前の作りと同じ決まり）
         seed_in_col = seeds if whole else np.searchsorted(col_idx, seeds)
+        band_idx = None                                      # 窓の柱の中で、地面とみなして外した点（塊の底を足すときに使う）
         if exclude_ground and n_cand > GROUND_MIN_POINTS:   # 以前の作りと同じく、選べる点の全部の点数で決める（窓の中の点数ではない）
             ticker.stage("地面を見分けています...")
             ground = ground_point_mask(col_pts, ground_grid, GROUND_HEIGHT)
             if float(np.mean(ground[seed_in_col])) < 0.5:
+                if keep_own_bottom:
+                    band_idx = col_idx[ground]
                 ground[seed_in_col] = False          # 起点は、地面の上にあっても相手にする
                 keep &= ~ground
             del ground
@@ -503,12 +674,41 @@ def grow_connected_cluster(
         member, capped, touches = _fill_window(pts, seed_pos, eps, max_pts, lo, hi, check_axes, ticker)
         del pts
         if touches and not capped:
-            del member, pts_idx
+            del member, pts_idx, band_idx
             margin *= MARGIN_GROWTH
             rounds += 1
             continue
+        indices = np.asarray(pts_idx[member], dtype=np.int64)
+        del member, pts_idx
+        checks = int(ticker.checks)
+
+        # 4. 塊そのものの底（下に床が無い所で、地面とみなして外した点）を足す
+        n_bottom = 0
+        if band_idx is not None and not capped and len(indices):
+            window_cells = None if xy_all else (
+                int(np.floor(lo[0] / ground_grid)), int(np.floor(hi[0] / ground_grid)) - 1,
+                int(np.floor(lo[1] / ground_grid)), int(np.floor(hi[1] / ground_grid)) - 1,
+            )
+            ticker.stage("塊の底を確かめています...")
+            ticker.quiet = True
+            try:
+                bottom, too_narrow = _own_bottom(points, indices, band_idx, eps, ground_grid, window_cells, ticker)
+            except ValueError:
+                # 範囲が広すぎて格子に分けられない（座標の壊れた点が混じっている）。底は足さず、ここまでの塊を返す
+                bottom, too_narrow = np.empty(0, dtype=np.int64), False
+            finally:
+                ticker.quiet = False
+            if too_narrow:
+                del indices, band_idx, bottom
+                margin *= MARGIN_GROWTH
+                rounds += 1
+                continue
+            if len(bottom):
+                n_bottom = int(len(bottom))
+                indices = np.insert(indices, np.searchsorted(indices, bottom), bottom)   # どちらも昇順で、重なりは無い
+                capped = len(indices) > max_pts
         return ClusterGrowth(
-            indices=np.asarray(pts_idx[member], dtype=np.int64),
+            indices=indices,
             capped=bool(capped),
             n_seed=int(len(seeds)),
             limit=int(max_pts),
@@ -516,5 +716,7 @@ def grow_connected_cluster(
             window_points=n_window,
             margin=float(margin),
             seconds=time.perf_counter() - t0,
-            checks=int(ticker.checks),
+            checks=checks,
+            n_selectable=int(n_cand),
+            n_bottom=n_bottom,
         )
