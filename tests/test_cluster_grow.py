@@ -61,38 +61,81 @@ def ref_ground_mask(points, grid_size, height_threshold):
     return (points[:, 2] - cell_min[inv]) <= height_threshold
 
 
-def ref_cluster(points, seeds, radius, ground_eps=None, selectable=None):
-    """
-    厳密な連結: 半径 radius 以内の点を 1 つずつたどる（以前の作りと同じ。上限なし）。
-    ground_eps を渡すと、以前の作りと同じ決まりで地面を伝わないようにする（地面の格子は ground_eps から決める）。
-    """
+def ref_flood(pts, start, radius):
+    """pts の中で、start（位置の配列）から半径 radius 以内の点を 1 つずつたどって行き着ける点の、真偽の配列"""
     from scipy.spatial import cKDTree
 
-    cand = np.arange(len(points)) if selectable is None else np.flatnonzero(selectable)
-    pts = points[cand]
-    s = np.searchsorted(cand, np.unique(seeds))
-    allowed = np.ones(len(pts), dtype=bool)
-    if ground_eps is not None and len(pts) > 50:
-        ground = ref_ground_mask(pts, max(0.8, ground_eps * 4.0), 0.12)
-        if 0 < int(ground.sum()) < len(pts) and float(np.mean(ground[s])) < 0.5:
-            allowed = ~ground
-            allowed[s] = True
-    valid = np.flatnonzero(allowed)
-    sub = pts[valid]
-    tree = cKDTree(sub)
-    visited = np.zeros(len(valid), dtype=bool)
-    sl = np.searchsorted(valid, s)
-    visited[sl] = True
-    frontier = list(sl)
+    tree = cKDTree(pts)
+    visited = np.zeros(len(pts), dtype=bool)
+    visited[start] = True
+    frontier = list(start)
     while frontier:
         nxt = []
-        for nbrs in tree.query_ball_point(sub[frontier], r=radius):
+        for nbrs in tree.query_ball_point(pts[frontier], r=radius):
             for nb in nbrs:
                 if not visited[nb]:
                     visited[nb] = True
                     nxt.append(nb)
         frontier = nxt
-    return cand[valid[visited]]
+    return visited
+
+
+def ref_own_bottom(pts, in_cluster, ground, radius, grid):
+    """
+    塊そのものの底（2026-11-15 に足した決まり）を、点を 1 つずつたどって求める。戻り値は、足す点の真偽の配列。
+      - 足もと = 塊の点がある格子。まわり = 足もと + 8 方向の隣。外の輪 = その外側の 1 列
+      - 支えている面 = 外の輪にある地面扱いの点から、地面扱いの点だけを「格子の半分」以内でたどって行き着ける点
+      - 塊の底 = まわりにある地面扱いの点のうち、支えている面に入らず、塊から radius 以内でたどれる点
+    """
+    around = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+    cell = [tuple(c) for c in np.floor(pts[:, :2] / grid).astype(np.int64)]
+    foot = {cell[i] for i in np.flatnonzero(in_cluster)}
+    near = {(x + dx, y + dy) for x, y in foot for dx, dy in around}
+    wide = {(x + dx, y + dy) for x, y in near for dx, dy in around}
+    in_near = np.array([c in near for c in cell], dtype=bool)
+    in_wide = np.array([c in wide for c in cell], dtype=bool)
+    g = np.flatnonzero(ground & in_wide)
+    support = np.zeros(len(pts), dtype=bool)
+    ring = np.flatnonzero(~in_near[g])
+    if len(ring):
+        support[g[ref_flood(pts[g], ring, max(radius, grid * 0.5))]] = True
+    extra = ground & in_near & ~in_cluster & ~support
+    if not extra.any():
+        return extra
+    use = np.flatnonzero(in_cluster | extra)
+    reached = ref_flood(pts[use], np.flatnonzero(in_cluster[use]), radius)
+    out = np.zeros(len(pts), dtype=bool)
+    out[use[reached]] = True
+    return out & extra
+
+
+def ref_cluster(points, seeds, radius, ground_eps=None, selectable=None, own_bottom=True):
+    """
+    厳密な連結: 半径 radius 以内の点を 1 つずつたどる（上限なし）。
+    ground_eps を渡すと、地面を伝わないようにする（地面の格子は ground_eps から決める）。
+    own_bottom=True なら、たどり終わったあとに、塊そのものの底を足す（いまの決まり）。
+    own_bottom=False は、2026-11-15 までの作りと同じ（下に床が無い所の塊は、底の 12cm が欠ける）。
+    """
+    cand = np.arange(len(points)) if selectable is None else np.flatnonzero(selectable)
+    pts = np.asarray(points[cand], dtype=np.float64)      # 実装と同じく、float64 に直してから判定する
+    s = np.searchsorted(cand, np.unique(seeds))
+    allowed = np.ones(len(pts), dtype=bool)
+    ground = None
+    grid = max(0.8, (ground_eps or 0.0) * 4.0)
+    if ground_eps is not None and len(pts) > 50:
+        ground = ref_ground_mask(pts, grid, 0.12)
+        if 0 < int(ground.sum()) < len(pts) and float(np.mean(ground[s])) < 0.5:
+            allowed = ~ground
+            allowed[s] = True
+        else:
+            ground = None
+    valid = np.flatnonzero(allowed)
+    visited = ref_flood(pts[valid], np.searchsorted(valid, s), radius)
+    in_cluster = np.zeros(len(pts), dtype=bool)
+    in_cluster[valid[visited]] = True
+    if ground is not None and own_bottom:
+        in_cluster |= ref_own_bottom(pts, in_cluster, ground, radius, grid)
+    return cand[in_cluster]
 
 
 # ---------------------------------------------------------------- 合成の点群
@@ -361,6 +404,266 @@ class TestGround(unittest.TestCase):
         self.assertGreater(np.isin(sc.floor, res.indices).mean(), 0.99)
 
 
+class TestOwnBottom(unittest.TestCase):
+    """
+    塊そのものの底（2026-11-15。利用者の依頼「2, 3 進めて」の 3）。
+    下に床の無い所（空中のノイズ・現場の外・床のレイヤーを隠した所）では、塊の底が「その格子でいちばん低い点」になり、
+    底の 12cm が地面とみなされて選ばれなかった。支えている面（外へ続く面）でなければ、塊に足す。
+    """
+
+    @staticmethod
+    def box_shell(rng, lo, hi, n):
+        """直方体の表面にばらまいた点（車や箱のつもり）"""
+        lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
+        p = rng.uniform(lo, hi, (n, 3))
+        axis = rng.integers(0, 3, n)
+        side = rng.integers(0, 2, n)
+        p[np.arange(n), axis] = np.where(side == 0, lo[axis], hi[axis])
+        return p
+
+    def test_floating_blob_with_no_floor_below_is_selected_whole(self):
+        # 床の外（x = 40m）の空中に浮いた塊。下に点が無いので、塊の底が「地面」とみなされる
+        rng = np.random.default_rng(71)
+        floor = np.c_[rng.uniform(-10, 10, (40000, 2)), rng.normal(0.0, 0.003, 40000)]
+        blob = ball(rng, [40.0, 3.0, 6.0], 0.45, 900)
+        pts = np.vstack([floor, blob])
+        blob_idx = np.arange(len(floor), len(pts))
+        seeds = blob_idx[np.argsort(-blob[:, 2])[:5]]           # 上のほうを少し選ぶ
+        old = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, keep_own_bottom=False)
+        self.assertLess(len(old.indices), len(blob), "前提: 以前の決まりでは、底が欠ける")
+        self.assertEqual(old.n_bottom, 0)
+        for margin in (None, 0.5, 200.0):
+            res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, initial_margin=margin)
+            np.testing.assert_array_equal(res.indices, blob_idx, err_msg=f"margin={margin}")
+            self.assertEqual(res.n_bottom, len(blob) - len(old.indices))
+            self.assertFalse(res.capped)
+        np.testing.assert_array_equal(blob_idx, ref_cluster(pts, seeds, 0.15, ground_eps=0.15))
+
+    def test_sixty_point_blob_from_the_review(self):
+        # 独立レビューで見つかった例: 60 点の浮遊塊で、49 点しか選ばれなかった
+        rng = np.random.default_rng(0)
+        blob = ball(rng, [0.3, 0.3, 5.0], 0.3, 60)
+        pts = np.vstack([blob, ball(rng, [100.0, 100.0, 0.0], 2.0, 500)])
+        seeds = np.argsort(-blob[:, 2])[:3]
+        old = grow_connected_cluster(pts, seeds, eps=0.3, max_cluster_ratio=1.0, keep_own_bottom=False)
+        res = grow_connected_cluster(pts, seeds, eps=0.3, max_cluster_ratio=1.0)
+        expected = np.sort(ref_cluster(pts, seeds, 0.3))        # 地面の決まり無しで、つながっている点の全部
+        self.assertLess(len(old.indices), len(expected))
+        np.testing.assert_array_equal(res.indices, expected)
+
+    def test_person_with_the_floor_hidden_is_selected_down_to_the_feet(self):
+        sc = Scene(seed=11)
+        selectable = np.ones(sc.n, dtype=bool)
+        selectable[sc.floor] = False                            # 床のレイヤーを隠した・ロックした
+        seeds = sc.person[sc.points[sc.person, 2] > 1.0][:8]
+        res = grow_connected_cluster(sc.points, seeds, eps=0.15, selectable_mask=selectable, max_cluster_ratio=1.0)
+        whole = np.sort(ref_cluster(sc.points, seeds, 0.15, selectable=selectable))     # 地面の決まり無し
+        np.testing.assert_array_equal(res.indices, whole)
+        self.assertTrue(np.isin(res.indices, sc.person).all())
+        self.assertGreater(res.n_bottom, 0)
+        low = sc.person[sc.points[sc.person, 2] < 0.1]
+        self.assertGreater(np.isin(low, res.indices).mean(), 0.9, "足もと（床から 10cm まで）も入る")
+
+    def test_things_standing_on_a_visible_surface_are_unchanged(self):
+        # 床に立つ人・壁・床から 9m 上の塊（下に床がある）は、以前の決まりと 1 点も違わない
+        for seed in (21, 22, 23):
+            sc = Scene(seed=seed, n_floor=30000, extent=8.0)
+            rng = np.random.default_rng(seed)
+            for group in (sc.person[sc.points[sc.person, 2] > 0.5], sc.blob, sc.wall[sc.points[sc.wall, 2] > 1.0]):
+                seeds = rng.choice(group, 4, replace=False)
+                old = grow_connected_cluster(sc.points, seeds, eps=0.15, max_cluster_ratio=1.0, keep_own_bottom=False)
+                new = grow_connected_cluster(sc.points, seeds, eps=0.15, max_cluster_ratio=1.0)
+                np.testing.assert_array_equal(new.indices, old.indices, err_msg=f"seed {seed}")
+                self.assertEqual(new.n_bottom, 0)
+
+    def test_thing_on_a_roof_does_not_take_the_roof(self):
+        # 屋根（下が見えていない、4m 四方の板）の上の物。屋根は、物の足もとの外へ続いているので、今までどおり足さない
+        rng = np.random.default_rng(72)
+        roof = np.c_[rng.uniform(0.0, 4.0, (20000, 2)), 3.0 + rng.normal(0.0, 0.003, 20000)]
+        thing = ball(rng, [2.0, 2.0, 3.35], 0.3, 700)
+        far = ball(rng, [80.0, 80.0, 0.0], 1.0, 300)
+        pts = np.vstack([roof, thing, far])
+        thing_idx = np.arange(len(roof), len(roof) + len(thing))
+        seeds = thing_idx[np.argsort(-thing[:, 2])[:5]]
+        old = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, keep_own_bottom=False)
+        new = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0)
+        np.testing.assert_array_equal(new.indices, old.indices)
+        self.assertTrue(np.isin(new.indices, thing_idx).all(), "屋根の点は入らない")
+
+    def test_car_with_the_floor_hidden(self):
+        # 4.5m × 1.8m の箱（車のつもり）。床は無い。足もとは 6 × 3 格子ほどあるが、外へ続かないので、底まで入る
+        rng = np.random.default_rng(73)
+        car = self.box_shell(rng, [10.0, 5.0, 0.2], [14.5, 6.8, 1.6], 30000)
+        far = ball(rng, [80.0, 80.0, 0.0], 1.0, 300)
+        pts = np.vstack([car, far])
+        seeds = np.flatnonzero(pts[: len(car), 2] > 1.59)[:10]
+        res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0)
+        np.testing.assert_array_equal(res.indices, np.arange(len(car)))
+        np.testing.assert_array_equal(res.indices, np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15)))
+
+    def test_blob_beside_the_edge_of_the_floor(self):
+        # 床の端のすぐ外、床から 3m 上の塊。隣の格子に床があるが、高さが違う（同じ面ではない）ので、塊の底として足す
+        rng = np.random.default_rng(74)
+        floor = np.c_[rng.uniform(-8.0, 0.0, 30000), rng.uniform(-8.0, 8.0, 30000), rng.normal(0.0, 0.003, 30000)]
+        blob = ball(rng, [0.9, 0.5, 3.0], 0.4, 800)
+        pts = np.vstack([floor, blob])
+        blob_idx = np.arange(len(floor), len(pts))
+        seeds = blob_idx[np.argsort(-blob[:, 2])[:5]]
+        res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0)
+        np.testing.assert_array_equal(res.indices, np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15)))
+        np.testing.assert_array_equal(res.indices, blob_idx)
+
+    def test_bottom_that_is_not_connected_is_not_added(self):
+        # 塊の真下 2m に、別の小さな塊（その格子でいちばん低い点）。足もとには収まるが、つながっていないので足さない
+        rng = np.random.default_rng(75)
+        upper = ball(rng, [0.4, 0.4, 6.0], 0.3, 500)
+        lower = ball(rng, [0.4, 0.4, 3.9], 0.04, 60)
+        far = ball(rng, [80.0, 80.0, 0.0], 1.0, 300)
+        pts = np.vstack([upper, lower, far])
+        seeds = np.argsort(-upper[:, 2])[:5]
+        res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0)
+        np.testing.assert_array_equal(res.indices, np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15)))
+        self.assertTrue((res.indices < len(upper)).all())
+        self.assertGreater(len(res.indices), 480)
+
+    def test_person_on_a_slope_does_not_take_the_slope(self):
+        # 10 度の斜面に立つ人。斜面は外へ続いているので、足さない
+        # （急な斜面では、地面扱いになるのが格子ごとの低い側の帯だけなので、以前から、斜面を伝って広がる。ここでは扱わない）
+        rng = np.random.default_rng(76)
+        xy = rng.uniform(-8.0, 8.0, (60000, 2))
+        slope = np.c_[xy, xy[:, 0] * np.tan(np.radians(10.0)) + rng.normal(0.0, 0.003, 60000)]
+        person = np.c_[rng.normal([1.0, 1.0], 0.10, (1500, 2)), np.tan(np.radians(10.0)) + rng.uniform(0.0, 1.7, 1500)]
+        pts = np.vstack([slope, person])
+        seeds = np.arange(len(slope), len(pts))[person[:, 2] > 1.2][:8]
+        old = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, keep_own_bottom=False)
+        new = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0)
+        np.testing.assert_array_equal(new.indices, old.indices)
+        self.assertLess(len(new.indices), 1600, "前提: 斜面へは広がっていない")
+
+    def test_same_as_the_slow_reference_in_random_scenes(self):
+        # 床の切れ端・浮いた塊・積み重なった塊をでたらめに置いて、格子を 1 つずつ調べる作りと突き合わせる（窓の大きさも変える）
+        added = 0
+        for seed in range(8):
+            rng = np.random.default_rng(300 + seed)
+            parts = []
+            for _ in range(int(rng.integers(1, 4))):                    # 床の切れ端
+                c = rng.uniform(-6.0, 6.0, 2)
+                size = rng.uniform(0.8, 5.0, 2)
+                n = int(rng.integers(500, 4000))
+                parts.append(np.c_[c + rng.uniform(-0.5, 0.5, (n, 2)) * size, rng.normal(rng.uniform(0.0, 1.0), 0.004, n)])
+            for _ in range(int(rng.integers(6, 14))):                   # 塊（床の上・床の外・ほかの塊の上）
+                c = np.r_[rng.uniform(-14.0, 14.0, 2), rng.uniform(0.2, 6.0)]
+                parts.append(c + rng.normal(0.0, rng.uniform(0.08, 0.45), (int(rng.integers(60, 500)), 3)))
+            pts = np.vstack(parts)
+            selectable = rng.uniform(size=len(pts)) > 0.1
+            cand = np.flatnonzero(selectable)
+            for _ in range(5):
+                seeds = cand[np.argsort(np.linalg.norm(pts[cand] - pts[rng.choice(cand)], axis=1))[:4]]
+                for eps in (0.15, 0.25):
+                    expected = np.sort(ref_cluster(pts, seeds, eps, ground_eps=eps, selectable=selectable))
+                    without = ref_cluster(pts, seeds, eps, ground_eps=eps, selectable=selectable, own_bottom=False)
+                    added += int(len(expected) > len(without))
+                    for margin in (None, 0.5, 2.0, 100.0):
+                        res = grow_connected_cluster(pts, seeds, eps=eps, selectable_mask=selectable, max_cluster_ratio=1.0,
+                                                     initial_margin=margin)
+                        np.testing.assert_array_equal(res.indices, expected, err_msg=f"seed {seed} eps {eps} margin {margin}")
+        self.assertGreaterEqual(added, 15, "前提: 底を足す場面が、この中に何度も出ている")
+
+    def test_float32_points(self):
+        rng = np.random.default_rng(77)
+        blob = ball(rng, [1234.5, -987.6, 6.0], 0.45, 900)
+        pts = np.vstack([blob, ball(rng, [1300.0, -900.0, 0.0], 2.0, 500)]).astype(np.float32)
+        seeds = np.argsort(-blob[:, 2])[:5]
+        res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0)
+        np.testing.assert_array_equal(res.indices, np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15)))
+        self.assertGreater(res.n_bottom, 0)
+
+    def test_float32_point_just_below_a_grid_line(self):
+        # 独立レビュー（2026-11-15）で見つかった例。float32(5.6) は 5.5999999… で、float32 のまま 0.8 で割ると 7 番の格子になるのに、
+        # 窓の判定（float64 の端 5.6 と比べる）では 6 番までの窓に入る。窓の大きさで、地面の分類と答えが変わっていた
+        rng = np.random.default_rng(1)
+        blob = ball(rng, [4.4, 0.4, 3.0], 0.3, 400)
+        pts = np.vstack([blob, [[4.85, 0.4, 2.75]], [[5.22, 0.4, 2.75]], [[5.6, 0.4, 2.75]], [[6.0, 0.4, -5.0]],
+                         ball(rng, [60.0, 60.0, 0.0], 1.0, 100)]).astype(np.float32)
+        seeds = np.argsort(-blob[:, 2])[:5]
+        expected = np.sort(ref_cluster(pts, seeds, 0.1, ground_eps=0.1))
+        for margin in (None, 0.3, 0.7, 1.0, 1.5, 3.0, 50.0):
+            res = grow_connected_cluster(pts, seeds, eps=0.1, max_cluster_ratio=1.0, initial_margin=margin)
+            np.testing.assert_array_equal(res.indices, expected, err_msg=f"margin={margin}")
+        # 長い棒の端を起点にする（最初の窓に収まらず、窓を広げる）
+        rod_x = np.linspace(1.0, 4.7, 6000)
+        rod = np.c_[rod_x, np.full(6000, 0.4), np.full(6000, 3.0)]
+        pts = np.vstack([rod, [[4.85, 0.4, 2.75]], [[5.22, 0.4, 2.75]], [[5.6, 0.4, 2.75]], [[6.0, 0.4, -5.0]],
+                         ball(rng, [60.0, 60.0, 0.0], 1.0, 100)]).astype(np.float32)
+        seeds = np.arange(5)
+        expected = np.sort(ref_cluster(pts, seeds, 0.1, ground_eps=0.1))
+        for margin in (None, 8.0, 50.0):
+            res = grow_connected_cluster(pts, seeds, eps=0.1, max_cluster_ratio=1.0, initial_margin=margin)
+            np.testing.assert_array_equal(res.indices, expected, err_msg=f"棒 margin={margin}")
+
+    def test_broken_point_far_below_does_not_stop_the_search(self):
+        # 独立レビュー（2026-11-15）で見つかった例。塊の足もとの格子に、座標の壊れた点（高さ -1e7 など）があると、
+        # 底を確かめる範囲が広すぎて ValueError になっていた（底を足す前は、その点は窓の上下で落ちていた）
+        rng = np.random.default_rng(80)
+        blob = ball(rng, [0.4, 0.4, 6.0], 0.3, 500)
+        for low in (-1e3, -1e5, -1e7, -1e12):
+            pts = np.vstack([blob, [[0.5, 0.5, low]], ball(rng, [60.0, 60.0, 0.0], 1.0, 100)])
+            res = grow_connected_cluster(pts, np.argsort(-blob[:, 2])[:5], eps=0.15, max_cluster_ratio=1.0)
+            np.testing.assert_array_equal(res.indices, np.arange(500), err_msg=f"low={low}")
+
+    def test_limit_counts_the_bottom_too(self):
+        rng = np.random.default_rng(78)
+        blob = ball(rng, [0.4, 0.4, 6.0], 0.45, 900)
+        pts = np.vstack([blob, ball(rng, [80.0, 80.0, 0.0], 1.0, 1100)])
+        seeds = np.argsort(-blob[:, 2])[:5]
+        old = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, keep_own_bottom=False)
+        res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=len(old.indices) / len(pts))
+        self.assertTrue(res.capped, "底を足して上限を超えたら、上限を超えたと知らせる")
+
+    def test_cancel_while_checking_the_bottom(self):
+        rng = np.random.default_rng(79)
+        blob = ball(rng, [0.4, 0.4, 6.0], 0.45, 900)
+        pts = np.vstack([blob, ball(rng, [80.0, 80.0, 0.0], 1.0, 300)])
+        seeds = np.argsort(-blob[:, 2])[:5]
+        seen = []
+
+        def progress(ratio, message):
+            seen.append(message)
+
+        grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, progress_callback=progress)
+        self.assertTrue(any("塊の底" in m for m in seen), "底を確かめている間も、進み具合を知らせる")
+        state = {"stop": False}
+
+        def progress_then_stop(ratio, message):
+            if "塊の底" in message:
+                state["stop"] = True
+
+        with self.assertRaises(InterruptedError):
+            grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, progress_callback=progress_then_stop,
+                                   is_cancelled=lambda: state["stop"])
+
+
+class TestInstantDeleteGuard(unittest.TestCase):
+    """即削除モードで、確かめずに消してよい塊の大きさ（2026-11-15。利用者の依頼「2, 3 進めて」の 2）"""
+
+    def test_small_blobs_are_deleted_at_once(self):
+        for n, total in ((800, 70_000), (300_000, 54_900_000), (1_000_000, 54_900_000), (20_000, 30_000), (5_000, 6_000)):
+            self.assertFalse(CG.too_big_for_instant_delete(n, total), f"{n:,} / {total:,}")
+
+    def test_big_blobs_are_kept_as_a_selection(self):
+        for n, total in ((1_000_001, 54_900_000), (6_330_000, 54_900_000), (20_001, 100_000), (300_000, 2_000_000)):
+            self.assertTrue(CG.too_big_for_instant_delete(n, total), f"{n:,} / {total:,}")
+
+    def test_growth_reports_the_number_of_selectable_points(self):
+        sc = Scene(seed=11)
+        selectable = np.ones(sc.n, dtype=bool)
+        selectable[sc.wall] = False
+        res = grow_connected_cluster(sc.points, sc.blob[:3], eps=0.15, selectable_mask=selectable)
+        self.assertEqual(res.n_selectable, sc.n - len(sc.wall))
+        res = grow_connected_cluster(sc.points, sc.blob[:3], eps=0.15)
+        self.assertEqual(res.n_selectable, sc.n)
+
+
 class TestGroundMask(unittest.TestCase):
     def _clouds(self):
         rng = np.random.default_rng(31)
@@ -597,7 +900,7 @@ class TestRulesThatKeepTheAnswer(unittest.TestCase):
                 self.assertLess(np.floor(np.nextafter(edge, -np.inf) / grid), k)
 
     def test_ground_rule_looks_at_selectable_points_only(self):
-        # 床を選べなくする（地面のレイヤーを隠す・ロックする）と、人の足もとが「その場のいちばん低い点」になる。以前の作りと同じ
+        # 床を選べなくする（地面のレイヤーを隠す・ロックする）と、人の足もとが「その場のいちばん低い点」になる（地面の判定は、選べる点だけで行う）
         sc = Scene(seed=11)
         selectable = np.ones(sc.n, dtype=bool)
         selectable[sc.floor] = False
@@ -628,10 +931,14 @@ class TestRulesThatKeepTheAnswer(unittest.TestCase):
         blob = ball(rng, [0.3, 0.3, 5.0], 0.25, 40)
         pts = np.vstack([blob, ball(rng, [100.0, 100.0, 0.0], 2.0, 500)])
         seeds = np.argsort(-blob[:, 2])[:3]
-        expected = np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15))
+        # 塊の底を足す決まりを外して比べる（足すと、地面の判定をしてもしなくても同じ結果になり、この決まりを見張れない）
+        expected = np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15, own_bottom=False))
+        self.assertLess(len(expected), len(ref_cluster(pts, seeds, 0.15)), "前提: 地面の判定をすると、底が欠ける")
         for margin in (None, 0.5, 300.0):
-            res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, initial_margin=margin)
+            res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, initial_margin=margin, keep_own_bottom=False)
             np.testing.assert_array_equal(res.indices, expected, err_msg=f"margin={margin}")
+            res = grow_connected_cluster(pts, seeds, eps=0.15, max_cluster_ratio=1.0, initial_margin=margin)
+            np.testing.assert_array_equal(res.indices, np.sort(ref_cluster(pts, seeds, 0.15, ground_eps=0.15)), err_msg=f"margin={margin}")
 
     def test_selectable_and_ground_together(self):
         mismatches = 0
@@ -758,6 +1065,53 @@ class TestWandInWindow(unittest.TestCase):
         self.assertEqual(len(win.viewer.selected_indices), 0)
         self.assertIn("即消去", win.toast_label.text())
         win.viewer.validate_invariants()
+
+    def _load_big_blob(self):
+        """床 3 万点 + 床から 9m 上の大きな塊 2.1 万点（選べる点の 4 割。上限の 45% は超えない）"""
+        rng = np.random.default_rng(52)
+        floor = np.c_[rng.uniform(-12, 12, (30000, 2)), rng.normal(0.0, 0.003, 30000)]
+        big = ball(rng, [2.0, 1.0, 9.0], 1.0, 21000)
+        self.win.viewer.set_point_cloud(np.vstack([floor, big]), None, None)
+        self.app.processEvents()
+        return np.arange(len(floor), len(floor) + len(big))
+
+    def test_instant_delete_keeps_a_big_blob_as_a_selection(self):
+        # 即削除モードでも、大きな塊（選べる点の 1 割超）は消さない。選択にとどめて、Del で消せると知らせる
+        win = self.win
+        big = self._load_big_blob()
+        win._toggle_instant_delete_mode(True)
+        self._wand(big[:4])
+        self.assertEqual(self._noise_count(), 0, "何も消さない")
+        np.testing.assert_array_equal(np.sort(win.viewer.selected_indices), big)
+        toast = win.toast_label.text()
+        self.assertIn("消さずに選択しました", toast)
+        self.assertIn(f"{len(big):,} 点", toast)
+        self.assertIn("Del", toast)
+        self.assertEqual(win.toast_host.kind(), "warning")
+        self.assertFalse(win.toast_host.has_action(), "点を動かしていないので「元に戻す」は出さない")
+        self.assertIn("Del", win.status_label.text())
+        self.assertIn("1 割", win.log_text.toPlainText().splitlines()[-1], "ログに、止めた理由（決まり）を残す")
+        win.viewer.validate_invariants()
+
+    def test_big_blob_without_instant_delete_is_selected_as_before(self):
+        win = self.win
+        big = self._load_big_blob()
+        self._wand(big[:4])
+        np.testing.assert_array_equal(np.sort(win.viewer.selected_indices), big)
+        self.assertIn("一括選択", win.toast_label.text())
+        self.assertNotIn("消さずに", win.toast_label.text())
+
+    def test_wand_takes_the_bottom_of_a_blob_with_nothing_below(self):
+        # 床の外に浮いた塊。画面からも、底まで丸ごと選ばれる
+        rng = np.random.default_rng(53)
+        floor = np.c_[rng.uniform(-10, 10, (30000, 2)), rng.normal(0.0, 0.003, 30000)]
+        blob = ball(rng, [40.0, 3.0, 6.0], 0.45, 900)
+        win = self.win
+        win.viewer.set_point_cloud(np.vstack([floor, blob]), None, None)
+        self.app.processEvents()
+        idx = np.arange(len(floor), len(floor) + len(blob))
+        self._wand(idx[np.argsort(-blob[:, 2])[:5]])
+        np.testing.assert_array_equal(np.sort(win.viewer.selected_indices), idx)
 
     def test_cancel_button_stops_the_search(self):
         import gui.main_window as MW

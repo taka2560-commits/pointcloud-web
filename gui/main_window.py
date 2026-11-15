@@ -60,7 +60,7 @@ from core.filters import (
     filter_edge_veil_noise,
     filter_statistical_outlier,
 )
-from core.cluster_grow import grow_connected_cluster
+from core.cluster_grow import grow_connected_cluster, too_big_for_instant_delete
 from gui.worker_thread import (
     ProcessWorker,
     FileLoadWorker,
@@ -5393,7 +5393,9 @@ class MainWindow(QMainWindow):
                 return
             if len(cluster_orig) == 0:
                 return
-            if self.viewer.instant_delete_mode:
+            # 即削除モードでも、大きな塊（100 万点超・選べる点の 1 割超）は消さずに選択にとどめる（地面や建物の一部を選んだときの歯止め）
+            too_big = self.viewer.instant_delete_mode and too_big_for_instant_delete(len(cluster_orig), growth.n_selectable)
+            if self.viewer.instant_delete_mode and not too_big:
                 self._push_layer_undo_state()
                 moved = self.viewer.move_indices_to_layer(cluster_orig, PointCloudViewer.LAYER_NOISE, respect_lock=True)
                 self._clear_selection()
@@ -5405,9 +5407,17 @@ class MainWindow(QMainWindow):
                 self.viewer._sync_selection_colors()  # 色を作り直すのは、選択が変わった点だけ
                 self.viewer.update()
                 self.viewer.point_selected.emit(self.viewer.selected_indices.tolist())
-                self.log_text.append(f"🪄 連結塊選択: シード {n_seed:,} 点から同一塊 {len(cluster_orig):,} 点を一括選択しました")
-                self.status_label.setText(f"🪄 繋がっている塊 {len(cluster_orig):,} 点を一括選択しました (Delで即削除)")
-                self.show_toast(f"🪄 連結塊 {len(cluster_orig):,} 点を一括選択しました")
+                if too_big:
+                    self.log_text.append(
+                        f"🪄 連結塊: {len(cluster_orig):,} 点の大きな塊なので、即削除モードでも消さずに選択しました"
+                        f"（100 万点、または、いま選べる点の 1 割を超える塊は、確かめてから消します。消すなら Del キー）"
+                    )
+                    self.status_label.setText(f"⚠️ 連結塊 {len(cluster_orig):,} 点は大きいので、消さずに選択しました (Del で削除 / Esc で解除)")
+                    self.show_toast(f"⚠️ 大きな塊（{len(cluster_orig):,} 点）なので、消さずに選択しました。消すなら Del キー", 7000)
+                else:
+                    self.log_text.append(f"🪄 連結塊選択: シード {n_seed:,} 点から同一塊 {len(cluster_orig):,} 点を一括選択しました")
+                    self.status_label.setText(f"🪄 繋がっている塊 {len(cluster_orig):,} 点を一括選択しました (Delで即削除)")
+                    self.show_toast(f"🪄 連結塊 {len(cluster_orig):,} 点を一括選択しました")
 
         # 大きな塊では数秒〜十数秒かかるので、裏で動かす（進み具合が出て、中止できる。core/cluster_grow.py）
         self._run_in_background(
