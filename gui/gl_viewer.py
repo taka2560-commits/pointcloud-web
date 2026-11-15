@@ -34,6 +34,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, Signal
 from gui.color_patch import ColorPatchMixin, SELECTION_COLOR
 from gui.display_patch import DisplayPatchMixin
+from gui.gl_state import begin_point_pass, end_point_pass
 from gui.layer_sync import LayerSyncMixin
 from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
 from gui.select_cull import SelectionCullMixin
@@ -460,6 +461,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
 
         # 4. 点群の描画 (VBO GPUキャッシュ対応・フォールバック付き)
         if self.display_points is not None and len(self.display_points) > 0:
+            gl_saved = begin_point_pass()  # 点群の間だけ、奥行きの判定 ON・ブレンド OFF にそろえる（gui/gl_state.py）
             if getattr(self, "depth_fog_enabled", False) and not self.is_orthographic:
                 gl.glEnable(gl.GL_FOG)
                 gl.glFogi(gl.GL_FOG_MODE, gl.GL_LINEAR)
@@ -548,6 +550,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             gl.glDisableClientState(gl.GL_COLOR_ARRAY)
             gl.glDisableClientState(gl.GL_VERTEX_ARRAY)
             gl.glDisable(gl.GL_FOG)
+            end_point_pass(gl_saved)
 
         # 5. 断面スライスボックス枠線描画
         self._draw_section_box()
