@@ -52,6 +52,8 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    # EXE のアイコン（エクスプローラー・タスクバー・ショートカットに出る絵）。tools/make_app_icon.py が書き出す
+    icon=os.path.join('assets', 'app', 'app_icon.ico'),
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

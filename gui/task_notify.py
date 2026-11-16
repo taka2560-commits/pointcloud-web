@@ -27,6 +27,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox, QSystemTrayIcon
 
 from core.logger import log_info
+from gui.app_identity import TOOL_NAME
 from gui.progress_dialog import add_progress_listener
 from gui.status_feedback import classify_message
 
@@ -37,7 +38,7 @@ NOTIFY_KEY = "notify/long_task"
 NOTIFY_MIN_SECONDS = 20.0   # これより短い処理は知らせない
 SETTLE_MS = 400             # 進捗の窓が消えてから、続きの窓が出ないかを待つ時間
 MAX_BUSY_WAITS = 25         # 窓が消えたあとも裏の処理が動いているとき、待ち直す回数（× SETTLE_MS）
-NOTIFY_TITLE = "E57 点群ノイズ処理ツール"
+NOTIFY_TITLE = TOOL_NAME   # 通知の題名は、ツールの名前（gui/app_identity.py）
 MAX_BODY_CHARS = 160
 NO_OS_NOTIFY_ENV = "E57_NO_OS_NOTIFY"  # set by tests: never raise real Windows notifications from automated runs
 
@@ -96,7 +97,7 @@ def outcome_message(win) -> Tuple[str, str]:
 
 
 def _app_icon() -> QIcon:
-    """通知に添える小さな絵（このアプリは専用のアイコンを持たないので、点の並びを描く）"""
+    """通知に添える小さな絵（ふだんはアプリのアイコン。絵のファイルが無いときだけ、点の並びを描く）"""
     icon = QApplication.windowIcon()
     if not icon.isNull():
         return icon

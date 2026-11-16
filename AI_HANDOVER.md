@@ -20,6 +20,8 @@
 
 ---
 
+> **ツールの名前は「ポイントクリーナー」**（2026-11-16、利用者が決めた。カタカナの英語名）。名前は `gui/app_identity.py` の `TOOL_NAME` の 1 行で決まり、ウィンドウの題名（`名前 - E57 点群ノイズ処理ツール ［版 …］`）・起動した所のカード（`EmptyStateCard` の頭に、アイコンと名前）・バージョン情報・Windows の通知の題名に出る。アイコンは `assets/app/`（点でできた箱 = 測った物、まわりの水色の点 = 取り除く空中のノイズ）。`main.py` が `apply_app_identity(app)` でアプリ全体に付け、配布版の EXE には spec の `icon=` が `app_icon.ico` を埋め込む。**変えていない物**: EXE とフォルダの名前（`E57_PointCloud_Tool`）・保存設定の置き場所（QSettings の `E57PointCloudTool`）・ログと異常終了の記録の中の文。名前を変えても、今までの設定・ショートカット・ビルドの手順はそのまま使える。絵のファイルが無くても、アプリはアイコン無しで今までどおり動く。
+
 ## 2. 厳守すべき絶対ルール・設計憲章
 
 今後のAIが開発を行う際、**以下のルールは絶対に遵守**してください。
@@ -150,8 +152,9 @@
 ├── AGENTS.md / CLAUDE.md       # 複数AI並行開発の共通ルール（作業場所・担当ファイル・マージ手順）
 ├── QA_REPORT_2026-10-31.md     # 総合品質管理チェック報告書（欠陥一覧・修正状況・backlog）
 ├── assets/icons/               # 新UIの SVG アイコン（コンボ/スピンの矢印・チェック）。spec の datas で同梱
+├── assets/app/                 # アプリのアイコン（app_icon_<大きさ>.png 9 枚 + app_icon.ico）。tools/make_app_icon.py が書き出した物をコミットしてある
 ├── docs/                       # UI/UX レビュー（UI_UX_REVIEW_*.md）、デザイン改修計画（DESIGN_STYLE_PLAN.md）、画面証跡 ui_review/（新UI）, ui_review/before/（改修前）, ui_review/classic/（従来UIモード）
-├── tools/                      # 開発補助: capture_ui_screens.py（実画面スクリーンショット）、check_contrast.py（コントラスト比）、write_build_info.py（配布版に埋め込む版の記録。ビルドの .bat が呼ぶ）
+├── tools/                      # 開発補助: capture_ui_screens.py（実画面スクリーンショット）、check_contrast.py（コントラスト比）、write_build_info.py（配布版に埋め込む版の記録。ビルドの .bat が呼ぶ）、make_app_icon.py（アプリのアイコンを描いて assets/app/ へ書き出す。絵を変えたときだけ手で実行）
 ├── .gitattributes              # 改行コード固定（.py/.md 等は LF、.bat は CRLF、.e57 はバイナリ）
 │
 ├── core/                       # コアロジック（UI非依存）
@@ -172,6 +175,7 @@
 │   ├── layer_history.py        # 差分ベースのレイヤー Undo/Redo 履歴（メモリは変化点数に比例）
 │   ├── ui_mode.py              # UI モード（modern / classic）の解決と保存（起動引数・環境変数・設定）
 │   ├── gpu_select.py           # 描画に使う GPU の選び方（内蔵 GPU と高性能の GPU の両方が載っている PC 向け。main.py が最初に呼ぶ）
+│   ├── app_identity.py         # ツールの名前（TOOL_NAME = 「ポイントクリーナー」）とアプリのアイコン。題名・起動した所のカード・バージョン情報・通知が、ここを読む
 │   ├── gl_state.py             # 点群を描く間だけ、OpenGL の状態をそろえる（奥行きの判定 ON・ブレンド OFF。paintGL が点群の前後で呼ぶ）
 │   ├── design_tokens.py        # 新UIのデザイントークンと QSS 生成（色・文字サイズ・角丸・間隔の唯一の定義）
 │   ├── modern_ui.py            # 新UIアダプタ（従来UIに後付け: 作業順・メニュー/ステータスバー・空状態カード・絵文字除去）
@@ -393,7 +397,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - **テストで作ったウィンドウと 3D 画面は、`tests/qt_cleanup.py: destroy_widget()` で本当に破棄します**（2026-11-14）。閉じただけのウィンドウが残ると、あとのテストが遅くなるだけでなく、従来 UI のウィンドウが残ったまま新 UI のウィンドウが作られたときに Qt の中でアクセス違反が起き、テストのプロセスごと落ちました（14 回に 3 回）。`tests/test_static_names.py` が呼び忘れを見張ります。テストのプロセスが落ちたとき（終了コード 139）は、`python -X faulthandler -m unittest …` で走らせると、落ちた行が出ます。
 - UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 696 件）
+### テスト内容（全5段階・単体テスト 716 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
