@@ -1430,6 +1430,24 @@ QFrame#empty_state_card {{
     border: 1px dashed {t.card_border};
     border-radius: {t.radius_lg}px;
 }}
+QLabel#empty_state_brand_icon {{
+    background: transparent;
+}}
+QLabel#empty_state_brand_name {{
+    color: {t.text_primary};
+    font-size: {t.size_lg + 4}px;
+    font-weight: 800;
+    background: transparent;
+}}
+QLabel#empty_state_brand_tagline {{
+    color: {t.text_secondary};
+    font-size: {t.size_xs}px;
+    background: transparent;
+}}
+QFrame#empty_state_sep {{
+    background-color: {t.border_subtle};
+    border: none;
+}}
 QLabel#empty_state_title {{
     color: {t.text_primary};
     font-size: {t.size_lg}px;

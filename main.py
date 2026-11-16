@@ -63,6 +63,7 @@ def main():
         from PySide6.QtCore import Qt, QTimer
         from PySide6.QtWidgets import QApplication
 
+        from gui.app_identity import apply_app_identity
         from gui.diagnostics import install_qt_message_log, show_previous_crash_notice, uninstall_qt_message_log
         from gui.main_window import MainWindow
     except Exception as e:
@@ -77,6 +78,7 @@ def main():
     install_qt_message_log()
     app = QApplication(sys.argv)
     app.setApplicationName("E57点群ノイズ処理ツール")
+    apply_app_identity(app)  # ウィンドウ・タスクバー・通知に出すアイコン（gui/app_identity.py。絵が無くても起動は止めない）
     # ウィンドウを閉じたときも、Windows の終了・ログオフのときも、ここを通る。通れば「終了処理が始まった」と印に書く
     app.aboutToQuit.connect(session.mark_clean_exit)
 

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.logger import get_app_dir, log_warning, open_log_folder
+from gui.app_identity import TOOL_NAME, TOOL_TAGLINE, app_icon_pixmap
 from gui.flow_layout import replace_layout_with_flow
 from gui.system_tools import open_workdata_dialog, show_about_dialog
 from gui.ui_mode import UI_MODE_CLASSIC, set_saved_ui_mode
@@ -174,6 +175,9 @@ def add_recent_file(path: str) -> None:
 
 
 # ----------------------------------------------------------------------------- 空状態カード
+BRAND_ICON_PX = 44   # カードの頭に置くアプリのアイコンの大きさ
+
+
 class EmptyStateCard(QFrame):
     """3Dビュー中央に表示する「E57 を開く」導線（点群が無いときだけ表示）"""
 
@@ -185,6 +189,35 @@ class EmptyStateCard(QFrame):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(10)
+
+        # ツールの名前とアイコン（起動して最初に目に入る所。名前は gui/app_identity.py で決める）
+        brand = QHBoxLayout()
+        brand.setSpacing(12)
+        brand.addStretch(1)
+        self.brand_icon = QLabel()
+        self.brand_icon.setObjectName("empty_state_brand_icon")
+        pm = app_icon_pixmap(BRAND_ICON_PX)
+        if pm.isNull():
+            self.brand_icon.hide()  # 絵が無ければ、名前だけ
+        else:
+            self.brand_icon.setPixmap(pm)
+            self.brand_icon.setFixedSize(BRAND_ICON_PX, BRAND_ICON_PX)
+        brand.addWidget(self.brand_icon)
+        names = QVBoxLayout()
+        names.setSpacing(1)
+        self.brand_name = QLabel(TOOL_NAME)
+        self.brand_name.setObjectName("empty_state_brand_name")
+        names.addWidget(self.brand_name)
+        self.brand_tagline = QLabel(TOOL_TAGLINE)
+        self.brand_tagline.setObjectName("empty_state_brand_tagline")
+        names.addWidget(self.brand_tagline)
+        brand.addLayout(names)
+        brand.addStretch(1)
+        lay.addLayout(brand)
+        sep = QFrame()
+        sep.setObjectName("empty_state_sep")
+        sep.setFixedHeight(1)
+        lay.addWidget(sep)
 
         title = QLabel("E57 点群を開く")
         title.setObjectName("empty_state_title")
@@ -252,6 +285,10 @@ class EmptyStateCard(QFrame):
         self.adjustSize()
         w = max(self.sizeHint().width(), 360)
         h = self.sizeHint().height()
+        # 折り返す文（ヒント）は、この幅で要る高さを取る（sizeHint だけだと、3 行になる文の下が切れる。2026-11-16）
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            h = max(h, lay.totalHeightForWidth(w))
         self.resize(w, h)
         self.move(max(0, (parent.width() - w) // 2), max(0, (parent.height() - h) // 2))
         self.raise_()

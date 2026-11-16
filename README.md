@@ -1,10 +1,11 @@
-# E57点群ノイズ処理ツール (E57 Point Cloud Noise Filter)
+# ポイントクリーナー — E57点群ノイズ処理ツール (E57 Point Cloud Noise Filter)
 
 3Dレーザースキャナーで取得した **E57形式（.e57）の点群データ** から、浮遊ノイズ・空中の散乱光・外れ値を取り除き、元の精度と構成を保ったままきれいな E57 ファイルとして書き出すデスクトップツールです。
 
 - 座標（倍精度 / ScaledInteger）・色・反射強度・法線・タイムスタンプなどの属性と、複数スキャンの構成をそのまま保って保存します（ロスレス）。
 - 消した点は「ノイズレイヤー」へ移るだけで、保存するまで元のデータは変わりません。`Ctrl+Z` でいつでも戻せます。
 - 1 億点を超えるファイルは間引いて読み込み、保存のときに元ファイルの全点へ判定を写せます。
+- ツールの名前は「**ポイントクリーナー**」です（2026-11-16 から）。ウィンドウの題名と、起動した所のカードに、名前とアイコンが出ます。EXE とフォルダの名前（`E57_PointCloud_Tool`）は今までどおりです。
 
 ---
 
@@ -170,7 +171,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 - 設計憲章・アーキテクチャ・過去の教訓: `AI_HANDOVER.md`
 - 複数AI・複数開発者での並行開発ルール（作業場所・担当ファイル・マージ手順）: `AGENTS.md`
 - 品質管理の報告（欠陥一覧・修正状況・backlog・コミットの記録）: `QA_REPORT_2026-10-31.md`
-- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 696 件）／`--quick`（GUI を開かない軽量版）
+- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 716 件）／`--quick`（GUI を開かない軽量版）
 - テストとゲートは、この PC の本番アプリの保存設定を書き換えません（`tests/settings_sandbox.py`）。MainWindow を作るテストや確認スクリプトを足すときは、先頭で `use_sandbox_settings()` を呼んでください。
 - 配布パッケージの作成: `EXE配布パッケージ作成.bat`（`dist/E57_PointCloud_Tool_Dist.zip` ができます）
 
@@ -211,6 +212,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 │   ├── progress_dialog.py / preview_dialog.py / measure_text.py / flow_layout.py
 │   ├── ui_mode.py              # 新UI / 従来UI とテーマの選択
 │   ├── gpu_select.py           # 描画に使う GPU の選び方（高性能の GPU を優先 / Windows に任せる）
+│   ├── app_identity.py         # ツールの名前（TOOL_NAME）とアプリのアイコン。名前を出す所は、ここを読む
 │   ├── gl_state.py             # 点群を描く間の OpenGL の状態（手前の点が奥の点を隠す・丸い点の色が足されない）
 │   ├── design_tokens.py        # 新UI の色・文字サイズ・QSS の唯一の定義
 │   ├── modern_ui.py            # 新UI を従来の画面へ後付けする
@@ -235,7 +237,8 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 │   ├── layer_sync.py           # レイヤーの整合の確認と点数の数え直し（変わっていなければ省く）
 │   └── styles.py               # 従来UI のスタイル
 ├── assets/icons/               # アイコン（SVG）
-├── tests/                      # 単体テスト（696 件）。settings_sandbox.py はテスト用の設定の置き場
-├── tools/                      # 画面キャプチャ・コントラスト確認・版の記録（write_build_info.py）の道具
+├── assets/app/                 # アプリのアイコン（PNG 9 枚 + app_icon.ico。tools/make_app_icon.py が書き出す）
+├── tests/                      # 単体テスト（716 件）。settings_sandbox.py はテスト用の設定の置き場
+├── tools/                      # 画面キャプチャ・コントラスト確認・版の記録（write_build_info.py）・アプリのアイコンを描く（make_app_icon.py）道具
 └── docs/                       # デザインの計画・UI レビュー・画面の記録
 ```

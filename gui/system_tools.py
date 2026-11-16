@@ -40,6 +40,7 @@ from core.sysinfo import GB, can_write_dir, disk_status, drive_name, format_byte
 from core.workdata import (
     WorkData, check_free, estimate_save_bytes, find_workdata, remove_workdata, summarize, workdata_need_for_scans,
 )
+from gui.app_identity import TOOL_KIND, TOOL_KIND_LONG, TOOL_NAME
 from gui.button_kit import set_button_icon, set_disabled_reason, tokens_for
 from gui.gpu_select import install_gpu_row
 from gui.task_notify import install_long_task_notify, make_notify_checkbox
@@ -49,8 +50,9 @@ _SETTINGS_APP = "Settings"
 WORKDATA_DIR_KEY = "workdata/dir"
 _RECENT_FILES_KEY = "recent_files"   # gui/modern_ui.py の RECENT_FILES_KEY と同じ（循環 import を避けて直接読む）
 
-APP_TITLE = "E57 点群ノイズ処理ツール - 3Dエディタ"
-APP_NAME = "E57 点群ノイズ処理・断面スライサー ツール"
+# ツールの名前は gui/app_identity.py の TOOL_NAME で決める（ここは、名前の出し方だけ）
+APP_TITLE = f"{TOOL_NAME} - {TOOL_KIND}"
+APP_NAME = f"{TOOL_NAME}（{TOOL_KIND_LONG}）"
 
 # 空きが「少ない」と知らせる目安（ドライブの 10% 未満か、10GB 未満）
 LOW_FREE_RATIO = 0.10
