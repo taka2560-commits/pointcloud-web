@@ -184,6 +184,7 @@ class EmptyStateCard(QFrame):
     def __init__(self, win):
         super().__init__(win.viewer)
         self._win = win
+        self._brand_shown = False
         self.setObjectName("empty_state_card")
         self.setAttribute(Qt.WA_StyledBackground, True)
         lay = QVBoxLayout(self)
@@ -254,6 +255,20 @@ class EmptyStateCard(QFrame):
         self.refresh_recent()
         win.viewer.installEventFilter(self)
         self._recenter()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._brand_shown:
+            self._brand_shown = True
+            QTimer.singleShot(0, self, self.play_brand_entrance)  # self を添える: カードが先に捨てられたら、呼ばれない
+
+    def play_brand_entrance(self) -> int:
+        """カードの頭（アイコン → 名前 → 説明）を、順に上がって現れさせる。起動して最初に出たときに 1 回だけ"""
+        if not self.isVisible():
+            return 0
+        from gui.motion import staged_rise
+
+        return staged_rise([self.brand_icon, self.brand_name, self.brand_tagline])
 
     def refresh_recent(self) -> None:
         while self._recent_box.count():
@@ -1028,6 +1043,35 @@ def _install_behaviors(win) -> None:
         return result
 
     win._load_file_to_viewer = load_with_recent  # type: ignore[assignment]
+
+    # テーマの切り替え: 新しい見た目が、選んだ所（設定の選択肢）から円く広がる（アイリスオープン）。
+    # 切り替える前の画面を写しておき、切り替えたあとの画面の上で、円い穴を広げる
+    orig_apply_theme = win.apply_ui_theme
+
+    def apply_theme_with_iris(theme: str) -> None:
+        snapshot = None
+        try:
+            from gui.motion import motion_enabled
+
+            if motion_enabled() and win.isVisible() and theme != getattr(win, "ui_theme", None):
+                snapshot = win.grab()
+        except Exception:
+            snapshot = None
+        orig_apply_theme(theme)
+        if snapshot is None:
+            return
+        try:
+            from gui.motion import iris_reveal
+
+            combo = getattr(win, "combo_ui_theme", None)
+            center = None
+            if combo is not None and combo.isVisible():
+                center = combo.mapTo(win, combo.rect().center())
+            iris_reveal(win, snapshot, center)
+        except Exception as exc:
+            log_warning(f"テーマ切替の動きを出せませんでした（切り替えは済んでいます）: {exc}")
+
+    win.apply_ui_theme = apply_theme_with_iris  # type: ignore[assignment]
 
     # 空状態カード: 最初の点群が入ったらフェードで退場し、次に押す「実行」ボタンをフォーカスパルスで示す
     card = EmptyStateCard(win)

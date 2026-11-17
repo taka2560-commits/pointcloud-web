@@ -19,6 +19,9 @@ UI モーション（新UI用）
   - エラーシェイク         警告トーストは左右に小さく震えて減衰（320ms）
   - アテンションバウンス   選択バッジは選択が始まった瞬間に 1 回だけ跳ねる（360ms）
   - フォーカスパルス       読み込み完了後、次に押す「実行」ボタンの外周にリングが 1 回広がる（420ms）
+  - リップル               ボタンを押した所から、淡い波紋が広がって消える（380ms。2026-11-17）                → 全ボタン
+  - ソフトライズ           起動した所のカードの頭（アイコン → 名前 → 説明）が、70ms 刻みで順に上がって現れる（2026-11-17）
+  - アイリスオープン       テーマを切り替えると、新しい見た目が、選んだ所から円く広がる（520ms・easeOutQuart。2026-11-17）
   - ハイライト（なし）     常時動くもの（呼吸・グロー・シマー）は採用しない
 
 不採用の理由: 拡大縮小・回転・ぼかし・3D は QWidget では描画コストが高くレイアウトも乱れる。
@@ -30,12 +33,15 @@ QSS はトランジションを持たないため、QVariantAnimation と QGraph
 
 import math
 import re
+import weakref
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
 
-from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QRect, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QApplication, QGraphicsOpacityEffect, QLabel, QWidget
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractButton, QApplication, QCheckBox, QGraphicsOpacityEffect, QLabel, QRadioButton, QWidget,
+)
 
 try:
     import shiboken6
@@ -61,6 +67,9 @@ class MotionTokens:
     duration_bounce_ms: int = 360   # アテンションバウンス
     duration_pulse_ms: int = 420    # フォーカスパルス
     duration_ticker_ms: int = 420   # 数値ティッカー
+    duration_rise_ms: int = 420     # ソフトライズ（1 つぶん）
+    duration_iris_ms: int = 520     # アイリスオープン
+    duration_ripple_ms: int = 380   # リップル
     press_opacity: float = 0.62     # 押下中の不透明度（「沈む」感じ）
     press_offset_px: int = 1        # 押下中にわずかに下がる量
     slide_px: int = 8               # フェード＋スライドの移動量
@@ -69,6 +78,10 @@ class MotionTokens:
     shake_px: int = 6               # シェイクの最大振幅
     bounce_px: int = 6              # バウンスの高さ
     pulse_spread_px: int = 10       # パルスリングの広がり
+    rise_step_ms: int = 70          # ソフトライズの時間差
+    rise_px: int = 10               # ソフトライズで上がる量
+    ripple_alpha: float = 0.26      # リップルの濃さ（始まり）
+    ripple_corner_px: int = 6       # リップルを切り抜く角の丸み
 
 
 MOTION = MotionTokens()
@@ -79,6 +92,7 @@ _EASE_OUT_FAST = QEasingCurve(QEasingCurve.OutQuad)
 _EASE_IN_OUT = QEasingCurve(QEasingCurve.InOutCubic)
 _EASE_OUT_BACK = QEasingCurve(QEasingCurve.OutBack)
 _EASE_LINEAR = QEasingCurve(QEasingCurve.Linear)
+_EASE_OUT_QUART = QEasingCurve(QEasingCurve.OutQuart)
 
 _enabled = True
 
@@ -436,6 +450,122 @@ def focus_pulse(w: QWidget, color="#38bdf8", duration_ms: Optional[int] = None, 
     return overlay
 
 
+# ----------------------------------------------------------------------------- ソフトライズ（順に上がって現れる）
+def staged_rise(widgets: Sequence[QWidget], step_ms: Optional[int] = None, duration_ms: Optional[int] = None,
+                dy: Optional[int] = None) -> int:
+    """
+    ソフトライズ: 並んだ部品が、時間差で順に、下からふわっと上がって現れる。先頭だけ、定位置を少し行き過ぎて戻る。
+    起動した所のカードの頭（アイコン → 名前 → 説明）に使う。1 回きり。動かした部品の数を返す（動きが OFF なら 0）。
+    """
+    if not _enabled:
+        return 0
+    step = MOTION.rise_step_ms if step_ms is None else int(step_ms)
+    d = MOTION.duration_rise_ms if duration_ms is None else int(duration_ms)
+    dist = MOTION.rise_px if dy is None else int(dy)
+    n = 0
+    for w in widgets:
+        if w is None or not _alive(w) or not w.isVisible():
+            continue
+        first = n == 0
+        delay = step * n
+        n += 1
+        if delay == 0:
+            fade_slide_in(w, dy=dist, duration_ms=d, overshoot=first)
+            continue
+        _get_or_make_opacity_effect(w).setOpacity(0.0)
+
+        def _later(_w=w):
+            if not _alive(_w):
+                return
+            if _w.isVisible() and _enabled:
+                fade_slide_in(_w, dy=dist, duration_ms=d)
+            else:
+                try:
+                    _w.setGraphicsEffect(None)
+                except Exception:
+                    pass
+
+        QTimer.singleShot(delay, _later)
+    return n
+
+
+# ----------------------------------------------------------------------------- アイリスオープン（円く広がって切り替わる）
+class _IrisOverlay(QWidget):
+    """切り替える前の画面の写しを上に重ね、中心から円い穴を広げていく（下の新しい画面が、円く現れる）"""
+
+    def __init__(self, host: QWidget, snapshot: QPixmap, center: QPoint):
+        super().__init__(host)
+        self._snapshot = snapshot
+        self._center = QPointF(center)
+        w, h = host.width(), host.height()
+        self._max_r = max(
+            math.hypot(center.x() - x, center.y() - y) for x, y in ((0, 0), (w, 0), (0, h), (w, h))
+        ) + 2.0
+        self._progress = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setGeometry(0, 0, w, h)
+        self.show()
+        self.raise_()
+
+    def set_progress(self, v: float) -> None:
+        self._progress = max(0.0, min(1.0, float(v)))
+        self.update()
+
+    def hole_radius(self) -> float:
+        return self._max_r * self._progress
+
+    def paintEvent(self, _event):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # 四角と円を 1 つの形にして「重なった所は塗らない」決まりで切り抜く（円の内側だけ、下の画面が見える）
+        path = QPainterPath()
+        path.setFillRule(Qt.OddEvenFill)
+        path.addRect(QRectF(self.rect()))
+        r = self.hole_radius()
+        path.addEllipse(self._center, r, r)
+        p.setClipPath(path)
+        p.drawPixmap(self.rect(), self._snapshot)
+        p.end()
+
+
+def iris_reveal(host: QWidget, snapshot: QPixmap, center: Optional[QPoint] = None,
+                duration_ms: Optional[int] = None) -> Optional[QWidget]:
+    """
+    アイリスオープン: いまの画面（host）の上に、切り替える前の写し snapshot を重ね、center から円く開いていく。
+    テーマの切り替えに使う（新しい見た目が、選んだ所から広がる）。終わったら重ねた物は消える。操作は妨げない。
+    動きが OFF・画面が出ていない・写しが空のときは、何もしないで None。
+    """
+    if not _enabled or host is None or not _alive(host) or not host.isVisible() or snapshot is None or snapshot.isNull():
+        return None
+    old = getattr(host, "_motion_iris_overlay", None)
+    if old is not None and _alive(old):
+        _stop_anim(old, "_motion_iris_anim")
+        old.hide()
+        old.deleteLater()
+    c = center if center is not None else QPoint(host.width() // 2, host.height() // 2)
+    overlay = _IrisOverlay(host, snapshot, c)
+    host._motion_iris_overlay = overlay  # type: ignore[attr-defined]
+
+    # 終わりの片付けは、host を弱く指す（強く指すと、host → 重ねた物 → 動き → この関数 → host の輪になり、
+    # 動きの途中で画面が捨てられたときに、片付けの順番しだいで落ちる）
+    host_ref = weakref.ref(host)
+
+    def _done():
+        try:
+            overlay.hide()
+            overlay.deleteLater()
+        except RuntimeError:
+            pass
+        h = host_ref()
+        if h is not None and _alive(h) and getattr(h, "_motion_iris_overlay", None) is overlay:
+            h._motion_iris_overlay = None  # type: ignore[attr-defined]
+
+    _run_anim(overlay, "_motion_iris_anim", duration_ms or MOTION.duration_iris_ms, _EASE_OUT_QUART, overlay.set_progress, _done)
+    return overlay
+
+
 # ----------------------------------------------------------------------------- 数値ティッカー
 _NUM_RE = re.compile(r"\d[\d,]*")
 
@@ -496,6 +626,74 @@ def install_number_ticker(label: QLabel, duration_ms: Optional[int] = None) -> N
 
 
 # ----------------------------------------------------------------------------- 押下フィードバック
+class _RippleOverlay(QWidget):
+    """押した所から広がる波紋（ボタンの上に重ねる。ボタンの形の内側だけに描く）"""
+
+    def __init__(self, btn: QWidget, origin: QPoint, color: QColor, radius: int):
+        super().__init__(btn)
+        self._origin = QPointF(origin)
+        self._color = color
+        self._radius = radius
+        w, h = btn.width(), btn.height()
+        self._max_r = max(math.hypot(origin.x() - x, origin.y() - y) for x, y in ((0, 0), (w, 0), (0, h), (w, h))) + 1.0
+        self._progress = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setGeometry(0, 0, w, h)
+        self.show()
+        self.raise_()
+
+    def set_progress(self, v: float) -> None:
+        self._progress = max(0.0, min(1.0, float(v)))
+        self.update()
+
+    def paintEvent(self, _event):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(self.rect()), self._radius, self._radius)
+        p.setClipPath(clip)
+        c = QColor(self._color)
+        c.setAlphaF(MOTION.ripple_alpha * (1.0 - self._progress))
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        r = self._max_r * (0.15 + 0.85 * self._progress)
+        p.drawEllipse(self._origin, r, r)
+        p.end()
+
+
+def ripple(btn: QWidget, origin: Optional[QPoint] = None, duration_ms: Optional[int] = None) -> Optional[QWidget]:
+    """
+    リップル: ボタンを押した所から、淡い波紋が広がって消える（押したことが、押した場所で分かる）。
+    色はボタンの文字の色（濃い地では明るく、明るい地では暗く出る）。ボタンは動かさず、操作も妨げない。
+    """
+    if not _enabled or btn is None or not _alive(btn) or not btn.isVisible() or btn.width() < 8 or btn.height() < 8:
+        return None
+    old = getattr(btn, "_motion_ripple", None)
+    if old is not None and _alive(old):
+        _stop_anim(old, "_motion_ripple_anim")
+        old.hide()
+        old.deleteLater()
+    pos = origin if origin is not None else QPoint(btn.width() // 2, btn.height() // 2)
+    overlay = _RippleOverlay(btn, pos, btn.palette().color(QPalette.ButtonText), MOTION.ripple_corner_px)
+    btn._motion_ripple = overlay  # type: ignore[attr-defined]
+    btn_ref = weakref.ref(btn)  # 弱く指す（iris_reveal と同じ理由）
+
+    def _done():
+        try:
+            overlay.hide()
+            overlay.deleteLater()
+        except RuntimeError:
+            pass
+        b = btn_ref()
+        if b is not None and _alive(b) and getattr(b, "_motion_ripple", None) is overlay:
+            b._motion_ripple = None  # type: ignore[attr-defined]
+
+    _run_anim(overlay, "_motion_ripple_anim", duration_ms or MOTION.duration_ripple_ms, _EASE_OUT, overlay.set_progress, _done)
+    return overlay
+
+
 class ButtonPressMotion(QObject):
     """
     すべての QAbstractButton に押下フィードバックを与えるアプリ全体のイベントフィルタ。
@@ -514,6 +712,11 @@ class ButtonPressMotion(QObject):
         if et == QEvent.MouseButtonPress:
             if event.button() == Qt.LeftButton and obj.isEnabled() and _enabled:
                 self._press(obj)
+                if not isinstance(obj, (QCheckBox, QRadioButton)):  # チェックと丸ボタンは、印そのものが変わるので足さない
+                    try:
+                        ripple(obj, event.position().toPoint())
+                    except Exception:
+                        pass
         elif et in (QEvent.MouseButtonRelease, QEvent.Leave):
             if id(obj) in self._pressed:
                 self._release(obj)
