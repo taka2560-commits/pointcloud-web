@@ -10,6 +10,11 @@
   - "kiseki" : 「Stand 軌跡」デザインシステム（https://claude.ai/artifact/8jT43JDYDHk9hRCaZqHFR7）の見た目を
                本ツールの役割に写したライトテーマ。明るい地に墨の文字、箱の頭は黒い帯、主ボタンは深緑、
                選択中は信号赤、角丸 3px・影なし、数字は等幅。
+  - "abyss"  : 深海。深い青緑の面を 3 段（沈んだ面・地・浮いた面）に重ねて奥行きを出し、影は使わない。文字は白と銀。
+               色は控えめで、主ボタンだけが水色から淡い桃色への光の帯。数（点数・選択数）は淡い桃色。角丸は 6px と 16px。
+  - "forest" : 若葉。生成りの明るい面と、深い森の色の帯。塗りの色は若葉の緑ひとつだけ（主ボタン・実行）。
+               選んだ物も同じ緑。角丸は 8px と 16px。
+  abyss と forest は、利用者提供のスタイル資料（2026-11-17）の考え方を、本ツールの役割に写したもの。
 
 ルール:
   - 色は「役割」で選ぶ（primary / danger / warning / success / info / tone）。機能ごとの色分けは tone で控えめに。
@@ -208,8 +213,147 @@ KISEKI_TOKENS = Tokens(
     tones=dict(TONES_KISEKI),
 )
 
-THEMES: Dict[str, Tokens] = {"dark": TOKENS, "kiseki": KISEKI_TOKENS}
-THEME_LABELS: Dict[str, str] = {"dark": "ダーク（標準）", "kiseki": "軌跡（明）"}
+# 深海（abyss）: 深い青緑の地に、白と銀の文字。色は控えめに使い、主ボタンだけが淡い光の帯（2026-11-17、利用者提供のスタイル資料から）
+TONES_ABYSS: Dict[str, Tuple[str, str, str, str, str]] = {
+    "violet": ("#1f1b3d", "#e3d6ff", "#8b6fe0", "#2a2552", "#7357d6"),
+    "teal":   ("#003734", "#cbfffc", "#00a79f", "#054a45", "#00827c"),
+    "amber":  ("#2e2a10", "#ffe7a3", "#c79a2b", "#3b3615", "#a87a12"),
+    "green":  ("#06331f", "#bff5d6", "#2fa36b", "#0a4229", "#1f8a57"),
+    "blue":   ("#0a2c3f", "#c4e9ff", "#2f8fc7", "#0f394f", "#1f78ad"),
+    "rose":   ("#3d1220", "#ffd3dc", "#d6577a", "#4d1829", "#c23a62"),
+}
+ABYSS_TOKENS = Tokens(
+    name="abyss",
+    is_light=False,
+    bg_canvas="#012624",        # 地（いちばん広い面）
+    bg_surface="#022f2c",       # 箱
+    bg_elevated="#003734",      # 一段浮いた面（カード・メニュー）
+    bg_input="#011d1c",         # 一段沈んだ面（入力欄）
+    hover_bg="#054a45",
+    pressed_bg="#011d1c",
+    border_subtle="#0b4a45",
+    border_strong="#5b7a77",
+    text_primary="#edfffe",     # 本文（ごく薄い水色を帯びた白）
+    text_secondary="#bbc7c6",   # 補足（銀）
+    text_disabled="#7d9290",
+    text_on_accent="#ffffff",
+    heading_text="#ffffff",     # 見出しだけが真っ白
+    group_header_bg="transparent",
+    band_bg="#011d1c",
+    band_text="#edfffe",
+    band_muted="#bbc7c6",
+    band_border="#0b4a45",
+    accent_base="#00827c",
+    accent_strong="#00615c",
+    accent_soft="#cbfffc",
+    accent_tint="rgba(203, 255, 252, 0.12)",
+    primary_bg="#cbfffc",       # 主ボタン（QSS では、水色から淡い桃色への光の帯にする）
+    primary_bg_hover="#edfffe",
+    primary_bg_pressed="#9fe8e3",
+    primary_text="#012624",
+    primary_border="#cbfffc",
+    on_bg="#00827c",            # 選んだ物
+    on_text="#ffffff",
+    on_border="#cbfffc",
+    danger_base="#ef6b6b",
+    danger_strong="#b3261e",
+    danger_hover="#c93a32",
+    warning_base="#f5c96b",
+    success_base="#7be0c3",
+    success_hover="#a5efd9",
+    success_text="#012624",
+    info_base="#cbfffc",
+    toast_bg="#011d1c",
+    toast_info="#edfffe",
+    toast_success="#9ff0d6",
+    toast_warning="#ffe7a3",
+    toast_error="#ffb4ab",
+    danger_text="#ffb4ab",
+    badge_bg="#003734",
+    badge_text="#fde9ff",       # 数（選択中の点数など）は、淡い桃色で光らせる
+    badge_border="#fde9ff",
+    card_bg="rgba(0, 55, 52, 0.95)",
+    card_border="#5b7a77",
+    font_ui='"Inter", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif',
+    radius_sm=6,
+    radius_md=6,
+    radius_lg=16,
+    radius_band=6,
+    tones=dict(TONES_ABYSS),
+)
+
+# 若葉（forest）: 生成りの明るい面と、深い森の色の帯。色は若葉の緑ひとつだけ（2026-11-17、利用者提供のスタイル資料から）
+FOREST_TOKENS = Tokens(
+    name="forest",
+    is_light=True,
+    bg_canvas="#f2f5eb",        # 生成りの地
+    bg_surface="#fbfcf7",
+    bg_elevated="#ffffff",
+    bg_input="#ffffff",
+    hover_bg="#e7f9dd",         # 薄い若葉色
+    pressed_bg="#d9deca",
+    border_subtle="#d9deca",
+    border_strong="#5d6352",
+    text_primary="#30322a",
+    text_secondary="#565b4c",
+    text_disabled="#7e8371",
+    text_on_accent="#ffffff",
+    heading_text="#ffffff",     # 見出しは、森の色の帯の上
+    group_header_bg="#122314",
+    band_bg="#122314",
+    band_text="#ffffff",
+    band_muted="#b7bda5",
+    band_border="#122314",
+    accent_base="#26a200",
+    accent_strong="#1c7a00",
+    accent_soft="#1a6e00",      # リンク・焦点（明るい面の上で読める濃さ）
+    accent_tint="rgba(104, 239, 63, 0.16)",
+    primary_bg="#68ef3f",       # 主ボタンは若葉の緑。塗りの色は、これひとつ
+    primary_bg_hover="#7ff55c",
+    primary_bg_pressed="#55d92e",
+    primary_text="#30322a",
+    primary_border="#26a200",
+    on_bg="#68ef3f",            # 選んだ物も若葉の緑（明るい面の上でも、森の色の帯の上でも、はっきり分かる）
+    on_text="#30322a",
+    on_border="#26a200",
+    danger_base="#c0392b",
+    danger_strong="#9a2f22",
+    danger_hover="#b3362a",
+    warning_base="#7a5200",
+    success_base="#68ef3f",
+    success_hover="#7ff55c",
+    success_text="#30322a",
+    info_base="#1a6e00",
+    toast_bg="#122314",
+    toast_info="#ffffff",
+    toast_success="#68ef3f",
+    toast_warning="#f3e37a",
+    toast_error="#ffb0a3",
+    danger_text="#9a2f22",
+    badge_bg="#122314",
+    badge_text="#68ef3f",
+    badge_border="#122314",
+    card_bg="rgba(255, 255, 255, 0.97)",
+    card_border="#7e8371",
+    font_ui='"Inter", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif',
+    radius_sm=8,
+    radius_md=8,
+    radius_lg=16,
+    radius_band=8,
+    tones=dict(TONES_KISEKI),
+)
+
+THEMES: Dict[str, Tokens] = {"dark": TOKENS, "kiseki": KISEKI_TOKENS, "abyss": ABYSS_TOKENS, "forest": FOREST_TOKENS}
+THEME_LABELS: Dict[str, str] = {
+    "dark": "ダーク（標準）", "kiseki": "軌跡（明）", "abyss": "深海（深い青緑）", "forest": "若葉（生成りと森の緑）",
+}
+# 設定の選択肢に出す文（gui/main_window.py が、この順に並べる）
+THEME_CHOICES: Tuple[Tuple[str, str], ...] = (
+    ("dark", "ダーク (標準)"),
+    ("kiseki", "軌跡 (明るい地・黒い帯)"),
+    ("abyss", "深海 (深い青緑・光る主ボタン)"),
+    ("forest", "若葉 (生成りの地・森の緑の帯)"),
+)
 
 
 def get_tokens(theme: str = "dark") -> Tokens:
@@ -502,6 +646,60 @@ QListWidget#manual_topics::item:selected {{
     color: {t.on_text};
 }}
 """
+
+
+
+def _theme_extras_qss(t: Tokens) -> str:
+    """テーマごとの仕上げ（トークンだけでは表せない所）。QSS の最後に足すので、同じセレクタの定義より優先される"""
+    if t.name == "abyss":
+        aurora = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #cbfffc, stop:0.26 #edfffe, stop:0.48 #fffdfa, stop:0.89 #fad1ff, stop:1 #fad1ff)"
+        aurora_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e2fffd, stop:0.3 #ffffff, stop:0.55 #fffdfa, stop:1 #fde0ff)"
+        aurora_pressed = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9fe8e3, stop:0.5 #d9f2ef, stop:1 #e6b8ec)"
+        glow = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00827c, stop:1 #cbfffc)"
+        return f"""
+/* ===== 深海: 主ボタンだけが光の帯。数は淡い桃色 ===== */
+QPushButton[role="primary"] {{
+    background: {aurora};
+    color: {t.primary_text};
+    border: none;
+}}
+QPushButton[role="primary"]:hover {{
+    background: {aurora_hover};
+}}
+QPushButton[role="primary"]:pressed {{
+    background: {aurora_pressed};
+}}
+QPushButton[role="primary"]:disabled {{
+    background: {t.bg_elevated};
+    color: {t.text_disabled};
+    border: 1px solid {t.border_subtle};
+}}
+QProgressBar::chunk, QProgressBar#progressBarModern::chunk {{
+    background: {glow};
+}}
+QLabel#point_count_pill {{
+    color: {t.badge_text};
+    border-color: {t.border_strong};
+}}
+QLabel#empty_state_brand_name {{
+    color: {t.heading_text};
+    font-weight: 600;
+}}
+"""
+    if t.name == "forest":
+        return f"""
+/* ===== 若葉: 入力に焦点が来たら若葉の緑。数は帯の上で緑 ===== */
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+    border: 1px solid {t.accent_base};
+}}
+QLabel#point_count_pill {{
+    color: {t.badge_text};
+}}
+QProgressBar::chunk, QProgressBar#progressBarModern::chunk {{
+    background-color: {t.accent_base};
+}}
+"""
+    return ""
 
 
 def _with_alpha(hex_color: str, alpha: float) -> str:
@@ -1528,4 +1726,4 @@ QMessageBox QLabel {{
 QMessageBox QPushButton {{
     min-width: 84px;
 }}
-""" + _extras_qss(t) + _button_states_qss(t)
+""" + _extras_qss(t) + _button_states_qss(t) + _theme_extras_qss(t)

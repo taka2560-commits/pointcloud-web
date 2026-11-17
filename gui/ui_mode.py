@@ -93,7 +93,7 @@ def is_modern() -> bool:
 # ----------------------------------------------------------------------------- テーマ（新UIの見た目）
 THEME_SETTINGS_KEY = "ui/theme"
 THEME_ENV_KEY = "E57_UI_THEME"
-_VALID_THEMES = ("dark", "kiseki")
+_VALID_THEMES = ("dark", "kiseki", "abyss", "forest")
 _cached_theme: Optional[str] = None
 
 
@@ -105,6 +105,10 @@ def _normalize_theme(value) -> Optional[str]:
         return "dark"
     if v in ("kiseki", "軌跡", "light", "明"):
         return "kiseki"
+    if v in ("abyss", "深海"):
+        return "abyss"
+    if v in ("forest", "若葉"):
+        return "forest"
     return None
 
 

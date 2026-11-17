@@ -6,6 +6,7 @@
 - 消した点は「ノイズレイヤー」へ移るだけで、保存するまで元のデータは変わりません。`Ctrl+Z` でいつでも戻せます。
 - 1 億点を超えるファイルは間引いて読み込み、保存のときに元ファイルの全点へ判定を写せます。
 - ツールの名前は「**ポイントクリーナー**」です（2026-11-16 から）。ウィンドウの題名と、起動した所のカードに、名前とアイコンが出ます。EXE とフォルダの名前（`E57_PointCloud_Tool`）は今までどおりです。
+- 見た目（テーマ）は 4 つから選べます: ダーク・軌跡（明るい地）・**深海**（深い青緑）・**若葉**（生成りの地と森の緑）。「設定」タブの「テーマ」で、その場で切り替わります。
 
 ---
 
@@ -171,7 +172,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 - 設計憲章・アーキテクチャ・過去の教訓: `AI_HANDOVER.md`
 - 複数AI・複数開発者での並行開発ルール（作業場所・担当ファイル・マージ手順）: `AGENTS.md`
 - 品質管理の報告（欠陥一覧・修正状況・backlog・コミットの記録）: `QA_REPORT_2026-10-31.md`
-- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 716 件）／`--quick`（GUI を開かない軽量版）
+- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 721 件）／`--quick`（GUI を開かない軽量版）
 - テストとゲートは、この PC の本番アプリの保存設定を書き換えません（`tests/settings_sandbox.py`）。MainWindow を作るテストや確認スクリプトを足すときは、先頭で `use_sandbox_settings()` を呼んでください。
 - 配布パッケージの作成: `EXE配布パッケージ作成.bat`（`dist/E57_PointCloud_Tool_Dist.zip` ができます）
 
@@ -238,7 +239,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 │   └── styles.py               # 従来UI のスタイル
 ├── assets/icons/               # アイコン（SVG）
 ├── assets/app/                 # アプリのアイコン（PNG 9 枚 + app_icon.ico。tools/make_app_icon.py が書き出す）
-├── tests/                      # 単体テスト（716 件）。settings_sandbox.py はテスト用の設定の置き場
+├── tests/                      # 単体テスト（721 件）。settings_sandbox.py はテスト用の設定の置き場
 ├── tools/                      # 画面キャプチャ・コントラスト確認・版の記録（write_build_info.py）・アプリのアイコンを描く（make_app_icon.py）道具
 └── docs/                       # デザインの計画・UI レビュー・画面の記録
 ```

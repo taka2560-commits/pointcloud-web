@@ -72,6 +72,54 @@ class TestKisekiTheme(unittest.TestCase):
         self.assertNotIn("chevron-down-light.svg", dark)
 
 
+class TestAbyssAndForestThemes(unittest.TestCase):
+    """2026-11-17、利用者提供のスタイル資料 2 つを写したテーマ（深海 abyss・若葉 forest）"""
+
+    def test_themes_are_registered_and_selectable(self):
+        from gui.design_tokens import ABYSS_TOKENS, FOREST_TOKENS, THEME_CHOICES, THEME_LABELS
+        from gui.ui_mode import _VALID_THEMES
+
+        self.assertIs(get_tokens("abyss"), ABYSS_TOKENS)
+        self.assertIs(get_tokens("forest"), FOREST_TOKENS)
+        self.assertEqual([k for k, _ in THEME_CHOICES], list(THEMES.keys()), "設定の選択肢は、テーマの全部")
+        self.assertEqual(set(THEME_LABELS), set(THEMES))
+        self.assertEqual(set(_VALID_THEMES), set(THEMES), "保存した設定・起動引数から選べる")
+        self.assertEqual(THEME_CHOICES[0][0], "dark", "標準は今までどおりダーク")
+
+    def test_abyss_is_a_teal_stack_with_one_glowing_button(self):
+        from gui.design_tokens import ABYSS_TOKENS as t
+
+        self.assertFalse(t.is_light)
+        # 沈んだ面 < 地 < 箱 < 浮いた面 の順に明るい（影でなく、面の色で奥行きを出す）
+        steps = [luminance(c) for c in (t.bg_input, t.bg_canvas, t.bg_surface, t.bg_elevated)]
+        self.assertEqual(steps, sorted(steps))
+        self.assertEqual(len(set(steps)), 4)
+        qss = build_modern_qss(t)
+        self.assertEqual(qss.count("#fad1ff"), 2, "光の帯は主ボタンだけ（通常の 1 か所。止めの色が 2 回）")
+        tail = qss[qss.index("深海: 主ボタンだけが光の帯"):]
+        self.assertIn('QPushButton[role="primary"]', tail)
+        self.assertIn("qlineargradient", tail)
+        self.assertNotIn("box-shadow", qss)
+        self.assertIn('chevron-down.svg"', qss, "暗いテーマの矢印")
+
+    def test_forest_is_light_with_forest_bands_and_one_green(self):
+        from gui.design_tokens import FOREST_TOKENS as t
+
+        self.assertTrue(t.is_light)
+        self.assertGreater(luminance(t.bg_canvas), 0.8)
+        self.assertLess(luminance(t.band_bg), 0.03)
+        self.assertEqual(t.group_header_bg, t.band_bg)
+        self.assertEqual(t.primary_bg, t.on_bg, "塗りの色は若葉の緑ひとつ")
+        self.assertEqual(t.primary_bg, t.success_base)
+        self.assertIn("chevron-down-light.svg", build_modern_qss(t))
+
+    def test_other_themes_get_no_extras(self):
+        from gui.design_tokens import _theme_extras_qss
+
+        self.assertEqual(_theme_extras_qss(TOKENS), "")
+        self.assertEqual(_theme_extras_qss(KISEKI_TOKENS), "")
+
+
 class TestModernQss(unittest.TestCase):
     def test_qss_builds_and_has_no_tiny_fonts(self):
         for t in THEMES.values():

@@ -234,7 +234,7 @@ class TestWindowShowsTheName(unittest.TestCase):
     def test_start_card_fits_in_both_themes(self):
         win, card = self.win, self.win.empty_state_card
         try:
-            for theme in ("kiseki", "dark"):
+            for theme in ("kiseki", "abyss", "forest", "dark"):
                 win.apply_ui_theme(theme)
                 self._pump(12)
                 v = win.viewer
