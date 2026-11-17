@@ -31,6 +31,11 @@ class TestResolveUiTheme(unittest.TestCase):
     def test_default_is_dark(self):
         self.assertEqual(resolve_ui_theme(argv=[], env={}, use_settings=False), "dark")
 
+    def test_env_abyss_and_forest(self):
+        for v, want in (("abyss", "abyss"), ("ABYSS", "abyss"), ("深海", "abyss"), ("forest", "forest"), ("若葉", "forest")):
+            self.assertEqual(resolve_ui_theme(argv=[], env={"E57_UI_THEME": v}, use_settings=False), want, v)
+        self.assertEqual(resolve_ui_theme(argv=["--theme=abyss"], env={}, use_settings=False), "abyss")
+
     def test_env_kiseki_and_aliases(self):
         for v in ("kiseki", "KISEKI", "軌跡", "light", "明"):
             self.assertEqual(resolve_ui_theme(argv=[], env={"E57_UI_THEME": v}, use_settings=False), "kiseki", v)

@@ -75,6 +75,7 @@ from gui.worker_thread import (
 from gui.progress_dialog import ModernProgressDialog
 from gui.layer_history import LayerUndoHistory, LayerState
 from gui.gl_viewer import PointCloudViewer, LayerInfo
+from gui.design_tokens import THEME_CHOICES
 from gui.styles import DARK_THEME_QSS, get_theme_qss
 from gui.load_guard import resolve_load_limit
 from gui.noise_palette import legend_text as noise_legend_text
@@ -2976,8 +2977,8 @@ class MainWindow(QMainWindow):
         self.combo_ui_theme = QComboBox()
         self.combo_ui_theme.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.combo_ui_theme.setMinimumContentsLength(8)
-        self.combo_ui_theme.addItem("ダーク (標準)", "dark")
-        self.combo_ui_theme.addItem("軌跡 (明るい地・黒い帯)", "kiseki")
+        for _theme_key, _theme_label in THEME_CHOICES:  # 選択肢は gui/design_tokens.py で決める
+            self.combo_ui_theme.addItem(_theme_label, _theme_key)
         _theme_idx = self.combo_ui_theme.findData(get_saved_ui_theme())
         self.combo_ui_theme.setCurrentIndex(max(0, _theme_idx))
         self.combo_ui_theme.setToolTip("新UIの配色テーマ。選ぶとその場で切り替わり、次回起動時も保持されます。環境変数 E57_UI_THEME=kiseki / 起動引数 --theme=kiseki でも指定できます。")

@@ -22,6 +22,8 @@
 
 > **ツールの名前は「ポイントクリーナー」**（2026-11-16、利用者が決めた。カタカナの英語名）。名前は `gui/app_identity.py` の `TOOL_NAME` の 1 行で決まり、ウィンドウの題名（`名前 - E57 点群ノイズ処理ツール ［版 …］`）・起動した所のカード（`EmptyStateCard` の頭に、アイコンと名前）・バージョン情報・Windows の通知の題名に出る。アイコンは `assets/app/`（点でできた箱 = 測った物、まわりの水色の点 = 取り除く空中のノイズ）。`main.py` が `apply_app_identity(app)` でアプリ全体に付け、配布版の EXE には spec の `icon=` が `app_icon.ico` を埋め込む。**変えていない物**: EXE とフォルダの名前（`E57_PointCloud_Tool`）・保存設定の置き場所（QSettings の `E57PointCloudTool`）・ログと異常終了の記録の中の文。名前を変えても、今までの設定・ショートカット・ビルドの手順はそのまま使える。絵のファイルが無くても、アプリはアイコン無しで今までどおり動く。
 
+> **テーマは 4 つ**（2026-11-17 から）: `dark`（標準）・`kiseki`（明）・`abyss`（深海）・`forest`（若葉）。`abyss` と `forest` は、利用者提供のスタイル資料 2 つの考え方を写したもの。色は `gui/design_tokens.py` の `ABYSS_TOKENS` / `FOREST_TOKENS`、トークンで表せない仕上げ（深海の主ボタンの光の帯など）は `_theme_extras_qss`、設定の選択肢は `THEME_CHOICES`（`gui/main_window.py` はこれを並べるだけ）。テーマを足すときは、`THEMES`・`THEME_LABELS`・`THEME_CHOICES`・`gui/ui_mode.py` の `_VALID_THEMES` と `_normalize_theme` をそろえる（テストが、そろっていることと、全部の文字と地の組のコントラストを確かめる）。3D ビューの背景色は、テーマと別の設定のまま。
+
 ## 2. 厳守すべき絶対ルール・設計憲章
 
 今後のAIが開発を行う際、**以下のルールは絶対に遵守**してください。
@@ -397,7 +399,7 @@ python -m unittest discover tests -v     # 単体テストのみ
 - **テストで作ったウィンドウと 3D 画面は、`tests/qt_cleanup.py: destroy_widget()` で本当に破棄します**（2026-11-14）。閉じただけのウィンドウが残ると、あとのテストが遅くなるだけでなく、従来 UI のウィンドウが残ったまま新 UI のウィンドウが作られたときに Qt の中でアクセス違反が起き、テストのプロセスごと落ちました（14 回に 3 回）。`tests/test_static_names.py` が呼び忘れを見張ります。テストのプロセスが落ちたとき（終了コード 139）は、`python -X faulthandler -m unittest …` で走らせると、落ちた行が出ます。
 - UI のテストの tearDown では `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` でウィンドウを本当に破棄します。`processEvents()` だけでは `deleteLater()` が実行されず、閉じたウィンドウが残って後のテストが遅くなります（UI テスト 2 本で 5 分強が 50 秒になった）。
 
-### テスト内容（全5段階・単体テスト 716 件）
+### テスト内容（全5段階・単体テスト 721 件）
 1. **Gate 1: 静的構文・クロスリファレンス整合性**（全 .py のコンパイル/AST、Web版 HTML⇄JS の DOM ID 照合、.bat の純粋ASCII/CRLF 検査）
 2. **Gate 2: ビューア状態不変条件**（`validate_invariants`、点数の異なる点群の連続ロードで古いマスクが残らないこと）
 3. **Gate 3: 境界値・カオス入力ファジング**（0点/1点/2点/分散ゼロ/平面点群に対する全フィルタ・全配色の耐性）
