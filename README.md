@@ -172,7 +172,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 - 設計憲章・アーキテクチャ・過去の教訓: `AI_HANDOVER.md`
 - 複数AI・複数開発者での並行開発ルール（作業場所・担当ファイル・マージ手順）: `AGENTS.md`
 - 品質管理の報告（欠陥一覧・修正状況・backlog・コミットの記録）: `QA_REPORT_2026-10-31.md`
-- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 721 件）／`--quick`（GUI を開かない軽量版）
+- 品質ゲート: `python -X utf8 quality_gate.py`（全 5 ゲート、単体テスト 737 件）／`--quick`（GUI を開かない軽量版）
 - テストとゲートは、この PC の本番アプリの保存設定を書き換えません（`tests/settings_sandbox.py`）。MainWindow を作るテストや確認スクリプトを足すときは、先頭で `use_sandbox_settings()` を呼んでください。
 - 配布パッケージの作成: `EXE配布パッケージ作成.bat`（`dist/E57_PointCloud_Tool_Dist.zip` ができます）
 
@@ -239,7 +239,7 @@ Web ブラウザ版は `Webアプリ起動.bat` で起動します（PLY / XYZ /
 │   └── styles.py               # 従来UI のスタイル
 ├── assets/icons/               # アイコン（SVG）
 ├── assets/app/                 # アプリのアイコン（PNG 9 枚 + app_icon.ico。tools/make_app_icon.py が書き出す）
-├── tests/                      # 単体テスト（721 件）。settings_sandbox.py はテスト用の設定の置き場
+├── tests/                      # 単体テスト（737 件）。settings_sandbox.py はテスト用の設定の置き場
 ├── tools/                      # 画面キャプチャ・コントラスト確認・版の記録（write_build_info.py）・アプリのアイコンを描く（make_app_icon.py）道具
 └── docs/                       # デザインの計画・UI レビュー・画面の記録
 ```
