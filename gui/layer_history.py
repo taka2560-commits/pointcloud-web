@@ -48,10 +48,14 @@ class LayerDiffEntry:
     idx: np.ndarray            # 変化した点のインデックス (int32 / int64)
     values: np.ndarray         # その点の「戻し先」の layer_id (int32)
     layers: Dict[int, Any]     # 戻し先のレイヤー定義（LayerInfo の複製）
+    # レイヤーと一緒に戻す、もう 1 つの状態の差分（全点表示で消した点の印。attach_extra でつないだときだけ入る）。
+    # 「有る無しを入れ替える行」なので、元に戻すときも、やり直すときも、同じ差分をもう一度当てる
+    extra: Any = None
+    extra_nbytes: int = 0
 
     @property
     def nbytes(self) -> int:
-        return int(self.idx.nbytes + self.values.nbytes)
+        return int(self.idx.nbytes + self.values.nbytes + self.extra_nbytes)
 
 
 def _copy_layers(layers: Dict[int, Any]) -> Dict[int, Any]:
@@ -94,12 +98,30 @@ class LayerUndoHistory:
         self._shadow_layers: Dict[int, Any] = {}
         # push() 後に（まだ確定していない）変更が起こり得る状態か
         self._pending_expected: bool = False
+        # レイヤーと一緒に戻す、もう 1 つの状態（attach_extra）
+        self._extra: Any = None
+        self._shadow_extra: Any = None
+
+    def attach_extra(self, tracker: Any) -> None:
+        """
+        レイヤーと同じ 1 手で元に戻す、もう 1 つの状態をつなぐ（全点表示で消した点の印 = core/fullres_marks.py の FullResMarks）。
+        tracker は snapshot() -> 写し / diff(前の写し, 今の写し) -> 差分 か None / toggle(差分) / diff_nbytes(差分) を持つ。
+        push() のあとに tracker が変われば、レイヤーが変わっていなくても 1 手として記録する。
+        """
+        self._extra = tracker
+        self._shadow_extra = None
+
+    def _extra_diff(self) -> Any:
+        if self._extra is None or self._shadow_extra is None:
+            return None
+        return self._extra.diff(self._shadow_extra, self._extra.snapshot())
 
     # ------------------------------------------------------------------ 内部
     def _on_external_clear(self, which: list) -> None:
         if which is self.undo_stack:
             self._shadow_ids = None
             self._shadow_layers = {}
+            self._shadow_extra = None
             self._pending_expected = False
 
     def _shadow_valid(self, state: LayerState) -> bool:
@@ -112,6 +134,7 @@ class LayerUndoHistory:
     def _take_shadow(self, state: LayerState) -> None:
         self._shadow_ids = state.layer_ids.copy() if state.layer_ids is not None else None
         self._shadow_layers = _copy_layers(state.layers)
+        self._shadow_extra = self._extra.snapshot() if self._extra is not None else None
 
     @staticmethod
     def _index_dtype(n: int):
@@ -128,13 +151,16 @@ class LayerUndoHistory:
         changed = np.nonzero(self._shadow_ids != state.layer_ids)[0]
         layers_changed = not _layers_equal(self._shadow_layers, state.layers)
         self._pending_expected = False
-        if changed.size == 0 and not layers_changed:
+        extra = self._extra_diff()
+        if changed.size == 0 and not layers_changed and extra is None:
             return False
         idx = changed.astype(self._index_dtype(len(state.layer_ids)), copy=False)
         entry = LayerDiffEntry(
             idx=idx,
             values=self._shadow_ids[changed].astype(np.int32, copy=True),
             layers=self._shadow_layers,  # shadow は作り直すので所有権を移してよい
+            extra=extra,
+            extra_nbytes=int(self._extra.diff_nbytes(extra)) if extra is not None else 0,
         )
         self.undo_stack.append(entry)
         return True
@@ -146,6 +172,7 @@ class LayerUndoHistory:
         list.clear(self.redo_stack)
         self._shadow_ids = None
         self._shadow_layers = {}
+        self._shadow_extra = None
         self._pending_expected = False
 
     def push(self, state: LayerState, max_steps: int = 50) -> None:
@@ -186,10 +213,14 @@ class LayerUndoHistory:
                 idx=entry.idx,
                 values=state.layer_ids[entry.idx].astype(np.int32, copy=True),
                 layers=_copy_layers(state.layers),
+                extra=entry.extra,
+                extra_nbytes=entry.extra_nbytes,
             )
         )
         layers_changed = not _layers_equal(state.layers, entry.layers)
         state.layer_ids[entry.idx] = entry.values
+        if entry.extra is not None and self._extra is not None:
+            self._extra.toggle(entry.extra)
         new_state = LayerState(state.layer_ids, _copy_layers(entry.layers), changed=entry.idx, layers_changed=layers_changed)
         self._take_shadow(new_state)
         return new_state
@@ -204,10 +235,14 @@ class LayerUndoHistory:
                 idx=entry.idx,
                 values=state.layer_ids[entry.idx].astype(np.int32, copy=True),
                 layers=_copy_layers(state.layers),
+                extra=entry.extra,
+                extra_nbytes=entry.extra_nbytes,
             )
         )
         layers_changed = not _layers_equal(state.layers, entry.layers)
         state.layer_ids[entry.idx] = entry.values
+        if entry.extra is not None and self._extra is not None:
+            self._extra.toggle(entry.extra)
         new_state = LayerState(state.layer_ids, _copy_layers(entry.layers), changed=entry.idx, layers_changed=layers_changed)
         self._take_shadow(new_state)
         self._pending_expected = False

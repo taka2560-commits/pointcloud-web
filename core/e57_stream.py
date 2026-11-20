@@ -141,11 +141,14 @@ def iter_scan_stream_chunks(
     tpl: ScanStreamTemplate,
     chunk_size: int = DEFAULT_STREAM_CHUNK,
     is_cancelled: Optional[Callable[[], bool]] = None,
+    with_rows: bool = False,
 ) -> Iterator[Tuple[Dict[str, np.ndarray], np.ndarray]]:
     """
     1 スキャンをチャンクで読み、(生の値の辞書, ローカル座標 (n, 3)) を返すジェネレータ。
     生の値は ScaledInteger が int64 の生の整数、Float / Integer はファイルの型のまま（read_e57_scans と同じ型）。
     座標が NaN / Inf の点は除いてある。配列は毎回新しく作るので、呼び出し側で持っていてよい。
+    with_rows=True のときは (生の値の辞書, ローカル座標, 行の番号 int64 (n,)) を返す。行の番号は、スキャンの中での
+    0 始まりの順番で、除いた点も数に入れる（読み込み・断面の読み直しと同じ数え方。core/fullres_marks.py）。
     """
     chunk_size = max(1, int(chunk_size))
     imf = libe57.ImageFile(tpl.file_path, "r")
@@ -180,11 +183,16 @@ def iter_scan_stream_chunks(
             total += n
             raw = {name: arr[:n].copy() for name, arr in bufs.items()}
             pts = _local_xyz(tpl, raw, n)
+            rows = np.arange(total - n, total, dtype=np.int64) if with_rows else None
             if not np.isfinite(pts).all():
                 ok = np.isfinite(pts).all(axis=1)
                 pts = pts[ok]
                 raw = {name: arr[ok] for name, arr in raw.items()}
-            yield raw, pts
+                rows = rows[ok] if rows is not None else None
+            if with_rows:
+                yield raw, pts, rows
+            else:
+                yield raw, pts
         if total == 0:
             raise ValueError(
                 f"スキャン #{tpl.scan_index}: ヘッダーでは {n_points:,} 点が宣言されていますが 1 点も読み込めませんでした。"

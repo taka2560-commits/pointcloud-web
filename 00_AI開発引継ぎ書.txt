@@ -96,6 +96,7 @@ gui/display_patch.py  : 表示の部分更新（消した・戻した点の所�
 gui/select_cull.py    : 選択の候補のふるい（区画ごとの箱で、形の近くにありうる点だけを画面へ投影する）
 gui/layer_sync.py     : レイヤーの整合の確認と点数の数え直し（変わっていなければ、全点の比べ・数え直しを省く）
 gui/gpu_select.py     : 描画に使う GPU の選び方（高性能の GPU を優先 / Windows に任せる。main.py が、画面の部品を読む前に呼ぶ）
+gui/overlay_edit.py   : 全点表示（断面の読み直しの重ね描き）の点を、選んで消す。印は core/fullres_marks.py（元ファイルでの行の番号）。全点で保存が反映する
 gui/app_identity.py   : ツールの名前（TOOL_NAME =「ポイントクリーナー」）とアプリのアイコン（assets/app/。tools/make_app_icon.py が書き出す）
 gui/gl_state.py       : 点群を描く間だけ、OpenGL の状態をそろえる（手前の点が奥の点を隠す・丸い点の色が足されない）
 gui/gl_viewer.py      : OpenGL 3D点群ビューア（VBO、視点ギズモ、手動選択、スライス）

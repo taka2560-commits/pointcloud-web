@@ -130,6 +130,20 @@ def _need_selection(win) -> Optional[str]:
     return None
 
 
+def _need_selection_or_overlay(win) -> Optional[str]:
+    """消す操作は、全点表示（断面の読み直し）の点だけを選んでいても使える"""
+    r = _need_selection(win)
+    if r and win.viewer.points_raw is not None and len(win.viewer.points_raw) > 0 and win.viewer.overlay_selection_count() > 0:
+        return None
+    return r
+
+
+def _restore_fullres_marks(win) -> None:
+    from gui.overlay_edit import restore_all_marks_command
+
+    restore_all_marks_command(win)
+
+
 def _need_section(win) -> Optional[str]:
     r = _need_points(win)
     if r:
@@ -250,7 +264,7 @@ def build_commands(win) -> List[Command]:
         C("mode.clean", GROUP_EDIT, "ノイズ専用モードの入/切", "ノイズ処理に必要な物だけを表示する", "N", "のいず せんよう",
           lambda w: w._toggle_clean_focus_mode(not w.viewer.clean_focus_mode)),
         C("edit.delete", GROUP_EDIT, "選択点をノイズへ移す", "選んだ点をノイズレイヤーへ移す（消えずに残るので戻せる）", "Del", "さくじょ けす のいず delete",
-          lambda w: w._delete_selected_points(), _need_selection),
+          lambda w: w._delete_selected_points(), _need_selection_or_overlay),
         C("edit.wand", GROUP_EDIT, "連結塊を選択", "選んだ点とつながっている塊全体を選ぶ", "G", "れんけつ かたまり まじっくわんど wand",
           lambda w: w._on_magic_wand_cluster_select(), _need_selection),
         C("edit.local_clean", GROUP_EDIT, "選択範囲内だけ精密除去", "選んだ範囲だけに細かいノイズ除去をかける", "", "せいみつ はんい きょくしょ",
@@ -301,6 +315,9 @@ def build_commands(win) -> List[Command]:
           _click("btn_sec_reload"), _button_state("btn_sec_reload", _need_section)),
         C("section.reload_clear", GROUP_SECTION, "読み直した重ね描きを消す", "", "", "かさねがき けす", _click("btn_sec_reload_clear"),
           _button_state("btn_sec_reload_clear")),
+        C("section.marks_restore", GROUP_SECTION, "全点表示で消した点をすべて戻す",
+          "断面の全点表示で、ブラシなどで消した点（読み込みで飛ばされた点）を、全部もとに戻す", "",
+          "ぜんてん けした もどす ふっかつ しるし", _restore_fullres_marks, _need_points),
         C("section.lod", GROUP_SECTION, "高精細表示 (LOD) の入/切", "視点が止まると、見えている所を元ファイルの密度で描く", "", "こうせいさい えるおーでぃー みつど lod",
           _toggle("chk_lod")),
         C("section.guides", GROUP_SECTION, "断面の枠線 表示/非表示", "黄色（基点）と水色（厚み）の枠を出したり消したりする", "Shift+B", "わくせん がいど",

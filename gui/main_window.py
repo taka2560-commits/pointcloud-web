@@ -78,6 +78,7 @@ from gui.gl_viewer import PointCloudViewer, LayerInfo
 from gui.design_tokens import THEME_CHOICES
 from gui.styles import DARK_THEME_QSS, get_theme_qss
 from gui.load_guard import resolve_load_limit
+from gui.overlay_edit import apply_marks_to_save_worker, erase_message
 from gui.noise_palette import legend_text as noise_legend_text
 from gui.system_tools import confirm_lod_build, confirm_save_free_space, install_system_tools, window_title_with_build
 from gui.section_seek import (
@@ -765,7 +766,8 @@ class MainWindow(QMainWindow):
         self.btn_sec_reload = QPushButton("元ファイルから全点で読み直す")
         self.btn_sec_reload.setProperty("role", "outline")
         self.btn_sec_reload.setToolTip(
-            "断面ボックスに入る点を、読み込み元の E57 から全点で読み直して重ね描きします（表示専用。選択・ノイズ移動の対象にはなりません）。\n"
+            "断面ボックスに入る点を、読み込み元の E57 から全点で読み直して重ね描きします。\n"
+            "読み込みで飛ばされた点も、矩形・円・多角形・ブラシで選んで消せます（消した点は「全点で保存」で除かれます。Ctrl+Z で戻せます）。\n"
             "1 億点超のファイルは間引いて読み込んでいるため、ボックス内の本当の点密度を見たいときに使います。\n"
             "ボックスを動かす・断面を解除する・別のファイルを開くと重ね描きは消えます。上限 1,000 万点。"
             "元ファイルは読込後に動かさないでください（ファイル全体を流し読みするので 1 億点で 10〜20 秒程度）"
@@ -1992,6 +1994,8 @@ class MainWindow(QMainWindow):
         self.viewer.measure_updated.connect(lambda msg: self.status_label.setText(msg))
         self.viewer.context_menu_requested.connect(self._show_viewer_context_menu)
         self.viewer.instant_erase_requested.connect(self._on_instant_erase_requested)
+        # 全点表示で消した点の印を、レイヤーと同じ 1 手で元に戻せるようにする（gui/overlay_edit.py・gui/layer_history.py）
+        self.layer_history.attach_extra(self.viewer.fullres_marks_tracker())
         self.viewer.brush_radius_changed.connect(self._on_viewer_brush_radius_changed)
         self.viewer.wall_aligned.connect(self._on_wall_aligned)
         self.viewer.section_guides_changed.connect(self._on_viewer_section_guides_changed)
@@ -3919,15 +3923,21 @@ class MainWindow(QMainWindow):
 
     def _on_instant_erase_requested(self, erase_indices: np.ndarray):
         """⚡ 即時削除モードで囲まれた・なぞられた点群を1ステップで即座にノイズレイヤーへ消去"""
-        if self.viewer.points_raw is None or len(erase_indices) == 0:
+        n_ov_wait = self.viewer.overlay_pending_erase_count()   # 全点表示（断面の読み直し）の点で、同じ形に入った物
+        if self.viewer.points_raw is None or (len(erase_indices) == 0 and n_ov_wait == 0):
             return
         self._push_layer_undo_state()
-        moved = self.viewer.move_indices_to_layer(erase_indices, PointCloudViewer.LAYER_NOISE, respect_lock=True)
+        moved = (
+            self.viewer.move_indices_to_layer(erase_indices, PointCloudViewer.LAYER_NOISE, respect_lock=True)
+            if len(erase_indices) > 0 else 0
+        )
+        n_ov = self.viewer.commit_overlay_erase()
         self._clear_selection()
-        if moved > 0:
-            self.log_text.append(f"⚡ 即時消去: {moved:,} 点をノイズレイヤーへ移動しました (Ctrl+Zで取消可)")
-            self.status_label.setText(f"⚡ {moved:,} 点を即座にノイズ消去しました (Ctrl+Zで元に戻せます)")
-            self.show_toast(f"⚡ {moved:,} 点を即消去しました")
+        if moved > 0 or n_ov > 0:
+            what = erase_message(moved, n_ov)
+            self.log_text.append(f"⚡ 即時消去: {what}しました (Ctrl+Zで取消可)")
+            self.status_label.setText(f"⚡ {what}しました (Ctrl+Zで元に戻せます)")
+            self.show_toast(f"⚡ {moved + n_ov:,} 点を即消去しました")
 
     def _confirm_polygon_selection(self):
         if len(self.viewer.polygon_points) >= 3:
@@ -4256,7 +4266,14 @@ class MainWindow(QMainWindow):
             self.viewer.set_section_overlay(
                 result.points, result.colors, result.intensities, result.scan_ids,
                 n_in_box=result.n_in_box, capped=result.capped,
+                rows=result.rows, scan_steps=[getattr(s, "subsample_step", None) for s in self.current_scans],
             )
+            n_edit = self.viewer.overlay_editable_count()
+            if n_edit:
+                self.log_text.append(
+                    f"全点表示: 読み込みで飛ばされた {n_edit:,} 点も、矩形・円・多角形・ブラシで選んで消せます"
+                    "（消した点は「全点で保存」で除かれます）"
+                )
             cap_txt = f"（上限 {max_points // 10000:,} 万点で間引き）" if result.capped else ""
             cache_txt = ""
             if result.cache_used_scans:
@@ -5634,28 +5651,38 @@ class MainWindow(QMainWindow):
 
     def _on_points_selected(self, indices: list):
         n = len(indices)
+        n_ov = self.viewer.overlay_selection_count()   # 全点表示（断面の読み直し）の点で、選んでいる物。消せるのは Del だけ
+        ov_txt = f" + 全点表示の {n_ov:,} 点" if n_ov else ""
         self.manual_status_label.setText(
-            f"選択中: {n:,} 点 | [Del]削除 / [選択点を移動]で別レイヤーへ"
+            f"選択中: {n:,} 点{ov_txt} | [Del]削除 / [選択点を移動]で別レイヤーへ"
         )
         self._update_floating_selection_bar(n)
+        if n == 0 and n_ov > 0 and hasattr(self, "floating_sel_badge"):
+            self.floating_del_btn.setEnabled(True)
+            self.floating_clear_btn.setEnabled(True)
+            self.floating_sel_badge.setText(f"✨ 全点表示の {n_ov:,} 点を選択中:")
 
     def _delete_selected_points(self):
         """選択されている点をノイズレイヤーへ移動する (手動削除)"""
         selected_idx = self.viewer.selected_indices
-        if len(selected_idx) == 0 or self.viewer.layer_mask is None:
+        n_ov_sel = self.viewer.overlay_selection_count()   # 全点表示（断面の読み直し）の点で、選んでいる物
+        if (len(selected_idx) == 0 and n_ov_sel == 0) or self.viewer.layer_mask is None:
             return
 
         # Undoスタックに直前のレイヤースナップショットを退避
         self._push_layer_undo_state()
 
         del_count = len(selected_idx)
+        n_ov = self.viewer.erase_overlay_selection()   # 本体の選択を入れ替える前に消す（入れ替えると、重ね描きの選択は無効になる）
         # ノイズレイヤーへ移動
-        self.viewer.move_indices_to_noise(selected_idx)
+        if del_count > 0:
+            self.viewer.move_indices_to_noise(selected_idx)
         self._clear_selection()
 
-        self.log_text.append(f"手動削除: {del_count:,} 点をノイズレイヤーへ移動しました (Undo可能)")
-        self.status_label.setText(f"{del_count:,} 点をノイズレイヤーへ移動しました")
-        self.show_toast(f"🗑 {del_count:,} 点をノイズレイヤーへ移動しました (Ctrl+Zで取消可)")
+        what = erase_message(del_count, n_ov)
+        self.log_text.append(f"手動削除: {what}しました (Undo可能)")
+        self.status_label.setText(f"{what}しました")
+        self.show_toast(f"🗑 {what}しました (Ctrl+Zで取消可)")
 
     def _undo_action(self):
         """直前のレイヤー状態または編集を元に戻す (Ctrl+Z)"""
@@ -5780,10 +5807,12 @@ class MainWindow(QMainWindow):
             box.setText(
                 f"現在の点群は、メモリ保護のため元データ {orig_sum:,} 点を {cur_sum:,} 点に間引いて読み込んでいます。"
             )
+            n_marks = self.viewer.fullres_marks_count()
             box.setInformativeText(
                 "【全点で保存】 元ファイルを全点で読み直し、この画面で決めたノイズ判定を全点へ写して出力します。"
                 "出力は元データと同じ点密度になります（1 億点で数分〜十数分）。\n\n"
                 f"【間引いたまま保存】 読み込んでいる {cur_sum:,} 点だけを出力します。"
+                + (f"\n\n全点表示で消した {n_marks:,} 点は、【全点で保存】のときだけ反映されます。" if n_marks else "")
             )
             btn_full = box.addButton("全点で保存（推奨）", QMessageBox.AcceptRole)
             btn_sub = box.addButton("間引いたまま保存", QMessageBox.DestructiveRole)
@@ -5818,6 +5847,10 @@ class MainWindow(QMainWindow):
 
         if use_fullres:
             self.save_worker = FullResolutionSaveWorker(out_path, self.current_scans, layer_mask, split_masks=split_masks)
+            apply_marks_to_save_worker(
+                self.save_worker, self.viewer, export_mode,
+                self.target_layer_combo.currentData() if hasattr(self, "target_layer_combo") else None,
+            )
         else:
             self.save_worker = FileSaveWorker(out_path, self.current_scans, layer_mask, split_masks=split_masks)
 
