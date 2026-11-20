@@ -33,6 +33,64 @@ CULL_NEAR_W = 0.5               # 視点からの奥行きがこれより小さ�
 CULL_SKIP_FRACTION = 0.6        # 残る区画がこの割合より多ければ、ふるっても得が無いので、全部の点を候補にする
 
 
+def block_boxes_of(points: np.ndarray, block: int):
+    """点を、番号の順に block 点ずつの区画に分けたときの、区画ごとの箱（最小 (区画数, 3), 最大 (区画数, 3)。float64）"""
+    n = len(points)
+    n_full = n // block
+    n_blocks = (n + block - 1) // block
+    lo = np.empty((n_blocks, 3), dtype=np.float64)
+    hi = np.empty((n_blocks, 3), dtype=np.float64)
+    if n_full:
+        body = points[: n_full * block].reshape(n_full, block, 3)
+        lo[:n_full] = body.min(axis=1)
+        hi[:n_full] = body.max(axis=1)
+    if n_blocks > n_full:
+        tail = points[n_full * block:]
+        lo[n_full] = tail.min(axis=0)
+        hi[n_full] = tail.max(axis=0)
+    return lo, hi
+
+
+def blocks_near_screen_box(lo, hi, mvp, width: float, height: float,
+                           min_x: float, max_x: float, min_y: float, max_y: float):
+    """
+    画面上の四角（min_x〜max_x, min_y〜max_y [px]）の中に点が映りうる区画の印（真偽の配列）。
+    lo, hi は区画ごとの箱。mvp は clip = [x, y, z, 1] @ mvp の行列（_project_to_screen と同じ）。
+    ふるえないとき（画面の大きさが 0・行列が数でない、など）は None。
+    点群の本体（SelectionCullMixin）と、全点表示の重ね描き（gui/overlay_edit.py）が、同じ計算を使う
+    """
+    width, height = float(width), float(height)
+    if width <= 0 or height <= 0:
+        return None
+    mvp = np.asarray(mvp, dtype=np.float64)
+    corners = np.array([min_x, max_x, min_y, max_y], dtype=np.float64)
+    if not (np.isfinite(mvp).all() and np.isfinite(corners).all()):
+        return None
+    # 画面の位置 → 正規化した座標（_project_to_screen の式の逆）
+    ax0 = (min_x - CULL_PAD_PX) / width * 2.0 - 1.0
+    ax1 = (max_x + CULL_PAD_PX) / width * 2.0 - 1.0
+    ay0 = 1.0 - (max_y + CULL_PAD_PX) / height * 2.0
+    ay1 = 1.0 - (min_y - CULL_PAD_PX) / height * 2.0
+    clip_x, clip_y, clip_w = mvp[:, 0], mvp[:, 1], mvp[:, 3]
+    # w > 0 の点について: 四角の中 ⇔ 4 つの式がどれも 0 以上（どれも点の座標の 1 次式）
+    sides = (clip_x - ax0 * clip_w, ax1 * clip_w - clip_x, clip_y - ay0 * clip_w, ay1 * clip_w - clip_y)
+
+    def largest(plane):      # 箱の中での、式の最大
+        normal = plane[:3]
+        return np.where(normal >= 0, hi, lo) @ normal + plane[3]
+
+    def smallest(plane):
+        normal = plane[:3]
+        return np.where(normal >= 0, lo, hi) @ normal + plane[3]
+
+    in_front = largest(clip_w) > 0.0            # 視点より前に点がありうる（後ろの点は、もともと選ばれない）
+    near = smallest(clip_w) < CULL_NEAR_W       # 視点のすぐ近くに点がありうる区画は、面では捨てない
+    inside = np.ones(len(lo), dtype=bool)
+    for plane in sides:
+        inside &= largest(plane) >= 0.0
+    return in_front & (near | inside)
+
+
 class SelectionCullMixin:
     """PointCloudViewer に混ぜる、選択の候補のふるい"""
 
@@ -45,19 +103,7 @@ class SelectionCullMixin:
         cache = self._cull_boxes
         if cache is not None and cache[0]() is pc:
             return cache[1], cache[2]
-        n = len(pc)
-        n_full = n // CULL_BLOCK
-        n_blocks = (n + CULL_BLOCK - 1) // CULL_BLOCK
-        lo = np.empty((n_blocks, 3), dtype=np.float64)
-        hi = np.empty((n_blocks, 3), dtype=np.float64)
-        if n_full:
-            body = pc[: n_full * CULL_BLOCK].reshape(n_full, CULL_BLOCK, 3)
-            lo[:n_full] = body.min(axis=1)
-            hi[:n_full] = body.max(axis=1)
-        if n_blocks > n_full:
-            tail = pc[n_full * CULL_BLOCK:]
-            lo[n_full] = tail.min(axis=0)
-            hi[n_full] = tail.max(axis=0)
+        lo, hi = block_boxes_of(pc, CULL_BLOCK)
         self._cull_boxes = (weakref.ref(pc), lo, hi)
         return lo, hi
 
@@ -69,34 +115,8 @@ class SelectionCullMixin:
         width, height = float(self.width()), float(self.height())
         if width <= 0 or height <= 0:
             return None
-        mvp = np.asarray(self._mvp_matrix(), dtype=np.float64)      # clip = [x, y, z, 1] @ mvp（_project_to_screen と同じ行列）
-        corners = np.array([min_x, max_x, min_y, max_y], dtype=np.float64)
-        if not (np.isfinite(mvp).all() and np.isfinite(corners).all()):
-            return None
-        # 画面の位置 → 正規化した座標（_project_to_screen の式の逆）
-        ax0 = (min_x - CULL_PAD_PX) / width * 2.0 - 1.0
-        ax1 = (max_x + CULL_PAD_PX) / width * 2.0 - 1.0
-        ay0 = 1.0 - (max_y + CULL_PAD_PX) / height * 2.0
-        ay1 = 1.0 - (min_y - CULL_PAD_PX) / height * 2.0
-        clip_x, clip_y, clip_w = mvp[:, 0], mvp[:, 1], mvp[:, 3]
-        # w > 0 の点について: 四角の中 ⇔ 4 つの式がどれも 0 以上（どれも点の座標の 1 次式）
-        sides = (clip_x - ax0 * clip_w, ax1 * clip_w - clip_x, clip_y - ay0 * clip_w, ay1 * clip_w - clip_y)
         lo, hi = self._block_boxes()
-
-        def largest(plane):      # 箱の中での、式の最大
-            normal = plane[:3]
-            return np.where(normal >= 0, hi, lo) @ normal + plane[3]
-
-        def smallest(plane):
-            normal = plane[:3]
-            return np.where(normal >= 0, lo, hi) @ normal + plane[3]
-
-        in_front = largest(clip_w) > 0.0            # 視点より前に点がありうる（後ろの点は、もともと選ばれない）
-        near = smallest(clip_w) < CULL_NEAR_W       # 視点のすぐ近くに点がありうる区画は、面では捨てない
-        inside = np.ones(len(lo), dtype=bool)
-        for plane in sides:
-            inside &= largest(plane) >= 0.0
-        return in_front & (near | inside)
+        return blocks_near_screen_box(lo, hi, self._mvp_matrix(), width, height, min_x, max_x, min_y, max_y)
 
     def _selection_candidates(self, min_x: float, max_x: float, min_y: float, max_y: float):
         """

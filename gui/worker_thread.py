@@ -741,6 +741,24 @@ class FullResolutionSaveWorker(QThread):
         self.scan_stats: List[Any] = []  # (スキャン名, TransferStats) の一覧（検証・ログ用）
         self.total_orphans = 0
         self.total_full_points = 0
+        # 全点表示で利用者が消した点の印（core/fullres_marks.py の写し: スキャンの番号 → 行の番号）と、その点に付けるラベル。
+        # 近くの読み込み済みの点から引き継いだ判定より優先する。set_marks() で渡す（渡さなければ今までどおり）
+        self.marks = None
+        self.marks_label = 0
+        self.marks_scan_labels: Dict[int, int] = {}
+        self.total_marked = 0
+
+    def set_marks(self, marks, label: int = 0, scan_labels: Optional[Dict[int, int]] = None) -> None:
+        """
+        全点表示で消した点の印を渡す（写しを取るので、保存のあいだに画面で印が変わっても影響しない）。
+        label は、その点に付けるラベル:
+        1 つのファイルへ保存するときは 0（除く）か KEEP_LABEL（ノイズだけを保存するとき）、
+        レイヤーごとに分けて保存するときは、ノイズのレイヤーの番号か ORPHAN_LABEL（どのファイルにも入れない）。
+        scan_labels は、スキャン（scans の添字）ごとに別のラベルにしたいとき（表示中だけを保存するときの、隠したスキャン）
+        """
+        self.marks = marks.copy() if (marks is not None and not marks.is_empty()) else None
+        self.marks_label = int(label)
+        self.marks_scan_labels = {int(k): int(v) for k, v in (scan_labels or {}).items()}
 
     def cancel(self):
         self._is_cancelled = True
@@ -787,6 +805,7 @@ class FullResolutionSaveWorker(QThread):
         self._validate_sources()
         self.scan_stats = []
         self.total_orphans = 0
+        self.total_marked = 0
 
         # 判定点のラベル: 単一ファイルは 1=保存 / 0=除外、分割保存はレイヤー番号（どれにも入らなければ除外）
         if self.split_masks:
@@ -826,7 +845,7 @@ class FullResolutionSaveWorker(QThread):
             return writers[li]
 
         try:
-            for s in self.scans:
+            for scan_pos, s in enumerate(self.scans):
                 n_j = len(s.points)
                 labels_j = labels_all[offset : offset + n_j]
                 offset += n_j
@@ -855,12 +874,22 @@ class FullResolutionSaveWorker(QThread):
 
                 sinks: Dict[int, ScanStreamSink] = {}
                 n_full = 0
+                n_marked = 0
                 self.progress_changed.emit(
                     pct_of(done_full), f"スキャン「{name}」を全点で読み直し、判定を転写中...", f"0 / {n_orig:,} 点"
                 )
-                for raw, xyz in iter_scan_stream_chunks(tpl, chunk, is_cancelled=lambda: self._is_cancelled):
+                for raw, xyz, rows in iter_scan_stream_chunks(
+                    tpl, chunk, is_cancelled=lambda: self._is_cancelled, with_rows=True
+                ):
                     self._check_cancelled()
                     labels = lt.labels_for(xyz)
+                    if self.marks is not None:
+                        # 利用者が全点表示で消した点は、引き継いだ判定に関わらず、決めたラベルにする。
+                        # 行の番号は、流し読みが返した物を使う（数でない座標の点が除かれていても、ずれない）
+                        marked = self.marks.mask_for_rows(scan_pos, rows)
+                        if marked is not None:
+                            labels[marked] = self.marks_scan_labels.get(scan_pos, self.marks_label)
+                            n_marked += int(np.count_nonzero(marked))
                     targets = (
                         [int(v) for v in np.unique(labels) if v >= 0] if self.split_masks
                         else ([self.KEEP_LABEL] if np.any(labels == self.KEEP_LABEL) else [])
@@ -891,6 +920,7 @@ class FullResolutionSaveWorker(QThread):
                 stats = lt.stats
                 self.scan_stats.append((name, stats))
                 self.total_orphans += int(stats.n_orphan)
+                self.total_marked += n_marked
                 total_saved += kept_in_scan
                 total_excluded += n_full - kept_in_scan
                 done_full += n_full
@@ -898,6 +928,7 @@ class FullResolutionSaveWorker(QThread):
                     f"全点転写: 「{name}」 元 {n_full:,} 点 / 判定点 {n_j:,} 点 (間引き k={stats.stride}, 許容半径 {stats.factor:.0f}×点間隔)"
                     f" → 保存 {kept_in_scan:,} 点, 除外 {n_full - kept_in_scan:,} 点 (うち孤立点 {stats.n_orphan:,} 点,"
                     f" 引き継ぎ最大距離 {stats.max_inherit_distance:.3f}m)"
+                    + (f", 全点表示で消した点 {n_marked:,} 点を反映" if n_marked else "")
                 )
                 del lt, sinks
 
@@ -919,6 +950,7 @@ class FullResolutionSaveWorker(QThread):
         log_info(
             f"全点転写保存 完了: 元 {self.total_full_points:,} 点 → 保存 {total_saved:,} 点, 除外 {total_excluded:,} 点"
             f" (孤立点 {self.total_orphans:,} 点), {len(writers)} ファイル, {elapsed:.1f} 秒"
+            + (f", 全点表示で消した点 {self.total_marked:,} 点を反映" if self.total_marked else "")
         )
         if self.split_masks:
             parts = [f"{os.path.basename(writer_paths[li])} ({writers[li].point_count:,}点)" for li in writers]

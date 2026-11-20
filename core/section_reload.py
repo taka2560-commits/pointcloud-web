@@ -8,8 +8,9 @@
 全点をメモリに載せないので、ボックス内の点数（上限 max_points）ぶんのメモリで済む。
 
 - スキャンの cartesianBounds（ヘッダの範囲）がボックスに掛からないスキャンは読まずに飛ばす。
-- 読み直した点は表示専用で、選択・ノイズ移動の対象にはならない（編集は読み込み済みの点で行い、
-  保存時の全点転写が元ファイルの全点へ写す）。
+- 読み直した点は、元ファイルでの行の番号（rows）と一緒に返す。画面は、読み込みで飛ばされた点を、この番号で選んで消せる
+  （2026-11-20 から。gui/overlay_edit.py・core/fullres_marks.py。それまでは表示専用だった）。
+  自動フィルタと連結塊は、今までどおり読み込み済みの点だけが相手で、保存時の全点転写が元ファイルの全点へ写す。
 - ボックス内の点が max_points を超えたら、走査しながら 2 分の 1 ずつ間引いて（ほぼ一様）上限に収める。
   ボックス内の総点数 n_in_box は間引き前の正確な値を返す。
 - キャッシュ（core/section_cache.py）: libe57 には読み飛ばしが無く毎回全点のデコードになる（5.4 億点で約 100 秒）ので、
@@ -125,6 +126,9 @@ class SectionReloadResult:
     n_chunks_total: int = 0            # キャッシュ使用スキャンの総チャンク数
     cache_dir: Optional[str] = None    # 使った／作ったキャッシュフォルダ（無ければ None）
     cache_bytes: int = 0               # キャッシュフォルダの大きさ（バイト）
+    # (M,) int64 元ファイルのスキャンの中での行の番号（0 始まり）。分からない点は -1。
+    # 全点表示の点を消すとき、この番号で覚える（core/fullres_marks.py）。読み込み・保存と同じ数え方
+    rows: Optional[np.ndarray] = None
 
     @property
     def n_points(self) -> int:
@@ -228,18 +232,24 @@ class _Accumulator:
         self.cols: List[np.ndarray] = []
         self.ints: List[np.ndarray] = []
         self.sids: List[np.ndarray] = []
+        self.rows: List[np.ndarray] = []
         self.total = 0
         self.keep_step = 1
         self.capped = False
 
-    def add(self, pts: np.ndarray, cols: Optional[np.ndarray], ints: Optional[np.ndarray], scan_id: int) -> None:
+    def add(self, pts: np.ndarray, cols: Optional[np.ndarray], ints: Optional[np.ndarray], scan_id: int,
+            rows: Optional[np.ndarray] = None) -> None:
         if len(pts) == 0:
             return
         if self.keep_step > 1:
             pts = pts[:: self.keep_step]
             cols = cols[:: self.keep_step] if cols is not None else None
             ints = ints[:: self.keep_step] if ints is not None else None
+            rows = rows[:: self.keep_step] if rows is not None else None
         n = len(pts)
+        self.rows.append(
+            np.ascontiguousarray(rows, dtype=np.int64) if rows is not None else np.full(n, -1, dtype=np.int64)
+        )
         self.pts.append(np.ascontiguousarray(pts, dtype=np.float64))
         if self.want_colors:
             self.cols.append(
@@ -261,6 +271,7 @@ class _Accumulator:
         self.cols = [c[::2] for c in self.cols]
         self.ints = [i[::2] for i in self.ints]
         self.sids = [s[::2] for s in self.sids]
+        self.rows = [r[::2] for r in self.rows]
         self.total = sum(len(p) for p in self.pts)
         self.keep_step *= 2
         self.capped = True
@@ -271,6 +282,10 @@ class _Accumulator:
         ints = (np.concatenate(self.ints) if self.ints else np.empty(0, dtype=np.float32)) if self.want_ints else None
         sids = np.concatenate(self.sids) if self.sids else np.empty(0, dtype=np.int32)
         return pts, cols, ints, sids
+
+    def finish_rows(self) -> np.ndarray:
+        """finish() と同じ並びの、行の番号"""
+        return np.concatenate(self.rows) if self.rows else np.empty(0, dtype=np.int64)
 
 
 def _xyz_storage_kind(file_schemas: Dict[str, FieldSchema]) -> Tuple[str, Optional[List[float]], Optional[List[float]]]:
@@ -305,8 +320,9 @@ def _chunk_colors(chunk: Dict[str, np.ndarray], n: int, divisor: float) -> np.nd
 
 def _decode_scan_chunks(s, cache: Optional[SectionCache], chunk_size: int, state: Dict[str, bool]):
     """
-    1 スキャンを元ファイルからデコードして (ローカル座標 float64 (n,3), 色 0〜1 or None, 強度 or None, 読んだ点数) を
-    チャンクごとに返すジェネレータ。cache が書き込み可能ならキャッシュへも書く。
+    1 スキャンを元ファイルからデコードして
+    (ローカル座標 float64 (n,3), 色 0〜1 or None, 強度 or None, 読んだ点数, 行の番号 int64 (n,)) を
+    チャンクごとに返すジェネレータ。行の番号は、スキャンの中での 0 始まりの順番（数でない座標の点を除いても、ずれない）。cache が書き込み可能ならキャッシュへも書く。
     読み切ったら確定して state["built"]=True、途中で止まれば（例外・close）書きかけの部分ファイルを消す。
     state["building"] は書き込み中かどうか（進捗メッセージ用）。
     """
@@ -325,6 +341,7 @@ def _decode_scan_chunks(s, cache: Optional[SectionCache], chunk_size: int, state
         writer = cache.writer(int(s.source_scan_index), n_declared, has_rgb, has_int, xyz_kind, xyz_scale, xyz_offset)
     state["building"] = writer is not None
     completed = False
+    row_base = 0
     try:
         for chunk in iter_e57_point_chunks(
             s.source_file, int(s.source_scan_index), fields, chunk_size=chunk_size, raw_fields=(_CARTESIAN if raw_xyz else None)
@@ -333,6 +350,8 @@ def _decode_scan_chunks(s, cache: Optional[SectionCache], chunk_size: int, state
             if cx is None or "cartesianY" not in chunk or "cartesianZ" not in chunk:
                 raise ValueError(f"スキャン「{name}」の読み直しで直交座標が読めませんでした: {s.source_file}")
             n_chunk = len(cx)
+            rows = np.arange(row_base, row_base + n_chunk, dtype=np.int64)
+            row_base += n_chunk
             if raw_xyz:
                 store = np.column_stack([chunk[k] for k in _CARTESIAN]).astype(np.int64, copy=False)
                 local = local_from_stored(store, "int64", xyz_scale, xyz_offset)
@@ -347,6 +366,7 @@ def _decode_scan_chunks(s, cache: Optional[SectionCache], chunk_size: int, state
                     keep = np.flatnonzero(finite)
                     store = store[keep]
                     local = local[keep]
+                    rows = rows[keep]
                     chunk = {k: v[keep] for k, v in chunk.items()}
             n_fin = len(local)
             rgb01 = _chunk_colors(chunk, n_fin, divisor) if (has_rgb and (writer is not None or n_fin > 0)) else None
@@ -364,7 +384,7 @@ def _decode_scan_chunks(s, cache: Optional[SectionCache], chunk_size: int, state
                     writer = None
                     state["building"] = False
             del chunk, store
-            yield local, rgb01, ints, n_chunk
+            yield local, rgb01, ints, n_chunk, rows
         completed = True
     finally:
         if writer is not None:
@@ -425,7 +445,7 @@ def ensure_section_cache(
         scan_read = 0
         gen = _decode_scan_chunks(s, cache, chunk_size, state)
         try:
-            for _local, _rgb, _ints, n_chunk in gen:
+            for _local, _rgb, _ints, n_chunk, _rows in gen:
                 if is_cancelled is not None and is_cancelled():
                     raise InterruptedError("キャッシュ作成がユーザーによって中止されました。")
                 if not state["building"]:
@@ -548,6 +568,8 @@ def reload_section_points(
             # --- キャッシュから: 箱に掛かるチャンクだけ読む ---
             m = len(cached.chunks)
             chunks_total += m
+            # キャッシュは「数でない座標の点」を除いて詰めてある。1 点も除いていなければ、詰めた順番 = 元ファイルの行の番号
+            rows_known = int(cached.n_valid) == n_declared
             hit = [k for k in range(m) if box.may_intersect(to_display_coordinates(s, cached.chunk_corners_local(k)))]
             _report(f"スキャン「{name}」をキャッシュから読み込み中 ({len(hit):,}/{m:,} チャンク, ボックス内 {n_in_box:,} 点)")
             for j, k in enumerate(hit):
@@ -563,6 +585,7 @@ def reload_section_points(
                         rgb01[sel] if rgb01 is not None else None,
                         ints[sel] if ints is not None else None,
                         s_idx,
+                        rows=(cached.chunk_slice(k)[0] + sel.astype(np.int64)) if rows_known else None,
                     )
                 del local, disp
                 done_weight = scan_start_weight + int(n_declared * (j + 1) / max(1, len(hit)))
@@ -578,7 +601,7 @@ def reload_section_points(
         scan_read = 0
         gen = _decode_scan_chunks(s, cache, chunk_size, state)
         try:
-            for local, rgb01, ints, n_chunk in gen:
+            for local, rgb01, ints, n_chunk, rows in gen:
                 _check()
                 disp = to_display_coordinates(s, local)
                 sel = np.flatnonzero(box.contains(disp))
@@ -591,6 +614,7 @@ def reload_section_points(
                         rgb01[sel] if rgb01 is not None else None,
                         ints[sel] if ints is not None else None,
                         s_idx,
+                        rows=rows[sel],
                     )
                 del local, disp
                 done_weight = scan_start_weight + min(n_declared, scan_read)
@@ -603,10 +627,12 @@ def reload_section_points(
         done_weight = scan_start_weight + n_declared
 
     pts, cols, ints, sids = acc.finish()
+    rows_out = acc.finish_rows()
     capped = acc.capped
     if acc.max_points > 0 and len(pts) > acc.max_points:
         step = int(math.ceil(len(pts) / acc.max_points))
         pts, sids = pts[::step], sids[::step]
+        rows_out = rows_out[::step]
         cols = cols[::step] if cols is not None else None
         ints = ints[::step] if ints is not None else None
         capped = True
@@ -628,6 +654,7 @@ def reload_section_points(
         colors=np.ascontiguousarray(cols, dtype=np.float32) if cols is not None else None,
         intensities=np.ascontiguousarray(ints, dtype=np.float32) if ints is not None else None,
         scan_ids=np.ascontiguousarray(sids, dtype=np.int32),
+        rows=np.ascontiguousarray(rows_out, dtype=np.int64),
         n_in_box=int(n_in_box),
         n_read=int(n_read),
         n_scans_read=len(plan),

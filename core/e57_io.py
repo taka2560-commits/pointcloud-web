@@ -268,8 +268,12 @@ class E57ScanData:
         source_file: Optional[str] = None,
         source_scan_index: Optional[int] = None,
         source_signature: Optional[Tuple[int, int]] = None,
+        subsample_step: Optional[int] = None,
     ):
         self.scan_index = scan_index
+        # 読み込みの間引きの間隔（元ファイルの行 0, k, 2k, … を読み込んだ。1 = 全点）。分からなければ None。
+        # 断面の全点表示で「どの点が読み込み済みか」を行の番号から見分けるのに使う（core/fullres_marks.py）
+        self.subsample_step: Optional[int] = int(subsample_step) if subsample_step else None
         # 読み込み元（全点転写保存で元ファイルを読み直すために使う）。合成データでは None
         self.source_file: Optional[str] = source_file
         self.source_scan_index: Optional[int] = source_scan_index
@@ -472,6 +476,7 @@ class E57ScanData:
             source_scan_index=self.source_scan_index,
             source_signature=self.source_signature,
         )
+        # 点を抜き出した物は、行の番号と読み込んだ点の対応が崩れるので、間引きの間隔は引き継がない（None = 分からない）
         # 取り込み時の座標系変換状態を引き継ぐ（抽出後も「変換済み」であることを失わないため）
         filtered.coord_mode = getattr(self, "coord_mode", "cartesian")
         if self._initial_points_signature is None:
@@ -913,6 +918,7 @@ def iter_e57_scans(
                 source_file=source_abs,
                 source_scan_index=i,
                 source_signature=source_sig,
+                subsample_step=global_step,
             )
             yield scan_data
     finally:

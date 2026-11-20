@@ -37,6 +37,7 @@ from gui.display_patch import DisplayPatchMixin
 from gui.gl_state import begin_point_pass, end_point_pass
 from gui.layer_sync import LayerSyncMixin
 from gui.measure_text import measure_clipboard_text, measure_distance_text, measure_hud_lines, measure_status_text
+from gui.overlay_edit import OverlayEditMixin
 from gui.select_cull import SelectionCullMixin
 from gui.noise_palette import (
     MODE_NOISE_GLOW, MODE_NOISE_SPOT, apply_table as noise_apply_table, color_table as noise_color_table,
@@ -76,7 +77,7 @@ def wrap_hud_segments(text: str, max_width: int, measure) -> list:
     return lines
 
 
-class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, LayerSyncMixin, QOpenGLWidget):
+class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, OverlayEditMixin, LayerSyncMixin, QOpenGLWidget):
     """3D点群ビューアクラス"""
 
     # 選択された点インデックスリスト（Python の list をそのまま渡す。Signal(list) にすると、Qt が要素ごとに写すので、
@@ -1251,6 +1252,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         """点群データを設定する"""
         self._clear_color_cache()
         self.clear_section_overlay()  # 重ね描きは前の点群・前のボックスのもの
+        self._fullres_marks_reset()   # 全点表示で消した点の印も、前の点群のもの（gui/overlay_edit.py）
         self.clear_measure_points()  # 前の点群の計測点は新しい点群では無効
         if points is None or len(points) == 0:
             self.coord_mode = "cartesian"
@@ -1343,6 +1345,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         """バックグラウンドで前処理済みのデータを0ミリ秒で超高速バインド (UIフリーズ皆無)"""
         self._clear_color_cache()
         self.clear_section_overlay()
+        self._fullres_marks_reset()
         if preloaded is None or preloaded.points_raw is None or len(preloaded.points_raw) == 0:
             self.set_point_cloud(None)
             return
@@ -2233,6 +2236,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             filepath,
             layer_ids=self.layer_ids,
             meta_json=np.array(meta_json),
+            **self._fullres_marks_arrays(),   # 全点表示で消した点の印（gui/overlay_edit.py。無ければ何も足さない）
         )
 
     def load_layer_project(self, filepath: str) -> None:
@@ -2248,6 +2252,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
                 )
             meta_str = str(data["meta_json"].item())
             meta = json.loads(meta_str)
+            marks_data = self._fullres_marks_read(data)   # 全点表示で消した点の印（当てるのは、レイヤーを確かめ終わってから）
 
         new_layers: Dict[int, LayerInfo] = {}
         for item in meta.get("layers", []):
@@ -2276,6 +2281,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
                 self.LAYER_NOISE, "ノイズ (除去点)", False, False, (0.95, 0.25, 0.25), True, True
             )
 
+        self._fullres_marks_apply(marks_data)   # ファイルに無ければ、印は空になる
         self.layers = new_layers
         self.layer_ids = loaded_ids.copy()
         self._sync_mask_from_ids()
@@ -2563,11 +2569,15 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         scan_ids: Optional[np.ndarray] = None,
         n_in_box: int = 0,
         capped: bool = False,
+        rows: Optional[np.ndarray] = None,
+        scan_steps=None,
     ):
         """
-        断面ボックスを元ファイルから全点で読み直した点（表示座標）を、表示専用に重ね描きする。
+        断面ボックスを元ファイルから全点で読み直した点（表示座標）を重ね描きする。
         現在の断面ボックスに紐づき、ボックスが変わる・断面を解除する・点群を入れ替えると自動で消える。
-        選択・ノイズ移動・計測の対象にはならない。
+        rows（元ファイルでの行の番号）と scan_steps（スキャンごとの読み込みの間引きの間隔）を渡すと、読み込みで飛ばされた点を
+        矩形・円・多角形・ブラシで選んで消せる（gui/overlay_edit.py。2026-11-20 から）。渡さなければ表示専用。
+        計測の対象にはならない。
         """
         if self.points_centered is None or points_world is None or len(points_world) == 0 or not self.is_section_active():
             self.clear_section_overlay()
@@ -2590,6 +2600,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         self.overlay_capped = bool(capped)
         self._overlay_box_key = self._section_box_key()
         self.overlay_kind = "section"
+        self._overlay_edit_attach(rows, sids, scan_steps)
         self._recolor_overlay()
         self.update()
 
@@ -2623,6 +2634,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         self.overlay_capped = bool(capped)
         self._overlay_box_key = self._section_box_key()
         self.overlay_kind = "lod"
+        self._overlay_edit_detach()   # 高精細表示（LOD）の重ね描きは、表示専用
         self._recolor_overlay()
         self.update()
 
@@ -2655,6 +2667,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         self.overlay_capped = False
         self._overlay_box_key = None
         self.overlay_kind = ""
+        self._overlay_edit_detach()
         self._vbo_overlay_dirty = True
 
     def _drop_overlay_if_box_changed(self):
@@ -2739,13 +2752,15 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             render_count = self._vbo_overlay_count
             if (self.is_rotating or self.is_panning) and render_count > 800000:
                 render_count = max(400000, render_count // 2)
-            gl.glDrawArrays(gl.GL_POINTS, 0, render_count)
+            self._overlay_draw_points(render_count)   # 消した点・読み込んだ点と同じ行は描かない（gui/overlay_edit.py）
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
         except Exception:
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, 0)
+            gl.glEnableClientState(gl.GL_COLOR_ARRAY)
             gl.glVertexPointer(3, gl.GL_FLOAT, 0, pts)
             gl.glColorPointer(3, gl.GL_FLOAT, 0, cols)
-            gl.glDrawArrays(gl.GL_POINTS, 0, len(pts))
+            self._overlay_draw_points(len(pts), use_vbo=False)
 
     def fit_to_screen(self):
         """全体フィット (F)"""
@@ -3756,11 +3771,16 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             modifiers = label_prefix
             label_prefix = "範囲選択"
         mods = modifiers if modifiers is not None else self._last_selection_modifiers
+        # 全点表示（断面の読み直しの重ね描き）の点も、同じ形で選ぶ（gui/overlay_edit.py）
+        ov_pick = self._overlay_pick_for(label_prefix)
+        ov_prior = self.overlay_selection()
+        had_selection = len(self.selected_indices) > 0
 
         # ⚡ 即時削除モード(囲み・なぞり即削除)がONかつCtrl(除外)が押されていない場合は1ステップでノイズ消去を発火
         if self.instant_delete_mode and not (mods & Qt.ControlModifier):
             erase_targets = np.asarray(new_selected, dtype=np.int64)
-            if len(erase_targets) > 0:
+            self._ov_pending_erase = ov_pick if len(ov_pick) > 0 else None
+            if len(erase_targets) > 0 or len(ov_pick) > 0:
                 self.instant_erase_requested.emit(erase_targets)
             else:
                 self.status_changed.emit(f"{label_prefix}: 対象範囲内に点はありませんでした")
@@ -3769,7 +3789,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         if (mods & Qt.ShiftModifier) and len(self.selected_indices) > 0:
             combined = np.union1d(self.selected_indices, new_selected).astype(np.int64)
             action_str = f"{label_prefix} (Shift追加)"
-        elif (mods & Qt.ControlModifier) and len(self.selected_indices) > 0:
+        elif (mods & Qt.ControlModifier) and (len(self.selected_indices) > 0 or len(ov_prior) > 0):
             combined = np.setdiff1d(self.selected_indices, new_selected).astype(np.int64)
             action_str = f"{label_prefix} (Ctrl除外)"
         else:
@@ -3777,10 +3797,13 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             action_str = label_prefix
 
         self.selected_indices = combined
+        self._overlay_set_selection(ov_pick, mods, had_selection, ov_prior)
         self._sync_selection_colors()
         self.update()
         self.point_selected.emit(self.selected_indices.tolist())
-        self.status_changed.emit(f"{action_str}完了: {len(self.selected_indices):,} 点を選択中")
+        n_ov = self.overlay_selection_count()
+        ov_txt = f" + 全点表示の {n_ov:,} 点" if n_ov else ""
+        self.status_changed.emit(f"{action_str}完了: {len(self.selected_indices):,} 点{ov_txt}を選択中")
 
     def invert_selection(self):
         """現在表示・断面内の選択可能な点群に対して、選択状態と非選択状態を反転する"""
@@ -3825,7 +3848,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             return
         cand_indices = self._selection_candidates(*box)
         if cand_indices is None:
-            return
+            return self._overlay_select_without_main("範囲選択")   # 本体に選べる点が無くても、全点表示の点は選べる
 
         pts = self.points_centered[cand_indices]
         scr_x, scr_y, valid_z = self._project_to_screen(pts)
@@ -3863,7 +3886,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
             float(poly[:, 0].min()), float(poly[:, 0].max()), float(poly[:, 1].min()), float(poly[:, 1].max())
         )
         if cand_indices is None:
-            return
+            return self._overlay_select_without_main("多角形選択")
 
         pts = self.points_centered[cand_indices]
         scr_x, scr_y, valid_z = self._project_to_screen(pts)
@@ -3901,7 +3924,7 @@ class PointCloudViewer(ColorPatchMixin, DisplayPatchMixin, SelectionCullMixin, L
         # なぞった所を囲む四角の近くにありうる点だけを候補にする（選ばれる点は、全点から探すときと同じ）
         cand_indices = self._selection_candidates(min_x, max_x, min_y, max_y)
         if cand_indices is None:
-            return
+            return self._overlay_select_without_main("ブラシ選択")
 
         pts = self.points_centered[cand_indices]
         scr_x, scr_y, valid_z = self._project_to_screen(pts)
